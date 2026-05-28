@@ -1,12 +1,17 @@
+CC = gcc
+CFLAGS = -O1
+LDADDCFLAGS = -lm
+
+all: run
 
 run: run.o
 	$(CC) $(CFLAGS) run.o -o $@ $(LDADDCFLAGS)
 
-run.o:
+run.o: run.c
 	$(CC) $(CFLAGS) -c run.c -o $@
 
 
-.PHONY: run clean
+.PHONY: clean all
 
 clean:
 	rm -f *.o run 
