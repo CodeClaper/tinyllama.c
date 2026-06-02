@@ -7,7 +7,7 @@ all: run
 run: run.o
 	$(CC) $(CFLAGS) run.o -o $@ $(LDADDCFLAGS)
 
-run.o: run.c
+run.o: run.c lib.h
 	$(CC) $(CFLAGS) -c run.c -o $@
 
 
