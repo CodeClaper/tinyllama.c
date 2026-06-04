@@ -1,3 +1,4 @@
+#include "def.h"
 
 typedef enum { 
     SECOND, 
@@ -9,4 +10,5 @@ typedef enum {
 
 int parse_int(char *s);
 float parse_float(char *s);
+char *get_key_name(Key *key);
 char *get_datetime(TIME_LEVEL level);

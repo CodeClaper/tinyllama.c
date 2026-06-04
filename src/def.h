@@ -1,6 +1,16 @@
+#include <stdint.h>
+
 #ifndef __DEF_H__
 #define __DEF_H__
 
+typedef uint8_t     u8;
+typedef uint16_t    u16;
+typedef uint32_t    u32;
+typedef uint64_t    u64;
+typedef int8_t      i8;
+typedef int16_t     i16;
+typedef int32_t     i32;
+typedef int64_t     i64;
 
 typedef struct {
     const char *model_path;
@@ -13,5 +23,40 @@ typedef struct {
     int ctx_size;
     int default_tokens;
 } ServerOptions;
+
+typedef struct {
+    u8 len;
+    char *content;
+} Key;
+
+typedef struct {
+    Key *key;
+    u32 type;
+    u64 value_pos;
+} KV;
+
+typedef struct {
+    Key *key;
+    u32 ndim;
+    u64 *dim;
+    u32 type;
+    u64 offset;
+} TensorInfo;
+
+typedef struct {
+    int fd;
+    u64 size;      
+    u32 version;
+    u64 n_kv;
+    u64 n_tensor;
+    u64 alignment;
+    KV  *kv;
+    TensorInfo *tensor;
+    u64 bytes;
+} Model;
+
+typedef struct {
+    Model *model;
+} Engine;
 
 #endif 

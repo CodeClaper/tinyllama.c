@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <bits/types/struct_timeval.h>
+#include <string.h>
 #include <time.h>
 #include <sys/time.h>
 #include <limits.h>
@@ -28,6 +29,14 @@ float parse_float(char *s) {
         slog(ERROR, "Bad float string value: %s.", s);
     }
     return (float) v;
+}
+
+/* Get key name. blk.0.attn_q.weight*/
+char *get_key_name(Key *key) {
+    char *s = smalloc(key->len + 1);
+    memcpy(s, key->content, key->len);
+    s[key->len] = '\0';
+    return s;
 }
 
 /* Get system datetime for ms level. 
