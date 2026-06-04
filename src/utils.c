@@ -1,9 +1,11 @@
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <bits/types/struct_timeval.h>
 #include <time.h>
 #include <sys/time.h>
 #include <limits.h>
+#include <math.h>
 #include "utils.h"
 #include "mm.h"
 #include "slog.h"
@@ -12,10 +14,20 @@
 int parse_int(char *s) {
     char *end = NULL;
     long v = strtol(s, &end, 10);
-    if (!s[0] || *end || v > INT_MAX) {
-        slog(ERROR, "Bad int string value: %s", s);
+    if (!s[0] || *end || v > INT_MAX || v < INT_MIN) {
+        slog(ERROR, "Bad int string value: %s.", s);
     }
     return (int) v;
+}
+
+/* Parse string value to float. */
+float parse_float(char *s) {
+    char *end = NULL;
+    float v = strtof(s, &end);
+    if (!s[0] || *end || isinff(v) || v > FLT_MAX) {
+        slog(ERROR, "Bad float string value: %s.", s);
+    }
+    return (float) v;
 }
 
 /* Get system datetime for ms level. 

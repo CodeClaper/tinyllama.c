@@ -8,4 +8,5 @@ typedef enum {
 
 
 int parse_int(char *s);
+float parse_float(char *s);
 char *get_datetime(TIME_LEVEL level);
