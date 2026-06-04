@@ -7,4 +7,5 @@ typedef enum {
 } TIME_LEVEL;
 
 
+int parse_int(char *s);
 char *get_datetime(TIME_LEVEL level);

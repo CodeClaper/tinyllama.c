@@ -1,9 +1,22 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <bits/types/struct_timeval.h>
 #include <time.h>
 #include <sys/time.h>
+#include <limits.h>
 #include "utils.h"
 #include "mm.h"
+#include "slog.h"
+
+/* Parse string value to int. */
+int parse_int(char *s) {
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (!s[0] || *end || v > INT_MAX) {
+        slog(ERROR, "Bad int string value: %s", s);
+    }
+    return (int) v;
+}
 
 /* Get system datetime for ms level. 
  * Supports four time level, SECOND, MILLISECOND, MICROSECOND, NANOSECOND. */
