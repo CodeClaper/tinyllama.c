@@ -7,8 +7,8 @@
 
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
-    fprintf(file, "Usage:   run [options]\n");
-    fprintf(file, "Example: run model.bin -n 256 -i \"Once upon a time\"\n");
+    fprintf(file, "Usage:   server [options]\n");
+    fprintf(file, "Example: server model.bin -n 256 -i \"Once upon a time\"\n");
     fprintf(file, "Options:\n");
     fprintf(file, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(file, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
