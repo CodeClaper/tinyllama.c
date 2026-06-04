@@ -8,16 +8,13 @@
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   server [options]\n");
-    fprintf(file, "Example: server model.bin -n 256 -i \"Once upon a time\"\n");
+    fprintf(file, "Example: server model.gguf -p 9987 -i \"Once upon a time\"\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -t <float>  temperature in [0,inf], default 1.0\n");
-    fprintf(file, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
-    fprintf(file, "  -s <int>    random seed, default time(NULL)\n");
-    fprintf(file, "  -n <int>    number of steps to run for, default 256. 0 = max_seq_len\n");
-    fprintf(file, "  -i <string> input prompt\n");
-    fprintf(file, "  -z <string> optional path to custom tokenizer\n");
-    fprintf(file, "  -m <string> mode: generate|chat, default: generate\n");
-    fprintf(file, "  -y <string> (optional) system prompt in chat mode\n");
+    fprintf(file, "  -m | --model  <string>  The model file path to run\n");
+    fprintf(file, "  -h | --host   <string>  The server host, defalt 127.0.0.1\n");
+    fprintf(file, "  -p | --port   <int>     The Port to listening, default 9987\n");
+    fprintf(file, "  -c | --ctx    <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -n | --tokens <int>     The default token size, defalt 393216\n");
     exit(exit_code);
 }
 
