@@ -33,7 +33,8 @@ void slog(LogLevel level, char *format, ...) {
     sprintf(buff, "[%s][%d][%s]:\t%s\n", 
             sys_time, getpid(), 
             LOG_LEVEL_NAME_LIST[level], message);
-    fprintf(stdout, "%s", buff);
+    if (level >= WARN) fprintf(stderr, "%s", buff);
+    else fprintf(stdout, "%s", buff);
     sfree(sys_time);
 
     if (level >= ERROR) exit(100);
