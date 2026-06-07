@@ -35,7 +35,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .ctx_size = 4096,
         .default_tokens = 393216
     };
-    for (int i = 0; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) usage(stdout, EXIT_SUCCESS);
         else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) so.engine.model_path = parse_arg(argc, argv, &i, arg);
