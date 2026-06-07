@@ -2,10 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include "def.h"
 #include "slog.h"
 #include "utils.h"
 #include "mm.h"
+#include "core.h"
 
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
@@ -51,21 +54,6 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     return so;
 }
 
-/* Load model. */
-static Model *model_load(const char *path) {
-    Model *m = smalloc(sizeof(Model));
-
-    int fd = open(path, O_RDONLY);
-    if (fd == -1) slog(ERROR, "Cannot open model, which path: %s.", path);
-    return m;
-}
-
-/* Load engine. */
-static Engine *engine_load(EngineOptons *opts) {
-    Engine *en = smalloc(sizeof(*en));
-    en->model = model_load(opts->model_path);
-    return en;
-}
 
 int main(int argc, char *argv[]) {
     ServerOptions so = parse_options(argc, argv);

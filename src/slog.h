@@ -14,3 +14,4 @@ static char* LOG_LEVEL_NAME_LIST[] = {
 };
 
 void slog(LogLevel level, char *format, ...);
+void slog_errno(char *format, ...);

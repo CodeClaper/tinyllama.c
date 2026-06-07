@@ -46,6 +46,7 @@ typedef struct {
 typedef struct {
     int fd;
     u64 size;      
+    u8  *map;
     u32 version;
     u64 n_kv;
     u64 n_tensor;
