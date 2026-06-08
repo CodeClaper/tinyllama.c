@@ -290,13 +290,15 @@ static void model_summary(Model *m) {
     model_get_u32(m, "block_count", &layers) || model_get_u32(m, "layer_count", &layers);
     model_get_u64(m, "context_length", &ctx_train);
 
-    printf("model: %s\n", get_key_name(name));
-    printf("arch: %s\n", get_key_name(arch));
-    printf("type: %s\n", get_key_name(type));
-    printf("gguf:  v%u, %" PRIu64 " metadata kvs, %" PRIu64 " tensors\n", m->version, m->n_kv, m->n_tensor);
-    if (layers) printf("layers: %u\n", layers);
-    if (ctx_train) printf("train context: %" PRIu64 "\n", ctx_train);
-    printf("file size: ");
+    printf("-|model: \t\t%s\n", get_key_name(name));
+    printf("-|arch: \t\t%s\n", get_key_name(arch));
+    printf("-|type: \t\t%s\n", get_key_name(type));
+    printf("-|version: \t\t%uv\n", m->version);
+    printf("-|n_kv: \t\t%" PRIu64 "\n", m->n_kv);
+    printf("-|n_tensor: \t\t%" PRIu64 "\n", m->n_tensor);
+    if (layers) printf("-|layers: \t\t%u\n", layers);
+    if (ctx_train) printf("-|train context: \t%" PRIu64 "\n", ctx_train);
+    printf("-|file size: \t\t");
     printf("%.2f GB\n", size_convert(m->size, GB));
 }
 
