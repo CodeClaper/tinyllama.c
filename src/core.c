@@ -121,6 +121,10 @@ static bool cursor_u32(Cursor *c, u32 *v) {
     return cursor_read(c, v, sizeof(*v));
 }
 
+static bool cursor_float(Cursor *c, float *v) {
+    return cursor_read(c, v, sizeof(*v));
+}
+
 static bool cursor_u64(Cursor *c, u64 *v) {
     return cursor_read(c, v, sizeof(*v));
 }
@@ -192,35 +196,6 @@ static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     return true;
 }
 
-static KV *model_find_kv(Model *m, char *key) {
-    for (u64 i = 0; i < m->n_kv; i++) {
-        if (key_streq(m->kv[i].key, key) || key_strcontains(m->kv[i].key, key)) 
-            return &m->kv[i];
-    }
-    return NULL;
-}
-
-static bool model_get_u32(Model *m, char *key, u32 *out) {
-    KV *kv = model_find_kv(m, key);
-    if (kv == NULL || kv->type != GGUF_VALUE_UINT32) return false;
-    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
-    return cursor_u32(&c, out);
-}
-
-static bool model_get_u64(Model *m, char *key, u64 *out) {
-    KV *kv = model_find_kv(m, key);
-    if (kv == NULL || (kv->type != GGUF_VALUE_UINT64 && kv->type != GGUF_VALUE_UINT32)) return false;
-    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
-    return cursor_u64(&c, out);
-}
-
-static bool model_get_key(Model *m, char *key, Key *out) {
-    KV *kv = model_find_kv(m, key);
-    if (kv == NULL || kv->type != GGUF_VALUE_STRING) return false;
-    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
-    return cursor_key(&c, out);
-}
-
 /* Load KVs.. */
 KV *kv_load(Model *m, Cursor *c) {
     KV *kv = scalloc(m->n_kv, sizeof(m->kv[0]));
@@ -275,37 +250,39 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
 
 /* Sumary model. */
 static void model_summary(Model *m) {
-    Key name = {0};
-    Key arch = {0};
-    Key type = {0};
-    u32 layers = 0;
-    u64 ctx_train = 0;
-    u32 n_head = 0;
-    u32 n_head_kv = 0;
-    u32 head_dim = 0;
-
-    model_get_key(m, "general.name", &name);
-    model_get_key(m, "general.architecture", &arch);
-    model_get_key(m, "general.type", &type);
-    model_get_u32(m, "block_count", &layers) || model_get_u32(m, "layer_count", &layers);
-    model_get_u64(m, "context_length", &ctx_train);
-    model_get_u32(m, "attention.head_count", &n_head);
-    model_get_u32(m, "attention.head_count_kv", &n_head_kv);
-    model_get_u32(m, "attention.key_length", &head_dim);
-
-    printf("-|name \t\t\t= %s\n", get_key_name(name));
-    printf("-|arch \t\t\t= %s\n", get_key_name(arch));
-    printf("-|type \t\t\t= %s\n", get_key_name(type));
-    printf("-|n_head \t\t= %d\n", n_head);
-    printf("-|n_head_kv \t\t= %d\n", n_head_kv);
-    printf("-|head_dim \t\t= %d\n", head_dim);
-    printf("-|version \t\t= v%u\n", m->version);
-    printf("-|n_kv \t\t\t= %" PRIu64 "\n", m->n_kv);
-    printf("-|n_tensor \t\t= %" PRIu64 "\n", m->n_tensor);
-    if (layers) printf("-|layers \t\t= %u\n", layers);
-    if (ctx_train) printf("-|train context \t= %" PRIu64 "\n", ctx_train);
-    printf("-|file size \t\t");
-    printf("= %.2fGB\n", size_convert(m->size, GB));
+    printf("Metadata:\n");
+    for (u64 i = 0; i < m->n_kv; i++) {
+        KV *kv = &m->kv[i];
+        printf("-|%-39s", get_key_name(kv->key));
+        Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+        switch (kv->type) {
+            case GGUF_VALUE_UINT32: {
+                u32 v = 0;
+                cursor_u32(&c, &v);
+                printf("\t\t= %d\n", v);
+                break;
+            }
+            case GGUF_VALUE_UINT64: {
+                u64 v = 0;
+                cursor_u64(&c, &v);
+                printf("\t\t= %"PRIu64 "\n", v);
+                break;
+            }
+            case GGUF_VALUE_FLOAT32: {
+                float v = 0;
+                cursor_float(&c, &v);
+                printf("\t\t= %.2f\n", v);
+                break;
+            }
+            case GGUF_VALUE_STRING: {
+                Key v = {0};
+                cursor_key(&c, &v);
+                printf("\t\t= %s\n", get_key_name(v));
+                break;
+            }
+            default: printf("\t\t--\n");
+        }
+    }
 }
 
 /* Load model. */
