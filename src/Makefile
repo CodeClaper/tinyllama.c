@@ -1,5 +1,9 @@
 CC = gcc
-CFLAGS = -O1
+ifdef DEBUG
+	CFLAGS = -O1 -g -Wall -gdwarf-2 -g3 -D DEBUG
+else
+	CFLAGS = -o3
+endif
 LDADDCFLAGS = -lm
 
 all: server
