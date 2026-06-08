@@ -289,17 +289,23 @@ static void model_summary(Model *m) {
     model_get_key(m, "general.type", &type);
     model_get_u32(m, "block_count", &layers) || model_get_u32(m, "layer_count", &layers);
     model_get_u64(m, "context_length", &ctx_train);
+    model_get_u32(m, "attention.head_count", &n_head);
+    model_get_u32(m, "attention.head_count_kv", &n_head_kv);
+    model_get_u32(m, "attention.key_length", &head_dim);
 
-    printf("-|model: \t\t%s\n", get_key_name(name));
-    printf("-|arch: \t\t%s\n", get_key_name(arch));
-    printf("-|type: \t\t%s\n", get_key_name(type));
-    printf("-|version: \t\t%uv\n", m->version);
-    printf("-|n_kv: \t\t%" PRIu64 "\n", m->n_kv);
-    printf("-|n_tensor: \t\t%" PRIu64 "\n", m->n_tensor);
-    if (layers) printf("-|layers: \t\t%u\n", layers);
-    if (ctx_train) printf("-|train context: \t%" PRIu64 "\n", ctx_train);
-    printf("-|file size: \t\t");
-    printf("%.2f GB\n", size_convert(m->size, GB));
+    printf("-|name \t\t\t= %s\n", get_key_name(name));
+    printf("-|arch \t\t\t= %s\n", get_key_name(arch));
+    printf("-|type \t\t\t= %s\n", get_key_name(type));
+    printf("-|n_head \t\t= %d\n", n_head);
+    printf("-|n_head_kv \t\t= %d\n", n_head_kv);
+    printf("-|head_dim \t\t= %d\n", head_dim);
+    printf("-|version \t\t= v%u\n", m->version);
+    printf("-|n_kv \t\t\t= %" PRIu64 "\n", m->n_kv);
+    printf("-|n_tensor \t\t= %" PRIu64 "\n", m->n_tensor);
+    if (layers) printf("-|layers \t\t= %u\n", layers);
+    if (ctx_train) printf("-|train context \t= %" PRIu64 "\n", ctx_train);
+    printf("-|file size \t\t");
+    printf("= %.2fGB\n", size_convert(m->size, GB));
 }
 
 /* Load model. */

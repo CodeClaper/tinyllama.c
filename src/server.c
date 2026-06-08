@@ -61,5 +61,4 @@ int main(int argc, char *argv[]) {
     ServerOptions so = parse_options(argc, argv);
     Engine *en = engine_load(&so.engine);
     if (so.inspect) engine_summary(en);
-    printf("Hello from tinyllama.c. \n");
 }
