@@ -1,8 +1,8 @@
 CC = gcc
 ifdef DEBUG
-	CFLAGS = -O1 -g -Wall -gdwarf-2 -g3 -D DEBUG
+	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG
 else
-	CFLAGS = -o3
+	CFLAGS = -O3
 endif
 LDADDCFLAGS = -lm
 
