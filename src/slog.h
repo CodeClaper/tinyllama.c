@@ -6,12 +6,5 @@ typedef enum {
     ERROR,      /* User error, will abort transaction. */
 } LogLevel;
 
-static char* LOG_LEVEL_NAME_LIST[] = { 
-    "INFO", 
-    "SUCCS", 
-    "WARN", 
-    "ERROR"
-};
-
 void slog(LogLevel level, char *format, ...);
 void slog_errno(char *format, ...);

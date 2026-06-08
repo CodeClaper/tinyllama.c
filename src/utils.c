@@ -32,22 +32,22 @@ float parse_float(char *s) {
 }
 
 /* Get key name. blk.0.attn_q.weight*/
-char *get_key_name(Key *key) {
-    char *s = smalloc(key->len + 1);
-    memcpy(s, key->content, key->len);
-    s[key->len] = '\0';
+char *get_key_name(Key key) {
+    char *s = smalloc(key.len + 1);
+    memcpy(s, key.content, key.len);
+    s[key.len] = '\0';
     return s;
 }
 
 /* Key and string equals. */
-bool key_streq(Key *key, char *s) {
+bool key_streq(Key key, char *s) {
     size_t len = strlen(s);
-    return key->len == len && memcmp(key->content, s, len);
+    return key.len == len && memcmp(key.content, s, len);
 }
 
 /* Keys equals. */
-bool key_eq(Key *k1, Key *k2) {
-    return k1->len == k2->len && memcmp(k1->content, k2->content, k1->len);
+bool key_eq(Key k1, Key k2) {
+    return k1.len == k2.len && memcmp(k1.content, k2.content, k1.len);
 }
 
 /* Get system datetime for ms level. 

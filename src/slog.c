@@ -9,6 +9,8 @@
 #include "utils.h"
 #include "mm.h"
 
+static char* LOG_LEVEL_NAME_LIST[] = { "INFO", "SUCCS", "WARN", "ERROR" };
+
 void slog(LogLevel level, char *format, ...) {
     size_t len;
     va_list ap;

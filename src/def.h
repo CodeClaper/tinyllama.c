@@ -3,6 +3,8 @@
 #ifndef __DEF_H__
 #define __DEF_H__
 
+#define MAX_DIMS 8
+
 typedef uint8_t     u8;
 typedef uint16_t    u16;
 typedef uint32_t    u32;
@@ -30,17 +32,19 @@ typedef struct {
 } Key;
 
 typedef struct {
-    Key *key;
+    Key key;
     u32 type;
     u64 value_pos;
 } KV;
 
 typedef struct {
-    Key *key;
+    Key key;
     u32 ndim;
-    u64 *dim;
+    u64 dim[MAX_DIMS];
     u32 type;
     u64 offset;
+    u64 n_element;
+    u64 bytes;
 } TensorInfo;
 
 typedef struct {
