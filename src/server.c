@@ -13,13 +13,14 @@
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   server [options]\n");
-    fprintf(file, "Example: server model.gguf -p 9987 -i \"Once upon a time\"\n");
+    fprintf(file, "Example: server model.gguf -p 9987 \n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m | --model  <string>  The model file path to run\n");
-    fprintf(file, "  -h | --host   <string>  The server host, defalt 127.0.0.1\n");
-    fprintf(file, "  -p | --port   <int>     The Port to listening, default 9987\n");
-    fprintf(file, "  -c | --ctx    <int>     The context size, defalt 4096\n");
-    fprintf(file, "  -n | --tokens <int>     The default token size, defalt 393216\n");
+    fprintf(file, "  -m | --model   <string>  The model file path to run\n");
+    fprintf(file, "  -h | --host    <string>  The server host, defalt 127.0.0.1\n");
+    fprintf(file, "  -p | --port    <int>     The Port to listening, default 9987\n");
+    fprintf(file, "  -c | --ctx     <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -n | --tokens  <int>     The default token size, defalt 393216\n");
+    fprintf(file, "  -i | --inspect <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
 
@@ -46,6 +47,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) so.inspect = true;
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
             usage(stderr, 2);
@@ -58,5 +60,6 @@ static ServerOptions parse_options(int argc, char *argv[]) {
 int main(int argc, char *argv[]) {
     ServerOptions so = parse_options(argc, argv);
     Engine *en = engine_load(&so.engine);
+    if (so.inspect) engine_summary(en);
     printf("Hello from tinyllama.c. \n");
 }

@@ -18,13 +18,6 @@
 #define GGUF_MAX_DIMS           8           /* GGUF max dims. */
 #define GGUF_DEFAULT_ALIGNMENT  32          /* GGUF default alignment. */
 
-typedef struct {
-    u8 *base;
-    u64 size;
-    u64 post;
-    char error[125];
-} Cursor;
-
 typedef enum {
     GGUF_VALUE_UINT8   = 0,
     GGUF_VALUE_INT8    = 1,
@@ -79,6 +72,14 @@ static const GGUFTypeInfo gguf_types[] = {
     [30] = {"bf16",     1,   2},
 };
 
+typedef struct {
+    u8 *base;
+    u64 size;
+    u64 post;
+    char error[125];
+} Cursor;
+
+
 static Cursor cursor_at(u8 *base, u64 size, u64 post) {
     Cursor c = {
         .base = base,
@@ -108,7 +109,6 @@ static bool cursor_skip(Cursor *c, u64 n) {
     c->post += n;
     return true;
 }
-
 
 static bool cursor_read(Cursor *c, void *dest, u64 n) {
     if (!cursor_has(c, n)) return false;
@@ -192,6 +192,36 @@ static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     return true;
 }
 
+static KV *model_find_kv(Model *m, char *key) {
+    for (u64 i = 0; i < m->n_kv; i++) {
+        if (key_streq(m->kv[i].key, key) || key_strcontains(m->kv[i].key, key)) 
+            return &m->kv[i];
+    }
+    return NULL;
+}
+
+static bool model_get_u32(Model *m, char *key, u32 *out) {
+    KV *kv = model_find_kv(m, key);
+    if (kv == NULL || kv->type != GGUF_VALUE_UINT32) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_u32(&c, out);
+}
+
+static bool model_get_u64(Model *m, char *key, u64 *out) {
+    KV *kv = model_find_kv(m, key);
+    if (kv == NULL || (kv->type != GGUF_VALUE_UINT64 && kv->type != GGUF_VALUE_UINT32)) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_u64(&c, out);
+}
+
+static bool model_get_key(Model *m, char *key, Key *out) {
+    KV *kv = model_find_kv(m, key);
+    if (kv == NULL || kv->type != GGUF_VALUE_STRING) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_key(&c, out);
+}
+
+/* Load KVs.. */
 KV *kv_load(Model *m, Cursor *c) {
     KV *kv = scalloc(m->n_kv, sizeof(m->kv[0]));
     m->alignment = GGUF_DEFAULT_ALIGNMENT;
@@ -217,6 +247,7 @@ KV *kv_load(Model *m, Cursor *c) {
     return kv;
 }
 
+/* Load tensor. */
 TensorInfo *tensor_load(Model *m, Cursor *c) {
     TensorInfo *tensor = scalloc(m->n_tensor, sizeof(m->tensor[0]));
     
@@ -242,6 +273,33 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
     return tensor;
 }
 
+/* Sumary model. */
+static void model_summary(Model *m) {
+    Key name = {0};
+    Key arch = {0};
+    Key type = {0};
+    u32 layers = 0;
+    u64 ctx_train = 0;
+    u32 n_head = 0;
+    u32 n_head_kv = 0;
+    u32 head_dim = 0;
+
+    model_get_key(m, "general.name", &name);
+    model_get_key(m, "general.architecture", &arch);
+    model_get_key(m, "general.type", &type);
+    model_get_u32(m, "block_count", &layers) || model_get_u32(m, "layer_count", &layers);
+    model_get_u64(m, "context_length", &ctx_train);
+
+    printf("model: %s\n", get_key_name(name));
+    printf("arch: %s\n", get_key_name(arch));
+    printf("type: %s\n", get_key_name(type));
+    printf("gguf:  v%u, %" PRIu64 " metadata kvs, %" PRIu64 " tensors\n", m->version, m->n_kv, m->n_tensor);
+    if (layers) printf("layers: %u\n", layers);
+    if (ctx_train) printf("train context: %" PRIu64 "\n", ctx_train);
+    printf("file size: ");
+    printf("%.2f GB\n", size_convert(m->size, GB));
+}
+
 /* Load model. */
 Model *model_load(const char *path) {
     Model *m;
@@ -254,7 +312,7 @@ Model *model_load(const char *path) {
     if (fd == -1) slog_errno("Cannot open model, which path: %s", path);
     if (fstat(fd, &st) == -1) slog_errno("Cannot stat model");
     if (st.st_size < 32) slog(ERROR, "Model file is too small to be GGUF.");
-    map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    map = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) slog_errno("Cannot mmap model");
 
     m->fd = fd;
@@ -282,3 +340,9 @@ Engine *engine_load(EngineOptons *opts) {
     en->model = model_load(opts->model_path);
     return en;
 }
+
+/* Summary engine. */
+void engine_summary(Engine *en) {
+    model_summary(en->model);
+}
+

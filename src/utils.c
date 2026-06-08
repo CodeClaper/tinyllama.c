@@ -1,4 +1,5 @@
 #include <float.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <bits/types/struct_timeval.h>
@@ -45,6 +46,13 @@ bool key_streq(Key key, char *s) {
     return key.len == len && memcmp(key.content, s, len);
 }
 
+/* Key contains. */
+bool key_strcontains(Key key, char *s) {
+    char *name = get_key_name(key);
+    char *end = strstr(name, s);
+    return end != NULL;
+}
+
 /* Keys equals. */
 bool key_eq(Key k1, Key k2) {
     return k1.len == k2.len && memcmp(k1.content, k2.content, k1.len);
@@ -52,7 +60,7 @@ bool key_eq(Key k1, Key k2) {
 
 /* Get system datetime for ms level. 
  * Supports four time level, SECOND, MILLISECOND, MICROSECOND, NANOSECOND. */
-char *get_datetime(TIME_LEVEL level) {
+char *get_datetime(TimeLevel level) {
     struct timeval tv;
     time_t t;
     struct tm *ptm;
@@ -83,4 +91,21 @@ char *get_datetime(TIME_LEVEL level) {
     }
 
     return res;
+}
+
+/* Convert size. */
+double size_convert(u64 bytes, SizeLevel level) {
+    double c = 0;
+    switch (level) {
+        case KB:
+            c = (double)bytes / 1024;
+            break;
+        case MB:
+            c = (double)bytes / (1024 * 1024);
+            break;
+        case GB:
+            c = (double)bytes / (1024 * 1024 * 1024);
+            break;
+    }
+    return c;
 }

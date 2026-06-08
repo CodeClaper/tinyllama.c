@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifndef __DEF_H__
@@ -24,6 +25,7 @@ typedef struct {
     int port;
     int ctx_size;
     int default_tokens;
+    bool inspect;
 } ServerOptions;
 
 typedef struct {
