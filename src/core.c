@@ -249,11 +249,29 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
 }
 
 /* Sumary model. */
+static const char *gguf_value_type_name(u32 type) {
+    switch (type) {
+        case GGUF_VALUE_UINT8:   return "u8";
+        case GGUF_VALUE_INT8:    return "i8";
+        case GGUF_VALUE_UINT16:  return "u16";
+        case GGUF_VALUE_INT16:   return "i16";
+        case GGUF_VALUE_UINT32:  return "u32";
+        case GGUF_VALUE_INT32:   return "i32";
+        case GGUF_VALUE_FLOAT32: return "f32";
+        case GGUF_VALUE_BOOL:    return "bool";
+        case GGUF_VALUE_STRING:  return "string";
+        case GGUF_VALUE_UINT64:  return "u64";
+        case GGUF_VALUE_INT64:   return "i64";
+        case GGUF_VALUE_FLOAT64: return "f64";
+        default:                 return "unknown";
+    }
+}
+
 static void model_summary(Model *m) {
     printf("Metadata:\n");
     for (u64 i = 0; i < m->n_kv; i++) {
         KV *kv = &m->kv[i];
-        printf("-|%-39s", get_key_name(kv->key));
+        printf("-|%-45s", get_key_name(kv->key));
         Cursor c = cursor_at(m->map, m->size, kv->value_pos);
         switch (kv->type) {
             case GGUF_VALUE_UINT32: {
@@ -280,7 +298,19 @@ static void model_summary(Model *m) {
                 printf("\t\t= %s\n", get_key_name(v));
                 break;
             }
-            default: printf("\t\t--\n");
+            case GGUF_VALUE_ARRAY: {
+                u32 item_type;
+                u64 len;
+                cursor_u32(&c, &item_type);
+                cursor_u64(&c, &len);
+                printf("\t\t= [%s * %"PRIu64"]\n",
+                       gguf_value_type_name(item_type), len);
+                break;
+            }
+            default: {
+                printf("\t\t--\n");
+                break;
+            }
         }
     }
 }
