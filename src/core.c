@@ -83,6 +83,16 @@ typedef struct {
     char error[125];
 } Cursor;
 
+typedef enum {
+    TOKENIZER_TYPE_NONE,
+    TOKENIZER_TYPE_SPM,
+    TOKENIZER_TYPE_BPE,
+    TOKENIZER_TYPE_WPM,
+    TOKENIZER_TYPE_UGM,
+    TOKENIZER_TYPE_RWKV,
+    TOKENIZER_TYPE_WHISPER
+ } TokenizerType;
+
 
 static int global_lock_fd = -1;
 
@@ -256,6 +266,7 @@ static void acquire_instance_lock(void) {
         close(fd);
         slog_errno("Failed to truncated lock file:", path);
     }
+
     (void)dprintf(fd, "%ld\n", (long)getpid());
     global_lock_fd = fd;
     atexit(release_instance_lock);
@@ -269,6 +280,12 @@ static KV *model_find_kv(Model *m, char *s) {
     return NULL;
 }
 
+static bool model_get_key(Model *m, char *s, Key *out) {
+    KV *kv = model_find_kv(m, s);
+    if (!kv || kv->type != GGUF_VALUE_STRING) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_key(&c, out);
+}
 
 static bool model_get_array(Model *m, char *s, ArrayRef *out) {
     KV *kv = model_find_kv(m, s);
@@ -332,6 +349,20 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
     return tensor;
 }
 
+static TokenizerType tokenizer_type_load(Model *m) {
+    Key model_name;
+
+    if (!model_get_key(m, "tokenizer.ggml.model", &model_name)) slog(ERROR, "GGUF tokenizer model type is missing");
+    if (key_streq(model_name, "llama") || key_streq(model_name, "sentencepiece")) return TOKENIZER_TYPE_SPM;
+    else if (key_streq(model_name, "gpt2")) return TOKENIZER_TYPE_BPE;
+    else if (key_streq(model_name, "bert")) return TOKENIZER_TYPE_WPM;
+    else if (key_streq(model_name, "unigram")) return TOKENIZER_TYPE_UGM;
+    else if (key_streq(model_name, "rwkv")) return TOKENIZER_TYPE_RWKV;
+    else if (key_streq(model_name, "whisper")) return TOKENIZER_TYPE_WHISPER;
+
+    slog(ERROR, "Unknown tokenizer model type");
+    return TOKENIZER_TYPE_NONE;
+}
 
 /* Load vocab. */
 Vocab *vocab_load(Model *m) {
@@ -342,11 +373,14 @@ Vocab *vocab_load(Model *m) {
     if (!model_get_array(m, "tokenizer.ggml.tokens", &tokens) ||
         tokens.type != GGUF_VALUE_STRING ||
         tokens.len > INT32_MAX
-    ) slog(WARN, "GGUF tokenizer token table is missing or invalid");
+    ) slog(ERROR, "GGUF tokenizer token table is missing or invalid");
     if (!model_get_array(m, "tokenizer.ggml.merges", &merges) ||
         tokens.type != GGUF_VALUE_STRING ||
         tokens.len > INT32_MAX
-    ) slog(WARN, "GGUF tokenizer merge table is missing or invalid");
+    ) slog(ERROR, "GGUF tokenizer merge table is missing or invalid");
+
+    v->n_vocab = (int)tokens.len;
+    v->token = scalloc((size_t)v->n_vocab, sizeof(v->token[0]));
 
     return v;
 }

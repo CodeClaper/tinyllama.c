@@ -47,7 +47,7 @@ typedef struct {
 } KV;
 
 typedef struct {
-    Key token;
+    Key *token;
     int n_vocab;
     int bos_id;
     int eos_id;
