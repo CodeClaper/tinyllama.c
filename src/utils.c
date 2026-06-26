@@ -13,6 +13,13 @@
 #include "mm.h"
 #include "slog.h"
 
+/* Get next pow2 value. */
+u64 next_pow2(u64 n) {
+    u64 p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
 /* Parse string value to int. */
 int parse_int(char *s) {
     char *end = NULL;

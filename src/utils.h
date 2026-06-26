@@ -5,19 +5,10 @@
 #define UNUSED(v) ((void ) v)
 #define FOREVER for(;;)
 
-typedef enum { 
-    SECOND, 
-    MILLISECOND, 
-    MICROSECOND, 
-    NANOSECOND 
-} TimeLevel;
+typedef enum { KB, MB, GB } SizeLevel;
+typedef enum { SECOND, MILLISECOND, MICROSECOND, NANOSECOND } TimeLevel;
 
-typedef enum {
-    KB,
-    MB,
-    GB
-} SizeLevel;
-
+u64 next_pow2(u64 n);
 int parse_int(char *s);
 float parse_float(char *s);
 long parse_long(char *s);
