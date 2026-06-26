@@ -55,7 +55,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) so.inspect = true;
+        else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
             usage(stderr, 2);

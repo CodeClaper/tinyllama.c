@@ -390,7 +390,7 @@ Engine *engine_load(EngineOptons *opts) {
     Engine *en = smalloc(sizeof(*en));
     acquire_instance_lock();
     en->model = model_load(opts->model_path);
-    en->vocab = vocab_load(en->model);
+    if (!opts->inspect) en->vocab = vocab_load(en->model);
     return en;
 }
 

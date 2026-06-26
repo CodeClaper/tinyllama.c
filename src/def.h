@@ -17,6 +17,7 @@ typedef int64_t     i64;
 
 typedef struct {
     const char *model_path;
+    bool inspect;
 } EngineOptons; 
 
 typedef struct {
