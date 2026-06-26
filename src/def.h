@@ -47,10 +47,29 @@ typedef struct {
 } KV;
 
 typedef struct {
+    Key key;
+    u32 value;
+    bool used;
+} TokenizerEntry;
+
+typedef struct {
+    TokenizerEntry *entry;
+    u64 cap;
+    u64 used;
+} TokenizerTable;
+
+typedef struct {
     Key *token;
-    int n_vocab;
-    int bos_id;
-    int eos_id;
+    u32 n_vocab;
+    u32 bos_id;
+    u32 eos_id;
+    u32 user_id;
+    u32 assistant_id;
+    u32 think_start_id;
+    u32 think_end_id;
+    u32 dsml_id;
+    TokenizerTable tokens;
+    TokenizerTable merges;
 } Vocab;
 
 typedef struct {

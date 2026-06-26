@@ -20,6 +20,17 @@ u64 next_pow2(u64 n) {
     return p;
 }
 
+/* Hash the bytes. */
+u64 hash_bytes(void *ptr, u64 len) {
+    const u8 *p = ptr;
+    u64 h = 1469598103934665603ull;
+    for (u64 i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
 /* Parse string value to int. */
 int parse_int(char *s) {
     char *end = NULL;

@@ -91,7 +91,7 @@ typedef enum {
     TOKENIZER_TYPE_UGM,
     TOKENIZER_TYPE_RWKV,
     TOKENIZER_TYPE_WHISPER
- } TokenizerType;
+} TokenizerType;
 
 
 static int global_lock_fd = -1;
@@ -190,6 +190,55 @@ static bool cursor_skip_value(Cursor *c, GGUFValueType type, int depth) {
             cursor_error(c, "Unknown GGUF metadata type");
             return false;
     }
+}
+
+static void tokenizer_table_init(TokenizerTable *table, u64 expected) {
+    table->cap = next_pow2(expected * 2 + 16);
+    table->used = 0;
+    table->entry = scalloc(table->cap, sizeof(table->entry[0]));
+}
+
+static void tokenizer_table_free(TokenizerTable *table) {
+    if (table) {
+        sfree(table->entry);
+        memset(table, 0, sizeof(*table));
+    }
+}
+
+static void tokenizer_table_put(TokenizerTable *table, Key key, u32 value) {
+    u64 mask = table->cap - 1;
+    u64 hash = hash_bytes(key.content, key.len);
+    u64 i = hash & mask;
+    
+    while (table->entry[i].used) {
+        if (key_eq(table->entry[i].key, key)) {
+            table->entry[i].value = value;
+            return;
+        }
+        i = (i + 1) & mask;
+    }
+    
+    table->entry[i].used = true;
+    table->entry[i].key = key;
+    table->entry[i].value = value;
+    table->used++;
+}
+
+static bool tokenizer_table_get(TokenizerTable *table, Key key, u32 *value) {
+    if (table->cap == 0) return false;
+
+    u64 mask = table->cap - 1;
+    u64 hash = hash_bytes(key.content, key.len);
+    u64 i = hash & mask;
+
+    while (table->entry[i].used) {
+        if (key_eq(table->entry[i].key, key)) {
+            *value = table->entry[i].value;
+            return true;
+        }
+        i = (i + 1) & mask;
+    }
+    return false;
 }
 
 /* Sumary model. */
@@ -349,7 +398,7 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
     return tensor;
 }
 
-static TokenizerType tokenizer_type_load(Model *m) {
+static TokenizerType tokenizer_type(Model *m) {
     Key model_name;
 
     if (!model_get_key(m, "tokenizer.ggml.model", &model_name)) slog(ERROR, "GGUF tokenizer model type is missing");
@@ -364,8 +413,16 @@ static TokenizerType tokenizer_type_load(Model *m) {
     return TOKENIZER_TYPE_NONE;
 }
 
-/* Load vocab. */
-Vocab *vocab_load(Model *m) {
+static u32 vocab_lookup(Vocab *v, char *text) {
+    u32 value = -1;
+    Key key = {.content = text, .len = strlen(text)};
+    if (!tokenizer_table_get(&v->tokens, key, &value)) 
+        slog(ERROR, "Required tokenizer token is missing: %s", text);
+    return value;
+}
+
+/* Load vocab for BPE. */
+static Vocab *vocab_load_for_bpe(Model *m) {
     Vocab *v;
     ArrayRef tokens, merges;
     
@@ -375,14 +432,45 @@ Vocab *vocab_load(Model *m) {
         tokens.len > INT32_MAX
     ) slog(ERROR, "GGUF tokenizer token table is missing or invalid");
     if (!model_get_array(m, "tokenizer.ggml.merges", &merges) ||
-        tokens.type != GGUF_VALUE_STRING ||
-        tokens.len > INT32_MAX
+        merges.type != GGUF_VALUE_STRING 
     ) slog(ERROR, "GGUF tokenizer merge table is missing or invalid");
 
     v->n_vocab = (int)tokens.len;
     v->token = scalloc((size_t)v->n_vocab, sizeof(v->token[0]));
 
+    tokenizer_table_init(&v->tokens, tokens.len);
+    Cursor c = cursor_at(m->map, m->size, tokens.data_pos);
+    for (u32 i = 0; i < v->n_vocab; i++) {
+        if (!cursor_key(&c, &v->token[i])) slog(ERROR, c.error);
+        tokenizer_table_put(&v->tokens, v->token[i], i);
+    }
+
+    tokenizer_table_init(&v->merges, merges.len);
+    c = cursor_at(m->map, m->size, merges.data_pos);
+    for (u32 i = 0; i < merges.len; i++) {
+        Key merge;
+        if (!cursor_key(&c, &merge)) slog(ERROR, c.error);
+        tokenizer_table_put(&v->tokens, merge, i);
+    }
+
+    v->bos_id       = vocab_lookup(v, "<｜begin▁of▁sentence｜>");
+    v->eos_id       = vocab_lookup(v, "<｜end▁of▁sentence｜>");
+    v->user_id      = vocab_lookup(v, "<｜User｜>");
+    v->assistant_id = vocab_lookup(v, "<｜Assistant｜>");
+    v->think_start_id = vocab_lookup(v, "<think>");
+    v->think_end_id = vocab_lookup(v, "</think>");
+    v->dsml_id = vocab_lookup(v, "｜DSML｜");
+
     return v;
+}
+
+Vocab *vocab_load(Model *m) {
+    TokenizerType type = tokenizer_type(m);
+    switch (type) {
+        case TOKENIZER_TYPE_BPE: return vocab_load_for_bpe(m);
+        case TOKENIZER_TYPE_NONE: ERRRET(NULL, "Unknown tokenizer model type");
+        default: ERRRET(NULL, "Not support tokenizer type");
+    }
 }
 
 /* Load model. */
