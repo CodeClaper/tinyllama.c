@@ -55,7 +55,7 @@ char *get_key_name(Key key) {
 /* Key and string equals. */
 bool key_streq(Key key, char *s) {
     size_t len = strlen(s);
-    return key.len == len && memcmp(key.content, s, len);
+    return key.len == len && memcmp(key.content, s, len) == 0;
 }
 
 /* Key contains. */
@@ -67,7 +67,7 @@ bool key_strcontains(Key key, char *s) {
 
 /* Keys equals. */
 bool key_eq(Key k1, Key k2) {
-    return k1.len == k2.len && memcmp(k1.content, k2.content, k1.len);
+    return k1.len == k2.len && memcmp(k1.content, k2.content, k1.len) == 0;
 }
 
 /* Get system datetime for ms level. 
