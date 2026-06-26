@@ -1,6 +1,10 @@
 #include <stdbool.h>
 #include "def.h"
 
+/* Anti-warning marco. */
+#define UNUSED(v) ((void ) v)
+#define FOREVER for(;;)
+
 typedef enum { 
     SECOND, 
     MILLISECOND, 

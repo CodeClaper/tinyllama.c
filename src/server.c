@@ -1,14 +1,22 @@
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include "def.h"
 #include "slog.h"
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
+
+static void signal_handler(int sig) {
+    UNUSED(sig);
+    _exit(300);
+}
+
 
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
@@ -58,6 +66,14 @@ static ServerOptions parse_options(int argc, char *argv[]) {
 
 
 int main(int argc, char *argv[]) {
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
     ServerOptions so = parse_options(argc, argv);
     Engine *en = engine_load(&so.engine);
     if (so.inspect) engine_summary(en);
