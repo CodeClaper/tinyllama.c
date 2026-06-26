@@ -34,10 +34,23 @@ typedef struct {
 } Key;
 
 typedef struct {
+    u32 type;
+    u64 len;
+    u64 data_pos;
+} ArrayRef;
+
+typedef struct {
     Key key;
     u32 type;
     u64 value_pos;
 } KV;
+
+typedef struct {
+    Key token;
+    int n_vocab;
+    int bos_id;
+    int eos_id;
+} Vocab;
 
 typedef struct {
     Key key;
@@ -64,6 +77,7 @@ typedef struct {
 
 typedef struct {
     Model *model;
+    Vocab *vocab;
 } Engine;
 
 #endif 

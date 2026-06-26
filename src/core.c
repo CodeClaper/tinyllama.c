@@ -176,15 +176,29 @@ static bool cursor_skip_value(Cursor *c, GGUFValueType type, int depth) {
     }
 }
 
+/* Sumary model. */
+static const char *gguf_value_type_name(u32 type) {
+    switch (type) {
+        case GGUF_VALUE_UINT8:   return "u8";
+        case GGUF_VALUE_INT8:    return "i8";
+        case GGUF_VALUE_UINT16:  return "u16";
+        case GGUF_VALUE_INT16:   return "i16";
+        case GGUF_VALUE_UINT32:  return "u32";
+        case GGUF_VALUE_INT32:   return "i32";
+        case GGUF_VALUE_FLOAT32: return "f32";
+        case GGUF_VALUE_BOOL:    return "bool";
+        case GGUF_VALUE_STRING:  return "string";
+        case GGUF_VALUE_UINT64:  return "u64";
+        case GGUF_VALUE_INT64:   return "i64";
+        case GGUF_VALUE_FLOAT64: return "f64";
+        default:                 return "unknown";
+    }
+}
+
 static const GGUFTypeInfo *tensor_type(u32 type) {
     u32 n = sizeof(gguf_types) / sizeof(gguf_types[0]);
     if (type >= n || gguf_types[type].name == NULL) return NULL;
     else return &gguf_types[type];
-}
-
-static const char *tensor_name(u32 type) {
-    const GGUFTypeInfo *info = tensor_type(type);
-    return info == NULL ? "unknow" : info->name;
 }
 
 static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
@@ -193,6 +207,25 @@ static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     u64 blocks = (n_element + info->block_elems - 1) / info->block_elems;
     if (blocks > UINT64_MAX / info->block_bytes) return false;
     *bytes = blocks * info->block_bytes;
+    return true;
+}
+
+/* Model find kv. */
+static KV *model_find_kv(Model *m, char *s) {
+    for (u64 i = 0; i < m->n_kv; i++) {
+        if (key_streq(m->kv[i].key, s)) return &m->kv[i];
+    }
+    return NULL;
+}
+
+
+static bool model_get_array(Model *m, char *s, ArrayRef *out) {
+    KV *kv = model_find_kv(m, s);
+    if (!kv || kv->type != GGUF_VALUE_ARRAY) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    if (!cursor_u32(&c, &out->type)) return false;
+    if (!cursor_u64(&c, &out->len)) return false;
+    out->data_pos = c.post;
     return true;
 }
 
@@ -248,27 +281,69 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
     return tensor;
 }
 
-/* Sumary model. */
-static const char *gguf_value_type_name(u32 type) {
-    switch (type) {
-        case GGUF_VALUE_UINT8:   return "u8";
-        case GGUF_VALUE_INT8:    return "i8";
-        case GGUF_VALUE_UINT16:  return "u16";
-        case GGUF_VALUE_INT16:   return "i16";
-        case GGUF_VALUE_UINT32:  return "u32";
-        case GGUF_VALUE_INT32:   return "i32";
-        case GGUF_VALUE_FLOAT32: return "f32";
-        case GGUF_VALUE_BOOL:    return "bool";
-        case GGUF_VALUE_STRING:  return "string";
-        case GGUF_VALUE_UINT64:  return "u64";
-        case GGUF_VALUE_INT64:   return "i64";
-        case GGUF_VALUE_FLOAT64: return "f64";
-        default:                 return "unknown";
-    }
+
+/* Load vocab. */
+Vocab *vocab_load(Model *m) {
+    Vocab *v;
+    ArrayRef tokens, merges;
+    
+    v = smalloc(sizeof(Vocab));
+    if (!model_get_array(m, "tokenizer.ggml.tokens", &tokens) ||
+        tokens.type != GGUF_VALUE_STRING ||
+        tokens.len > INT32_MAX
+    ) slog(WARN, "GGUF tokenizer token table is missing or invalid");
+    if (!model_get_array(m, "tokenizer.ggml.merges", &merges) ||
+        tokens.type != GGUF_VALUE_STRING ||
+        tokens.len > INT32_MAX
+    ) slog(WARN, "GGUF tokenizer merge table is missing or invalid");
+
+    return v;
+}
+
+/* Load model. */
+Model *model_load(const char *path) {
+    Model *m;
+    int fd;
+    struct stat st;
+    void *map;
+
+    m = smalloc(sizeof(Model));
+    fd = open(path, O_RDONLY);
+    if (fd == -1) slog_errno("Cannot open model, which path: %s", path);
+    if (fstat(fd, &st) == -1) slog_errno("Cannot stat model");
+    if (st.st_size < 32) slog(ERROR, "Model file is too small to be GGUF.");
+    map = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) slog_errno("Cannot mmap model");
+
+    m->fd = fd;
+    m->size = (u64)st.st_size;
+    m->map = map;
+
+    Cursor c = cursor_at(m->map, m->size, 0);
+    u32 magic;
+    if (!cursor_u32(&c, &magic)) slog(ERROR, c.error);
+    if (magic != GGUF_MAGIC) slog(ERROR, "Model is not a GGUF file");
+    if (!cursor_u32(&c, &m->version)) slog(ERROR, c.error);
+    if (m->version != GGUF_VALID_VERSION) slog(ERROR, "Only GGUF v3 is supported.");
+    if (!cursor_u64(&c, &m->n_tensor)) slog(ERROR, c.error);
+    if (!cursor_u64(&c, &m->n_kv)) slog(ERROR, c.error);
+
+    m->kv = kv_load(m, &c);
+    m->tensor = tensor_load(m, &c); 
+
+    return m;
+}
+
+/* Load engine. */
+Engine *engine_load(EngineOptons *opts) {
+    Engine *en = smalloc(sizeof(*en));
+    en->model = model_load(opts->model_path);
+    en->vocab = vocab_load(en->model);
+    return en;
 }
 
 static void model_summary(Model *m) {
-    printf("Metadata:\n");
+    slog(INFO, "Metadata:");
     for (u64 i = 0; i < m->n_kv; i++) {
         KV *kv = &m->kv[i];
         printf("-|%-45s", get_key_name(kv->key));
@@ -315,46 +390,6 @@ static void model_summary(Model *m) {
     }
 }
 
-/* Load model. */
-Model *model_load(const char *path) {
-    Model *m;
-    int fd;
-    struct stat st;
-    void *map;
-
-    m = smalloc(sizeof(Model));
-    fd = open(path, O_RDONLY);
-    if (fd == -1) slog_errno("Cannot open model, which path: %s", path);
-    if (fstat(fd, &st) == -1) slog_errno("Cannot stat model");
-    if (st.st_size < 32) slog(ERROR, "Model file is too small to be GGUF.");
-    map = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) slog_errno("Cannot mmap model");
-
-    m->fd = fd;
-    m->size = (u64)st.st_size;
-    m->map = map;
-
-    Cursor c = cursor_at(m->map, m->size, 0);
-    u32 magic;
-    if (!cursor_u32(&c, &magic)) slog(ERROR, c.error);
-    if (magic != GGUF_MAGIC) slog(ERROR, "Model is not a GGUF file");
-    if (!cursor_u32(&c, &m->version)) slog(ERROR, c.error);
-    if (m->version != GGUF_VALID_VERSION) slog(ERROR, "Only GGUF v3 is supported.");
-    if (!cursor_u64(&c, &m->n_tensor)) slog(ERROR, c.error);
-    if (!cursor_u64(&c, &m->n_kv)) slog(ERROR, c.error);
-
-    m->kv = kv_load(m, &c);
-    m->tensor = tensor_load(m, &c); 
-
-    return m;
-}
-
-/* Load engine. */
-Engine *engine_load(EngineOptons *opts) {
-    Engine *en = smalloc(sizeof(*en));
-    en->model = model_load(opts->model_path);
-    return en;
-}
 
 /* Summary engine. */
 void engine_summary(Engine *en) {
