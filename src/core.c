@@ -357,12 +357,6 @@ static bool model_get_i32(Model *m, const char *key, i32 *out) {
     return cursor_i32(&c, out);
 }
 
-static bool model_get_u32(Model *m, const char *key, u32 *out) {
-    KV *kv = model_find_kv(m, (char *)key);
-    if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
-    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
-    return cursor_u32(&c, out);
-}
 
 /* Load KVs.. */
 KV *kv_load(Model *m, Cursor *c) {
@@ -436,13 +430,6 @@ static bool vocab_try_lookup(Vocab *v, const char *text, i32 *id) {
     return tokenizer_table_get(&v->tokens, key, id);
 }
 
-static i32 vocab_lookup(Vocab *v, const char *text) {
-    i32 value;
-    if (!vocab_try_lookup(v, text, &value))
-        slog(ERROR, "Required tokenizer token is missing: %s", text);
-    return value;
-}
-
 /* Load vocab for BPE. */
 static Vocab *vocab_load_for_bpe(Model *m) {
     Vocab *v;
@@ -509,11 +496,17 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     if (v->eos_id == VOCAB_ID_NONE)
         slog(ERROR, "Cannot find EOS token in vocabulary");
 
-    v->user_id = vocab_lookup(v, "<｜User｜>");
-    v->assistant_id = vocab_lookup(v, "<｜Assistant｜>");
-    v->think_start_id = vocab_lookup(v, "<think>");
-    v->think_end_id = vocab_lookup(v, "</think>");
-    v->dsml_id = vocab_lookup(v, "｜DSML｜");
+    v->user_id        = VOCAB_ID_NONE;
+    v->assistant_id   = VOCAB_ID_NONE;
+    v->think_start_id = VOCAB_ID_NONE;
+    v->think_end_id   = VOCAB_ID_NONE;
+    v->dsml_id        = VOCAB_ID_NONE;
+
+    vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
+    vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
+    vocab_try_lookup(v, "<think>",        &v->think_start_id);
+    vocab_try_lookup(v, "</think>",       &v->think_end_id);
+    vocab_try_lookup(v, "｜DSML｜",       &v->dsml_id);
 
     return v;
 }
