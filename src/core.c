@@ -133,6 +133,10 @@ static bool cursor_read(Cursor *c, void *dest, u64 n) {
     return true;
 }
 
+static bool cursor_i32(Cursor *c, i32 *v) {
+    return cursor_read(c, v, sizeof(*v));
+}
+
 static bool cursor_u32(Cursor *c, u32 *v) {
     return cursor_read(c, v, sizeof(*v));
 }
@@ -205,7 +209,7 @@ static void tokenizer_table_free(TokenizerTable *table) {
     }
 }
 
-static void tokenizer_table_put(TokenizerTable *table, Key key, u32 value) {
+static void tokenizer_table_put(TokenizerTable *table, Key key, i32 value) {
     u64 mask = table->cap - 1;
     u64 hash = hash_bytes(key.content, key.len);
     u64 i = hash & mask;
@@ -224,7 +228,7 @@ static void tokenizer_table_put(TokenizerTable *table, Key key, u32 value) {
     table->used++;
 }
 
-static bool tokenizer_table_get(TokenizerTable *table, Key key, u32 *value) {
+static bool tokenizer_table_get(TokenizerTable *table, Key key, i32 *value) {
     if (table->cap == 0) return false;
 
     u64 mask = table->cap - 1;
@@ -346,6 +350,20 @@ static bool model_get_array(Model *m, char *s, ArrayRef *out) {
     return true;
 }
 
+static bool model_get_i32(Model *m, const char *key, i32 *out) {
+    KV *kv = model_find_kv(m, (char *)key);
+    if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_i32(&c, out);
+}
+
+static bool model_get_u32(Model *m, const char *key, u32 *out) {
+    KV *kv = model_find_kv(m, (char *)key);
+    if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_u32(&c, out);
+}
+
 /* Load KVs.. */
 KV *kv_load(Model *m, Cursor *c) {
     KV *kv = scalloc(m->n_kv, sizeof(m->kv[0]));
@@ -413,10 +431,14 @@ static TokenizerType tokenizer_type(Model *m) {
     return TOKENIZER_TYPE_NONE;
 }
 
-static u32 vocab_lookup(Vocab *v, char *text) {
-    u32 value = -1;
-    Key key = {.content = text, .len = strlen(text)};
-    if (!tokenizer_table_get(&v->tokens, key, &value)) 
+static bool vocab_try_lookup(Vocab *v, const char *text, i32 *id) {
+    Key key = {.content = (char *)text, .len = strlen(text)};
+    return tokenizer_table_get(&v->tokens, key, id);
+}
+
+static i32 vocab_lookup(Vocab *v, const char *text) {
+    i32 value;
+    if (!vocab_try_lookup(v, text, &value))
         slog(ERROR, "Required tokenizer token is missing: %s", text);
     return value;
 }
@@ -450,12 +472,44 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     for (u32 i = 0; i < merges.len; i++) {
         Key merge;
         if (!cursor_key(&c, &merge)) slog(ERROR, c.error);
-        tokenizer_table_put(&v->tokens, merge, i);
+        tokenizer_table_put(&v->merges, merge, i);
     }
 
-    v->bos_id       = vocab_lookup(v, "<｜begin▁of▁sentence｜>");
-    v->eos_id       = vocab_lookup(v, "<｜end▁of▁sentence｜>");
-    v->user_id      = vocab_lookup(v, "<｜User｜>");
+    v->bos_id = VOCAB_ID_NONE;
+    v->eos_id = VOCAB_ID_NONE;
+
+    if (!model_get_i32(m, "tokenizer.ggml.bos_token_id", &v->bos_id)) {
+        static const char *bos_cands[] = {
+            "<|begin_of_text|>",
+            "<｜begin▁of▁sentence｜>",
+            "<|im_start|>",
+            "<bos>",
+            "<s>",
+        };
+        for (int i = 0; i < (int)(sizeof(bos_cands) / sizeof(bos_cands[0])); i++) {
+            if (vocab_try_lookup(v, bos_cands[i], &v->bos_id)) break;
+        }
+    }
+
+    if (!model_get_i32(m, "tokenizer.ggml.eos_token_id", &v->eos_id)) {
+        static const char *eos_cands[] = {
+            "<|end_of_text|>",
+            "<｜end▁of▁sentence｜>",
+            "<|im_end|>",
+            "<eos>",
+            "</s>",
+        };
+        for (int i = 0; i < (int)(sizeof(eos_cands) / sizeof(eos_cands[0])); i++) {
+            if (vocab_try_lookup(v, eos_cands[i], &v->eos_id)) break;
+        }
+    }
+
+    if (v->bos_id == VOCAB_ID_NONE)
+        slog(ERROR, "Cannot find BOS token in vocabulary");
+    if (v->eos_id == VOCAB_ID_NONE)
+        slog(ERROR, "Cannot find EOS token in vocabulary");
+
+    v->user_id = vocab_lookup(v, "<｜User｜>");
     v->assistant_id = vocab_lookup(v, "<｜Assistant｜>");
     v->think_start_id = vocab_lookup(v, "<think>");
     v->think_end_id = vocab_lookup(v, "</think>");

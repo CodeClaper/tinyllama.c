@@ -5,6 +5,7 @@
 #define __DEF_H__
 
 #define MAX_DIMS 8
+#define VOCAB_ID_NONE ((u32)-1)
 
 typedef uint8_t     u8;
 typedef uint16_t    u16;
@@ -48,7 +49,7 @@ typedef struct {
 
 typedef struct {
     Key key;
-    u32 value;
+    i32 value;
     bool used;
 } TokenizerEntry;
 
@@ -58,16 +59,17 @@ typedef struct {
     u64 used;
 } TokenizerTable;
 
+
 typedef struct {
     Key *token;
     u32 n_vocab;
-    u32 bos_id;
-    u32 eos_id;
-    u32 user_id;
-    u32 assistant_id;
-    u32 think_start_id;
-    u32 think_end_id;
-    u32 dsml_id;
+    i32 bos_id;
+    i32 eos_id;
+    i32 user_id;
+    i32 assistant_id;
+    i32 think_start_id;
+    i32 think_end_id;
+    i32 dsml_id;
     TokenizerTable tokens;
     TokenizerTable merges;
 } Vocab;
