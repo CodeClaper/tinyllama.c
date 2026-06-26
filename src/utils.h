@@ -20,6 +20,7 @@ typedef enum {
 
 int parse_int(char *s);
 float parse_float(char *s);
+long parse_long(char *s);
 char *get_key_name(Key key);
 char *get_datetime(TimeLevel level);
 bool key_streq(Key key, char *s);

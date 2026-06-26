@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <float.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -30,6 +31,17 @@ float parse_float(char *s) {
         slog(ERROR, "Bad float string value: %s.", s);
     }
     return (float) v;
+}
+
+/* Parse string value to long. */
+long parse_long(char *s) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (!s[0] || *end || errno == ERANGE) {
+        slog(ERROR, "Bad long string value: %s.", s);
+    }
+    return v;
 }
 
 /* Get key name. blk.0.attn_q.weight*/
