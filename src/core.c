@@ -1,13 +1,17 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/file.h>
 #include "core.h"
 #include "mm.h"
 #include "slog.h"
@@ -79,6 +83,8 @@ typedef struct {
     char error[125];
 } Cursor;
 
+
+static int global_lock_fd = -1;
 
 static Cursor cursor_at(u8 *base, u64 size, u64 post) {
     Cursor c = {
@@ -210,6 +216,51 @@ static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     return true;
 }
 
+static void release_instance_lock(void) {
+    if (global_lock_fd >= 0) {
+        close(global_lock_fd);
+        global_lock_fd = -1;
+    }
+}
+
+static void acquire_instance_lock(void) {
+    const char *path = getenv("TINY_LLAMA_LOCK");
+    if (!path || !path[0]) path = "/tmp/tiny_llama.lock";
+
+    const int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) slog_errno("Fail to open lock file");
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            char buf[64];
+            ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+            long owner = -1;
+            if (n > 0) {
+                buf[n] = '\0';
+                owner = parse_long(buf);
+            }
+            close(fd);
+            if (owner > 0) {
+                slog(ERROR, "Found another tiny_llama process is already running (pid %ld); refusing to start.", owner);
+            } else {
+                slog(ERROR, "Found another tiny_llama process is already running; refusing to start.");
+            }
+        }
+
+        close(fd);
+        slog_errno("Failed to lock %s", path);
+    }
+
+    if (ftruncate(fd, 0) != 0) {
+        close(fd);
+        slog_errno("Failed to truncated lock file:", path);
+    }
+    (void)dprintf(fd, "%ld\n", (long)getpid());
+    global_lock_fd = fd;
+    atexit(release_instance_lock);
+}
+
 /* Model find kv. */
 static KV *model_find_kv(Model *m, char *s) {
     for (u64 i = 0; i < m->n_kv; i++) {
@@ -337,6 +388,7 @@ Model *model_load(const char *path) {
 /* Load engine. */
 Engine *engine_load(EngineOptons *opts) {
     Engine *en = smalloc(sizeof(*en));
+    acquire_instance_lock();
     en->model = model_load(opts->model_path);
     en->vocab = vocab_load(en->model);
     return en;
