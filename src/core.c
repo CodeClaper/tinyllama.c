@@ -371,10 +371,25 @@ static ModelArch model_detect_arch(Model *m) {
 
 static TensorInfo *model_find_tensor(Model *m, char *name) {
     for (u64 i = 0; i < m->n_tensor; i++) {
-        if (key_streq(m->tensor[i].key, name)) 
+        if (key_streq(m->tensor[i].key, name))
             return &m->tensor[i];
     }
     return NULL;
+}
+
+static u32 model_count_layers(Model *m) {
+    u32 max_n = 0;
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        Key *k = &m->tensor[i].key;
+        if (k->len < 5 || memcmp(k->content, "blk.", 4) != 0) continue;
+        u32 n = 0;
+        u32 j;
+        for (j = 4; j < k->len && k->content[j] >= '0' && k->content[j] <= '9'; j++)
+            n = n * 10 + (u32)(k->content[j] - '0');
+        if (j > 4 && j < k->len && k->content[j] == '.' && n >= max_n)
+            max_n = n;
+    }
+    return max_n + 1;
 }
 
 /* Load KVs.. */
@@ -587,6 +602,123 @@ static const TensorMapEntry unknown_tensor_map[] = {
     {TENSOR_OUTPUT_NORM, "output_norm.weight",  false},
 };
 
+/* Layer tensor suffix maps (blk.{N}.{suffix}.weight). */
+
+typedef struct {
+    TensorRole  role;
+    const char *suffix;
+    bool        required;
+} LayerTensorMap;
+
+static const LayerTensorMap llama_layer_map[] = {
+    {TENSOR_ATTN_NORM,  "attn_norm",    true},
+    {TENSOR_ATTN_Q,     "attn_q",       true},
+    {TENSOR_ATTN_K,     "attn_k",       true},
+    {TENSOR_ATTN_V,     "attn_v",       true},
+    {TENSOR_ATTN_OUT,   "attn_output",  true},
+    {TENSOR_FFN_GATE,   "ffn_gate",     true},
+    {TENSOR_FFN_DOWN,   "ffn_down",     true},
+    {TENSOR_FFN_UP,     "ffn_up",       true},
+};
+
+static const LayerTensorMap qwen2_layer_map[] = {
+    {TENSOR_ATTN_NORM,        "attn_norm",             true},
+    {TENSOR_ATTN_QKV,         "attn_qkv",              false},
+    {TENSOR_ATTN_Q,           "attn_q",                false},
+    {TENSOR_ATTN_K,           "attn_k",                false},
+    {TENSOR_ATTN_V,           "attn_v",                false},
+    {TENSOR_ATTN_Q_NORM,      "attn_q_norm",           false},
+    {TENSOR_ATTN_K_NORM,      "attn_k_norm",           false},
+    {TENSOR_ATTN_OUT,         "attn_output",           false},
+    {TENSOR_ATTN_GATE,        "attn_gate",             false},
+    {TENSOR_POST_ATTN_NORM,   "post_attention_norm",   true},
+    {TENSOR_SSM_CONV1D,       "ssm_conv1d",            false},
+    {TENSOR_SSM_ALPHA,        "ssm_alpha",             false},
+    {TENSOR_SSM_BETA,         "ssm_beta",              false},
+    {TENSOR_SSM_NORM,         "ssm_norm",              false},
+    {TENSOR_SSM_OUT,          "ssm_out",               false},
+    {TENSOR_FFN_GATE,         "ffn_gate",              true},
+    {TENSOR_FFN_DOWN,         "ffn_down",              true},
+    {TENSOR_FFN_UP,           "ffn_up",                true},
+};
+
+static const LayerTensorMap deepseek_layer_map[] = {
+    {TENSOR_ATTN_NORM,  "attn_norm",    true},
+    {TENSOR_ATTN_Q,     "attn_q",       true},
+    {TENSOR_ATTN_K,     "attn_k",       true},
+    {TENSOR_ATTN_V,     "attn_v",       true},
+    {TENSOR_ATTN_OUT,   "attn_output",  true},
+    {TENSOR_FFN_GATE,   "ffn_gate",     true},
+    {TENSOR_FFN_DOWN,   "ffn_down",     true},
+    {TENSOR_FFN_UP,     "ffn_up",       true},
+};
+
+static const LayerTensorMap unknown_layer_map[] = {
+    {TENSOR_ATTN_NORM,  "attn_norm",    false},
+    {TENSOR_ATTN_Q,     "attn_q",       false},
+    {TENSOR_ATTN_K,     "attn_k",       false},
+    {TENSOR_ATTN_V,     "attn_v",       false},
+    {TENSOR_ATTN_QKV,   "attn_qkv",     false},
+    {TENSOR_ATTN_OUT,   "attn_output",  false},
+    {TENSOR_FFN_GATE,   "ffn_gate",     false},
+    {TENSOR_FFN_DOWN,   "ffn_down",     false},
+    {TENSOR_FFN_UP,     "ffn_up",       false},
+};
+
+static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) {
+    LayerWeights *layers = scalloc(n_layer, sizeof(LayerWeights));
+
+    static const struct {
+        ModelArch arch;
+        const LayerTensorMap *entries;
+        int count;
+    } arch_layer_maps[] = {
+        {ARCH_LLAMA,    llama_layer_map,     ARR_LEN(llama_layer_map)},
+        {ARCH_QWEN2,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
+        {ARCH_DEEPSEEK, deepseek_layer_map,  ARR_LEN(deepseek_layer_map)},
+        {ARCH_UNKNOWN,  unknown_layer_map,   ARR_LEN(unknown_layer_map)},
+    };
+
+    const LayerTensorMap *map = NULL;
+    int map_count = 0;
+    for (int i = 0; i < ARR_LEN(arch_layer_maps); i++) {
+        if (arch_layer_maps[i].arch == arch) {
+            map = arch_layer_maps[i].entries;
+            map_count = arch_layer_maps[i].count;
+            break;
+        }
+    }
+    if (!map) {
+        map = unknown_layer_map;
+        map_count = ARR_LEN(unknown_layer_map);
+    }
+
+    for (u64 ti = 0; ti < m->n_tensor; ti++) {
+        Key *k = &m->tensor[ti].key;
+        if (k->len < 7) continue;
+        if (memcmp(k->content, "blk.", 4) != 0) continue;
+
+        u32 n = 0;
+        u32 j;
+        for (j = 4; j < k->len && k->content[j] >= '0' && k->content[j] <= '9'; j++)
+            n = n * 10 + (u32)(k->content[j] - '0');
+        if (j >= k->len || k->content[j] != '.' || n >= n_layer) continue;
+
+        const char *suffix_start = (const char *)k->content + j + 1;
+        u32 suffix_len = k->len - j - 1;
+
+        for (int e = 0; e < map_count; e++) {
+            const char *s = map[e].suffix; u32 slen = (u32)strlen(s);
+            if (slen == suffix_len && memcmp(suffix_start, s, slen) == 0) {
+                layers[n].tensors[map[e].role] = &m->tensor[ti];
+                break;
+            }
+        }
+    }
+
+    return layers;
+}
+
 /* Load weights. */
 static Weights *weights_load(Model *m) {
     Weights *w = smalloc(sizeof(*w));
@@ -630,6 +762,8 @@ static Weights *weights_load(Model *m) {
         slog(WARN, "No output.weight found, using tied embeddings (output = token_embd)");
     }
 
+    w->n_layer = model_count_layers(m);
+    w->layers  = layers_weights_load(m, w->arch, w->n_layer);
     return w;
 }
 

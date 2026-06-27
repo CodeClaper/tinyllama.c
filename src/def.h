@@ -112,6 +112,8 @@ typedef enum {
     TENSOR_SSM_BETA,
     TENSOR_SSM_OUT,
     TENSOR_SSM_NORM,
+    TENSOR_ATTN_Q_NORM,
+    TENSOR_ATTN_K_NORM,
     TENSOR_OUTPUT_HC_BASE,
     TENSOR_OUTPUT_HC_FN,
     TENSOR_OUTPUT_HC_SCALE,
@@ -119,9 +121,14 @@ typedef enum {
 } TensorRole;
 
 typedef struct {
+    TensorInfo *tensors[TENSOR_COUNT];
+} LayerWeights;
+
+typedef struct {
     ModelArch arch;
     u32 n_layer;
     TensorInfo *tensors[TENSOR_COUNT];
+    LayerWeights *layers;
 } Weights;
 
 typedef struct {
