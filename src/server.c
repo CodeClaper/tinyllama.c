@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,10 +22,18 @@ typedef struct  {
     Session *session;
 } Server;
 
+static volatile int g_fd = -1;
+static volatile int g_stop = 0;
 
 static void signal_handler(int sig) {
     UNUSED(sig);
-    _exit(300);
+    if (g_stop) _exit(130);
+    g_stop = 1;
+    if (g_fd >= 0) {
+        int fd = (int)g_fd;
+        g_fd = -1;
+        close(fd);
+    }
 }
 
 /* Useage. */
@@ -129,11 +138,35 @@ int main(int argc, char *argv[]) {
     server.engine = engine;
     server.session = session;
 
-    int fd = listen_on(so.host, so.port);
-    if (fd < 0) {
+    int sfd = listen_on(so.host, so.port);
+    if (sfd < 0) {
         server_resource_close(&server);
         slog_errno("Failed to listen on %s:%d: %s", so.host, so.port);
     }
+    g_fd = sfd;
     slog(INFO, "Server listening on http://%s:%d", so.host, so.port);
+
+    while (!g_stop) {
+        int fd = accept(sfd, NULL, NULL);
+        if (fd < 0) {
+            if (g_stop) break;
+            if (errno == EINTR) continue;
+            slog(WARN, "Accept failed: %s", strerror(errno));
+            continue;
+        }
+        if (g_stop) {
+            close(fd);
+            break;
+        }
+    }
+
+    if (g_fd >= 0) {
+        close(sfd);
+        g_fd = -1;
+    }
+
+    slog(INFO, "Server: shutdown requested, draining requests");
     server_resource_close(&server);
+
+    return 0;
 }
