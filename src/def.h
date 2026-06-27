@@ -49,6 +49,16 @@ typedef struct {
 
 typedef struct {
     Key key;
+    u32 ndim;
+    u64 dim[MAX_DIMS];
+    u32 type;
+    u64 offset;
+    u64 n_element;
+    u64 bytes;
+} TensorInfo;
+
+typedef struct {
+    Key key;
     i32 value;
     bool used;
 } TokenizerEntry;
@@ -58,7 +68,6 @@ typedef struct {
     u64 cap;
     u64 used;
 } TokenizerTable;
-
 
 typedef struct {
     Key *token;
@@ -74,15 +83,46 @@ typedef struct {
     TokenizerTable merges;
 } Vocab;
 
+typedef enum {
+    ARCH_UNKNOWN,
+    ARCH_LLAMA,
+    ARCH_QWEN2,
+    ARCH_DEEPSEEK,
+    ARCH_FALCON,
+} ModelArch;
+
+typedef enum {
+    TENSOR_TOKEN_EMBD,
+    TENSOR_OUTPUT,
+    TENSOR_OUTPUT_NORM,
+    TENSOR_ATTN_NORM,
+    TENSOR_ATTN_Q,
+    TENSOR_ATTN_K,
+    TENSOR_ATTN_V,
+    TENSOR_ATTN_QKV,
+    TENSOR_ATTN_OUT,
+    TENSOR_ATTN_GATE,
+    TENSOR_POST_ATTN_NORM,
+    TENSOR_FFN_GATE,
+    TENSOR_FFN_DOWN,
+    TENSOR_FFN_UP,
+    TENSOR_SSM_IN,
+    TENSOR_SSM_CONV1D,
+    TENSOR_SSM_ALPHA,
+    TENSOR_SSM_BETA,
+    TENSOR_SSM_OUT,
+    TENSOR_SSM_NORM,
+    TENSOR_OUTPUT_HC_BASE,
+    TENSOR_OUTPUT_HC_FN,
+    TENSOR_OUTPUT_HC_SCALE,
+    TENSOR_COUNT,
+} TensorRole;
+
 typedef struct {
-    Key key;
-    u32 ndim;
-    u64 dim[MAX_DIMS];
-    u32 type;
-    u64 offset;
-    u64 n_element;
-    u64 bytes;
-} TensorInfo;
+    ModelArch arch;
+    u32 n_layer;
+    TensorInfo *tensors[TENSOR_COUNT];
+} Weights;
 
 typedef struct {
     int fd;
@@ -100,6 +140,7 @@ typedef struct {
 typedef struct {
     Model *model;
     Vocab *vocab;
+    Weights *weights;
 } Engine;
 
 #endif 

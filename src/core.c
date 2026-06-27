@@ -357,6 +357,25 @@ static bool model_get_i32(Model *m, const char *key, i32 *out) {
     return cursor_i32(&c, out);
 }
 
+static ModelArch model_detect_arch(Model *m) {
+    Key arch_name;
+    if (!model_get_key(m, "general.architecture", &arch_name)) return ARCH_UNKNOWN;
+    if (key_streq(arch_name, "llama"))   return ARCH_LLAMA;
+    if (key_streq(arch_name, "qwen2"))   return ARCH_QWEN2;
+    if (key_streq(arch_name, "qwen35"))  return ARCH_QWEN2;
+    if (key_streq(arch_name, "deepseek2")) return ARCH_DEEPSEEK;
+    if (key_streq(arch_name, "falcon"))  return ARCH_FALCON;
+    slog(WARN, "Unknown architecture: %s, loading as generic.", get_key_name(arch_name));
+    return ARCH_UNKNOWN;
+}
+
+static TensorInfo *model_find_tensor(Model *m, char *name) {
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        if (key_streq(m->tensor[i].key, name)) 
+            return &m->tensor[i];
+    }
+    return NULL;
+}
 
 /* Load KVs.. */
 KV *kv_load(Model *m, Cursor *c) {
@@ -511,7 +530,8 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     return v;
 }
 
-Vocab *vocab_load(Model *m) {
+/* Load vocab. */
+static Vocab *vocab_load(Model *m) {
     TokenizerType type = tokenizer_type(m);
     switch (type) {
         case TOKENIZER_TYPE_BPE: return vocab_load_for_bpe(m);
@@ -520,12 +540,97 @@ Vocab *vocab_load(Model *m) {
     }
 }
 
+/* Free vocab. */
 static void vocab_free(Vocab *v) {
     if (!v) return;
     sfree(v->token);
     tokenizer_table_free(&v->tokens);
     tokenizer_table_free(&v->merges);
     memset(v, 0, sizeof(*v));
+}
+
+/* Tensor name map. */
+typedef struct {
+    TensorRole  role;
+    const char *name;
+    bool        required;
+} TensorMapEntry;
+
+#define ARR_LEN(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+/* Architecture tensor maps (non-layer tensors only). */
+
+static const TensorMapEntry llama_tensor_map[] = {
+    {TENSOR_TOKEN_EMBD,  "token_embd.weight",   true},
+    {TENSOR_OUTPUT,      "output.weight",       false},
+    {TENSOR_OUTPUT_NORM, "output_norm.weight",  true},
+};
+
+static const TensorMapEntry qwen2_tensor_map[] = {
+    {TENSOR_TOKEN_EMBD,  "token_embd.weight",   true},
+    {TENSOR_OUTPUT,      "output.weight",       false},
+    {TENSOR_OUTPUT_NORM, "output_norm.weight",  true},
+};
+
+static const TensorMapEntry deepseek_tensor_map[] = {
+    {TENSOR_TOKEN_EMBD,       "token_embd.weight",         true},
+    {TENSOR_OUTPUT,           "output.weight",             true},
+    {TENSOR_OUTPUT_NORM,      "output_norm.weight",        true},
+    {TENSOR_OUTPUT_HC_BASE,   "output_hc_base.weight",     true},
+    {TENSOR_OUTPUT_HC_FN,     "output_hc_fn.weight",       true},
+    {TENSOR_OUTPUT_HC_SCALE,  "output_hc_scale.weight",    true},
+};
+
+static const TensorMapEntry unknown_tensor_map[] = {
+    {TENSOR_TOKEN_EMBD,  "token_embd.weight",   true},
+    {TENSOR_OUTPUT,      "output.weight",       false},
+    {TENSOR_OUTPUT_NORM, "output_norm.weight",  false},
+};
+
+/* Load weights. */
+static Weights *weights_load(Model *m) {
+    Weights *w = smalloc(sizeof(*w));
+
+    static const struct {
+        ModelArch arch;
+        const TensorMapEntry *entries;
+        int count;
+    } arch_maps[] = {
+        {ARCH_LLAMA,    llama_tensor_map,    ARR_LEN(llama_tensor_map)},
+        {ARCH_QWEN2,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
+        {ARCH_DEEPSEEK, deepseek_tensor_map, ARR_LEN(deepseek_tensor_map)},
+        {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
+    };
+
+    w->arch = model_detect_arch(m);
+
+    const TensorMapEntry *map = NULL;
+    int map_count = 0;
+    for (int i = 0; i < ARR_LEN(arch_maps); i++) {
+        if (arch_maps[i].arch == w->arch) {
+            map = arch_maps[i].entries;
+            map_count = arch_maps[i].count;
+            break;
+        }
+    }
+    if (!map) {
+        map = unknown_tensor_map;
+        map_count = ARR_LEN(unknown_tensor_map);
+    }
+
+    for (int i = 0; i < map_count; i++) {
+        TensorInfo *t = model_find_tensor(m, (char *)map[i].name);
+        if (!t && map[i].required) 
+            slog(ERROR, "Required tensor is missing: %s", map[i].name);
+        w->tensors[map[i].role] = t;
+    }
+
+    if (!w->tensors[TENSOR_OUTPUT] && w->tensors[TENSOR_TOKEN_EMBD]) {
+        w->tensors[TENSOR_OUTPUT] = w->tensors[TENSOR_TOKEN_EMBD];
+        slog(WARN, "No output.weight found, using tied embeddings (output = token_embd)");
+    }
+
+    return w;
 }
 
 /* Load model. */
@@ -573,6 +678,7 @@ Engine *engine_load(EngineOptons *opts) {
     acquire_instance_lock();
     en->model = model_load(opts->model_path);
     if (!opts->inspect) en->vocab = vocab_load(en->model);
+    en->weights = weights_load(en->model);
     return en;
 }
 
