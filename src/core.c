@@ -502,11 +502,11 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     v->think_end_id   = VOCAB_ID_NONE;
     v->dsml_id        = VOCAB_ID_NONE;
 
-    vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
-    vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
-    vocab_try_lookup(v, "<think>",        &v->think_start_id);
-    vocab_try_lookup(v, "</think>",       &v->think_end_id);
-    vocab_try_lookup(v, "｜DSML｜",       &v->dsml_id);
+    (void)vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
+    (void)vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
+    (void)vocab_try_lookup(v, "<think>",         &v->think_start_id);
+    (void)vocab_try_lookup(v, "</think>",        &v->think_end_id);
+    (void)vocab_try_lookup(v, "｜DSML｜",        &v->dsml_id);
 
     return v;
 }
@@ -518,6 +518,14 @@ Vocab *vocab_load(Model *m) {
         case TOKENIZER_TYPE_NONE: ERRRET(NULL, "Unknown tokenizer model type");
         default: ERRRET(NULL, "Not support tokenizer type");
     }
+}
+
+static void vocab_free(Vocab *v) {
+    if (!v) return;
+    sfree(v->token);
+    tokenizer_table_free(&v->tokens);
+    tokenizer_table_free(&v->merges);
+    memset(v, 0, sizeof(*v));
 }
 
 /* Load model. */
@@ -554,6 +562,11 @@ Model *model_load(const char *path) {
     return m;
 }
 
+
+void model_close(Model *m) {
+
+}
+
 /* Load engine. */
 Engine *engine_load(EngineOptons *opts) {
     Engine *en = smalloc(sizeof(*en));
@@ -561,6 +574,13 @@ Engine *engine_load(EngineOptons *opts) {
     en->model = model_load(opts->model_path);
     if (!opts->inspect) en->vocab = vocab_load(en->model);
     return en;
+}
+
+
+void engine_close(Engine *en) {
+    if (!en) return;
+    vocab_free(en->vocab);
+    model_close(en->model);
 }
 
 static void model_summary(Model *m) {

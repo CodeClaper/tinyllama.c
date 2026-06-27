@@ -12,11 +12,15 @@
 #include "mm.h"
 #include "core.h"
 
+typedef struct  {
+    Engine *en;
+} Server;
+
+
 static void signal_handler(int sig) {
     UNUSED(sig);
     _exit(300);
 }
-
 
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
@@ -64,6 +68,9 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     return so;
 }
 
+static void server_resource_close(Server *server) {
+    engine_close(server->en);
+}
 
 int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
@@ -77,4 +84,9 @@ int main(int argc, char *argv[]) {
     ServerOptions so = parse_options(argc, argv);
     Engine *en = engine_load(&so.engine);
     if (so.inspect) engine_summary(en);
+
+    Server server;
+    server.en = en;
+
+    server_resource_close(&server);
 }
