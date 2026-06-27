@@ -693,8 +693,8 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
         map_count = ARR_LEN(unknown_layer_map);
     }
 
-    for (u64 ti = 0; ti < m->n_tensor; ti++) {
-        Key *k = &m->tensor[ti].key;
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        Key *k = &m->tensor[i].key;
         if (k->len < 7) continue;
         if (memcmp(k->content, "blk.", 4) != 0) continue;
 
@@ -707,10 +707,16 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
         const char *suffix_start = (const char *)k->content + j + 1;
         u32 suffix_len = k->len - j - 1;
 
+        /* Strip trailing ".weight" (GGUF tensors always end with it). */
+        if (suffix_len <= 7 || memcmp(suffix_start + suffix_len - 7, ".weight", 7) != 0)
+            continue;
+        suffix_len -= 7;
+
         for (int e = 0; e < map_count; e++) {
-            const char *s = map[e].suffix; u32 slen = (u32)strlen(s);
+            const char *s = map[e].suffix;
+            u32 slen = (u32)strlen(s);
             if (slen == suffix_len && memcmp(suffix_start, s, slen) == 0) {
-                layers[n].tensors[map[e].role] = &m->tensor[ti];
+                layers[n].tensors[map[e].role] = &m->tensor[i];
                 break;
             }
         }
