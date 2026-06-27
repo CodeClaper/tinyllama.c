@@ -1,12 +1,13 @@
 #include <signal.h>
 #include <errno.h>
-#include <stdatomic.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -22,18 +23,15 @@ typedef struct  {
     Session *session;
 } Server;
 
-static volatile int g_fd = -1;
-static volatile int g_stop = 0;
+static volatile sig_atomic_t g_stop = 0;
+static int g_event_fd = -1;
 
 static void signal_handler(int sig) {
     UNUSED(sig);
     if (g_stop) _exit(130);
     g_stop = 1;
-    if (g_fd >= 0) {
-        int fd = (int)g_fd;
-        g_fd = -1;
-        close(fd);
-    }
+    u64 val = 1;
+    (void)write(g_event_fd, &val, sizeof(val));
 }
 
 /* Useage. */
@@ -143,27 +141,41 @@ int main(int argc, char *argv[]) {
         server_resource_close(&server);
         slog_errno("Failed to listen on %s:%d: %s", so.host, so.port);
     }
-    g_fd = sfd;
+    g_event_fd = eventfd(0, EFD_NONBLOCK);
+    if (g_event_fd < 0) {
+        server_resource_close(&server);
+        close(sfd);
+        slog_errno("Failed to create eventfd");
+    }
+
     slog(INFO, "Server listening on http://%s:%d", so.host, so.port);
 
+    struct pollfd fds[2] = {
+        {.fd = sfd,     .events = POLLIN},
+        {.fd = g_event_fd, .events = POLLIN},
+    };
+
     while (!g_stop) {
-        int fd = accept(sfd, NULL, NULL);
-        if (fd < 0) {
-            if (g_stop) break;
+        int ret = poll(fds, 2, -1);
+        if (ret < 0) {
             if (errno == EINTR) continue;
-            slog(WARN, "Accept failed: %s", strerror(errno));
-            continue;
-        }
-        if (g_stop) {
-            close(fd);
+            slog(WARN, "Poll failed: %s", strerror(errno));
             break;
+        }
+        if (fds[1].revents & (POLLIN | POLLHUP)) break;
+        if (fds[0].revents & POLLIN) {
+            int fd = accept(sfd, NULL, NULL);
+            if (fd < 0) {
+                if (errno == EINTR) continue;
+                slog(WARN, "Accept failed: %s", strerror(errno));
+                continue;
+            }
+            close(fd);
         }
     }
 
-    if (g_fd >= 0) {
-        close(sfd);
-        g_fd = -1;
-    }
+    close(sfd);
+    close(g_event_fd);
 
     slog(INFO, "Server: shutdown requested, draining requests");
     server_resource_close(&server);
