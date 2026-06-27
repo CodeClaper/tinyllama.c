@@ -150,4 +150,8 @@ typedef struct {
     Weights *weights;
 } Engine;
 
+typedef struct {
+    Engine *en;
+} Session;
+
 #endif 

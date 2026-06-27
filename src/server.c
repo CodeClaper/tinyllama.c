@@ -1,10 +1,14 @@
 #include <signal.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include "def.h"
 #include "slog.h"
@@ -68,6 +72,34 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     return so;
 }
 
+static int listen_on(const char *host, int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    if (strcmp(host, "localhost") == 0) host = "127.0.0.1";
+    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
+        close(fd);
+        errno = EINVAL;
+        return -1;
+    }
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (listen(fd, 128) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+
 static void server_resource_close(Server *server) {
     engine_close(server->en);
 }
@@ -88,5 +120,11 @@ int main(int argc, char *argv[]) {
     Server server;
     server.en = en;
 
+    int fd = listen_on(so.host, so.port);
+    if (fd < 0) {
+        server_resource_close(&server);
+        slog_errno("Failed to listen on %s:%d: %s", so.host, so.port);
+    }
+    slog(INFO, "Server listening on http://%s:%d", so.host, so.port);
     server_resource_close(&server);
 }
