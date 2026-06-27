@@ -7,7 +7,7 @@ static bool llama_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
     /* Allocate standard KV cache. */
-    KvCache *kc = &s->cache;
+    KvCache *kc   = &s->cache;
     kc->n_layer   = c->n_layer;
     kc->head_dim  = c->head_dim;
     kc->n_kv_head = c->n_kv_head;
@@ -20,10 +20,7 @@ static bool llama_init(Session *s) {
         kc->std[i].cap = (u32)s->ctx_size;
     }
 
-    /* Token ring buffer */
     s->tokens = scalloc((u64)s->ctx_size, sizeof(u32));
-
-    /* Logits output buffer */
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
     return true;

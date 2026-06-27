@@ -2,11 +2,12 @@
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
+#include "../utils.h"
 
 static bool falcon_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
-    KvCache *kc = &s->cache;
+    KvCache *kc   = &s->cache;
     kc->n_layer   = c->n_layer;
     kc->head_dim  = c->head_dim;
     kc->n_kv_head = c->n_kv_head;
@@ -26,9 +27,9 @@ static bool falcon_init(Session *s) {
 }
 
 static bool falcon_forward(Session *s, u32 token, float *logits) {
-    (void)s;
-    (void)token;
-    (void)logits;
+    UNUSED(s);
+    UNUSED(token);
+    UNUSED(logits);
     /* TODO: implement Falcon forward pass (parallel attention
      *       + FFN with GELU). */
     slog(WARN, "falcon_forward is not yet implemented");

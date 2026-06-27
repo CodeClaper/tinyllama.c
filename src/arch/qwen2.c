@@ -2,6 +2,7 @@
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
+#include "../utils.h"
 
 static bool qwen2_init(Session *s) {
     ArchConfig *c = &s->cfg;
@@ -26,9 +27,9 @@ static bool qwen2_init(Session *s) {
 }
 
 static bool qwen2_forward(Session *s, u32 token, float *logits) {
-    (void)s;
-    (void)token;
-    (void)logits;
+    UNUSED(s);
+    UNUSED(token);
+    UNUSED(logits);
     /* TODO: implement Qwen2 forward pass (self-attention + FFN,
      *       with optional SSM layers and Q/K norms). */
     slog(WARN, "qwen2_forward is not yet implemented");

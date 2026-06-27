@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "../utils.h"
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
@@ -21,8 +22,7 @@ static bool deepseek_init(Session *s) {
                               sizeof(float));
 
         /* Compressed KV (MLA latent space). */
-        mc->compress_ratio = c->kv_lora_rank > 0
-            ? c->head_dim / c->kv_lora_rank : 2;
+        mc->compress_ratio = c->kv_lora_rank > 0 ? c->head_dim / c->kv_lora_rank : 2;
         mc->comp_cap = (u32)s->ctx_size;
         u64 comp_elems = (u64)mc->comp_cap * (u64)c->kv_lora_rank;
 
@@ -42,9 +42,9 @@ static bool deepseek_init(Session *s) {
 }
 
 static bool deepseek_forward(Session *s, u32 token, float *logits) {
-    (void)s;
-    (void)token;
-    (void)logits;
+    UNUSED(s);
+    UNUSED(token);
+    UNUSED(logits);
     /* TODO: implement DeepSeek forward pass with MLA attention
      *       and output head-chain (hc_base / hc_fn / hc_scale). */
     slog(WARN, "deepseek_forward is not yet implemented");

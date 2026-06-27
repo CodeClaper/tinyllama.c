@@ -50,16 +50,13 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 
     #undef TRY_I32
 
-    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u "
-         "head_dim=%u n_layer=%u n_vocab=%u",
+    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u n_layer=%u n_vocab=%u",
          arch_key_prefix(w->arch), cfg->n_embd, cfg->n_head,
          cfg->n_kv_head, cfg->head_dim, cfg->n_layer, cfg->n_vocab);
 
     if (cfg->kv_lora_rank)
-        slog(INFO, "ArchConfig MLA: kv_lora_rank=%u qk_nope_head_dim=%u "
-             "qk_rope_head_dim=%u",
-             cfg->kv_lora_rank, cfg->qk_nope_head_dim,
-             cfg->qk_rope_head_dim);
+        slog(INFO, "ArchConfig MLA: kv_lora_rank=%u qk_nope_head_dim=%u qk_rope_head_dim=%u",
+             cfg->kv_lora_rank, cfg->qk_nope_head_dim, cfg->qk_rope_head_dim);
 }
 
 const char *arch_key_prefix(ModelArch arch) {
