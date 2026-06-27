@@ -752,12 +752,10 @@ static Weights *weights_load(Model *m) {
         {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
     };
 
-    w->arch = model_detect_arch(m);
-
     const TensorMapEntry *map = NULL;
     int map_count = 0;
     for (int i = 0; i < ARR_LEN(arch_maps); i++) {
-        if (arch_maps[i].arch == w->arch) {
+        if (arch_maps[i].arch == m->arch) {
             map = arch_maps[i].entries;
             map_count = arch_maps[i].count;
             break;
@@ -781,7 +779,7 @@ static Weights *weights_load(Model *m) {
     }
 
     w->n_layer = model_count_layers(m);
-    w->layers  = layers_weights_load(m, w->arch, w->n_layer);
+    w->layers  = layers_weights_load(m, m->arch, w->n_layer);
     return w;
 }
 
@@ -814,7 +812,8 @@ Model *model_load(const char *path) {
     if (!cursor_u64(&c, &m->n_kv)) slog(ERROR, c.error);
 
     m->kv = kv_load(m, &c);
-    m->tensor = tensor_load(m, &c); 
+    m->tensor = tensor_load(m, &c);
+    m->arch = model_detect_arch(m);
 
     return m;
 }
@@ -906,7 +905,7 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (te && te->ndim >= 1) cfg->n_embd = (u32)te->dim[te->ndim - 1];
 
-    const char *pfx = arch_key_prefix(w->arch);
+    const char *pfx = arch_key_prefix(en->model->arch);
 
     /* Helper: try reading an i32 metadata key for this arch. */
     i32 v32;
@@ -938,7 +937,7 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     #undef TRY_I32
 
     slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u n_layer=%u n_vocab=%u",
-         arch_key_prefix(w->arch), cfg->n_embd, cfg->n_head,
+         arch_key_prefix(en->model->arch), cfg->n_embd, cfg->n_head,
          cfg->n_kv_head, cfg->head_dim, cfg->n_layer, cfg->n_vocab);
 
     if (cfg->kv_lora_rank)
@@ -962,7 +961,7 @@ Session *session_create(Engine *en, u32 ctx_size) {
     arch_config_init(en, &s->cfg);
 
     /* Bind the right ops table. */
-    switch (en->weights->arch) {
+    switch (en->model->arch) {
         case ARCH_LLAMA:    s->ops = llama_ops;    break;
         case ARCH_QWEN2:    s->ops = qwen2_ops;    break;
         case ARCH_DEEPSEEK: s->ops = deepseek_ops; break;

@@ -125,7 +125,6 @@ typedef struct {
 } LayerWeights;
 
 typedef struct {
-    ModelArch arch;
     u32 n_layer;
     TensorInfo *tensors[TENSOR_COUNT];
     LayerWeights *layers;
@@ -139,6 +138,7 @@ typedef struct {
     u64 n_kv;
     u64 n_tensor;
     u64 alignment;
+    ModelArch arch;
     KV  *kv;
     TensorInfo *tensor;
     u64 bytes;
