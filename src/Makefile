@@ -6,15 +6,18 @@ else
 endif
 LDADDCFLAGS = -lm
 
+OBJS = server.o core.o mm.o slog.o utils.o \
+       arch/arch_common.o arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o
+
 all: server
 
-server: server.o server.o core.o mm.o slog.o utils.o
-	$(CC) $(CFLAGS) server.o core.o mm.o slog.o utils.o -o $@ $(LDADDCFLAGS)
+server: $(OBJS)
+	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDADDCFLAGS)
 
 server.o: server.c def.h
 	$(CC) $(CFLAGS) -c server.c -o $@
 
-core.o: core.c core.h def.h
+core.o: core.c core.h def.h arch/arch.h
 	$(CC) $(CFLAGS) -c core.c -o $@
 
 mm.o: mm.c def.h mm.h
@@ -26,7 +29,22 @@ slog.o: slog.c def.h slog.h
 utils.o: utils.c def.h utils.h
 	$(CC) $(CFLAGS) -c utils.c -o $@
 
+arch/arch_common.o: arch/arch_common.c arch/arch.h def.h
+	$(CC) $(CFLAGS) -c arch/arch_common.c -o $@
+
+arch/llama.o: arch/llama.c arch/arch.h def.h
+	$(CC) $(CFLAGS) -c arch/llama.c -o $@
+
+arch/qwen2.o: arch/qwen2.c arch/arch.h def.h
+	$(CC) $(CFLAGS) -c arch/qwen2.c -o $@
+
+arch/deepseek.o: arch/deepseek.c arch/arch.h def.h
+	$(CC) $(CFLAGS) -c arch/deepseek.c -o $@
+
+arch/falcon.o: arch/falcon.c arch/arch.h def.h
+	$(CC) $(CFLAGS) -c arch/falcon.c -o $@
+
 .PHONY: clean all
 
 clean:
-	rm -f *.o tllm 
+	rm -f *.o arch/*.o server

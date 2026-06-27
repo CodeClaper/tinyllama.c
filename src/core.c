@@ -16,6 +16,7 @@
 #include "mm.h"
 #include "slog.h"
 #include "utils.h"
+#include "arch/arch.h"
 
 #define GGUF_MAGIC              0x46554747u /* "GGUF", little endian. */
 #define GGUF_VALID_VERSION      3           /* GGUF valid version, only support 3. */
@@ -246,10 +247,6 @@ static bool tokenizer_table_get(TokenizerTable *table, Key key, i32 *value) {
 }
 
 
-static void kv_cache_init() {
-
-}
-
 /* Sumary model. */
 static const char *gguf_value_type_name(u32 type) {
     switch (type) {
@@ -355,7 +352,7 @@ static bool model_get_array(Model *m, char *s, ArrayRef *out) {
     return true;
 }
 
-static bool model_get_i32(Model *m, const char *key, i32 *out) {
+bool model_get_i32(Model *m, const char *key, i32 *out) {
     KV *kv = model_find_kv(m, (char *)key);
     if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
     Cursor c = cursor_at(m->map, m->size, kv->value_pos);
@@ -886,14 +883,51 @@ void engine_close(Engine *en) {
     model_close(en->model);
 }
 
-/* Create session. */
-Session *session_create(Engine *en, int ctx_size) {
-    if (!en || ctx_size <= 0) return NULL; 
+Session *session_create(Engine *en, u32 ctx_size) {
+    if (!en || ctx_size == 0) return NULL;
 
     Session *s = smalloc(sizeof(*s));
-    s->en = en;
+    s->en       = en;
     s->ctx_size = ctx_size;
+    s->temperature = 0.0f;
+    s->top_p       = 1.0f;
+    s->top_k       = 1;
+    s->max_tokens  = 0;
+
+    /* Fill architecture config from model metadata. */
+    arch_config_init(en, &s->cfg);
+
+    /* Bind the right ops table. */
+    switch (en->weights->arch) {
+        case ARCH_LLAMA:    s->ops = llama_ops;    break;
+        case ARCH_QWEN2:    s->ops = qwen2_ops;    break;
+        case ARCH_DEEPSEEK: s->ops = deepseek_ops; break;
+        case ARCH_FALCON:   s->ops = falcon_ops;   break;
+        default:
+            slog(WARN, "Unknown architecture, falling back to llama.");
+            s->ops = llama_ops;
+            break;
+    }
+
+    /* Architecture-specific initialisation (allocates cache,
+     * token buffer, logits). */
+    if (!s->ops.init(s)) {
+        slog(WARN, "Session init failed — cleaning up.");
+        sfree(s);
+        return NULL;
+    }
+
+    slog(INFO, "Session created: ctx_size=%u n_layer=%u n_embd=%u "
+         "n_head=%u head_dim=%u",
+         s->ctx_size, s->cfg.n_layer, s->cfg.n_embd,
+         s->cfg.n_head, s->cfg.head_dim);
 
     return s;
+}
+
+void session_free(Session *s) {
+    if (!s) return;
+    if (s->ops.free) s->ops.free(s);
+    sfree(s);
 }
 

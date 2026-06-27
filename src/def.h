@@ -19,7 +19,7 @@ typedef int64_t     i64;
 typedef struct {
     const char *model_path;
     bool inspect;
-} EngineOptons; 
+} EngineOptons;
 
 typedef struct {
     EngineOptons engine;
@@ -132,31 +132,8 @@ typedef struct {
 } Weights;
 
 typedef struct {
-    float *raw_kv;
-    u32 n_raw;
-    u32 cap_raw;
-
-    u32 compress_ratio;
-    u32 comp_cap;
-    u32 n_comp;
-    float *attn_comp_kv;
-    float *attn_state_kv;
-    float *attn_state_score;
-
-    u32 n_index_comp;
-    float *index_comp_kv;
-    float *index_state_kv;
-    float *index_state_score;
-} KvLayerCache;
-
-typedef struct{
-    KvLayerCache *layers;
-    u32 head_dim;
-} KvCache;
-
-typedef struct {
     int fd;
-    u64 size;      
+    u64 size;
     u8  *map;
     u32 version;
     u64 n_kv;
@@ -173,10 +150,105 @@ typedef struct {
     Weights *weights;
 } Engine;
 
-typedef struct {
-    Engine *en;
-    KvCache cache;
-    u32 ctx_size;
-} Session;
+/* ================================================================
+ * Architecture Config
+ * ================================================================
+ * Hyper-parameters extracted from GGUF metadata, used by all
+ * architecture backends to size buffers / configure computation. */
 
-#endif 
+typedef struct {
+    u32 n_head;           /* attention.head_count                  */
+    u32 n_kv_head;        /* attention.head_count_kv (1 = MHA)     */
+    u32 head_dim;         /* attention head dimension              */
+    u32 n_embd;           /* embedding_length                     */
+    u32 n_layer;          /* block_count                          */
+    u32 n_vocab;          /* vocabulary size                      */
+
+    /* ---- DeepSeek MLA ---- */
+    u32 kv_lora_rank;     /* attention.kv_lora_rank               */
+    u32 qk_nope_head_dim; /* attention.qk_nope_head_dim           */
+    u32 qk_rope_head_dim; /* attention.qk_rope_head_dim           */
+} ArchConfig;
+
+/* ================================================================
+ * KV Cache
+ * ================================================================
+ * Two cache shapes: standard attention (Llama-style) and MLA
+ * (DeepSeek).  The KvCache union picks the right one at init
+ * time based on ModelArch. */
+
+/* Standard per-layer KV cache — Llama / Qwen2 / Falcon. */
+typedef struct {
+    float *k;       /* [cap * n_kv_head * head_dim]               */
+    float *v;       /* [cap * n_kv_head * head_dim]               */
+    u32    n;       /* cached token count                         */
+    u32    cap;     /* capacity (= ctx_size)                      */
+} AttnKvCache;
+
+/* DeepSeek MLA per-layer cache — compressed latent KV. */
+typedef struct {
+    float *raw_kv;
+    u32    n_raw;
+    u32    cap_raw;
+
+    u32    compress_ratio;
+    u32    comp_cap;
+    u32    n_comp;
+    float *attn_comp_kv;
+    float *attn_state_kv;
+    float *attn_state_score;
+
+    u32    n_index_comp;
+    float *index_comp_kv;
+    float *index_state_kv;
+    float *index_state_score;
+} MLAKvCache;
+
+typedef struct {
+    u32 n_layer;
+    u32 head_dim;
+    u32 n_kv_head;
+    union {
+        AttnKvCache *std;   /* [n_layer] — non-MLA architectures   */
+        MLAKvCache  *mla;   /* [n_layer] — DeepSeek MLA            */
+    };
+} KvCache;
+
+/* ================================================================
+ * Session
+ * ================================================================
+ * Session owns the inference loop state and delegates per-
+ * architecture computation to an ArchOps vtable.  Server code
+ * only sees the generic Session type. */
+
+typedef struct Session Session;
+
+typedef struct {
+    bool (*init)   (Session *s);
+    void (*free)   (Session *s);
+    bool (*forward)(Session *s, u32 token, float *logits);
+    void (*reset)  (Session *s);
+} ArchOps;
+
+struct Session {
+    Engine    *en;
+    ArchConfig cfg;
+    ArchOps    ops;
+
+    /* ---- Inference state ---- */
+    u32       *tokens;       /* [ctx_size] ring buffer             */
+    u32        n_tokens;     /* current position in ring buffer    */
+    float     *logits;       /* [n_vocab] output buffer            */
+    u32        ctx_size;
+
+    /* ---- KV cache ---- */
+    KvCache    cache;
+
+    /* ---- Sampling ---- */
+    float      temperature;
+    u32        top_k;
+    float      top_p;
+    u32        max_tokens;
+};
+
+#endif

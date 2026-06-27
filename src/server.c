@@ -102,6 +102,7 @@ static int listen_on(const char *host, int port) {
 
 
 static void server_resource_close(Server *server) {
+    session_free(server->session);
     engine_close(server->engine);
 }
 
@@ -118,10 +119,15 @@ int main(int argc, char *argv[]) {
     Engine *engine = engine_open(&so.engine);
     if (so.inspect) engine_summary(engine);
 
-    Session *session;
+    Session *session = session_create(engine, (u32)so.ctx_size);
+    if (!session) {
+        engine_close(engine);
+        slog(ERROR, "Failed to create session.");
+    }
 
     Server server;
     server.engine = engine;
+    server.session = session;
 
     int fd = listen_on(so.host, so.port);
     if (fd < 0) {
