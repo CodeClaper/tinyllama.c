@@ -132,6 +132,29 @@ typedef struct {
 } Weights;
 
 typedef struct {
+    float *raw_kv;
+    u32 n_raw;
+    u32 cap_raw;
+
+    u32 compress_ratio;
+    u32 comp_cap;
+    u32 n_comp;
+    float *attn_comp_kv;
+    float *attn_state_kv;
+    float *attn_state_score;
+
+    u32 n_index_comp;
+    float *index_comp_kv;
+    float *index_state_kv;
+    float *index_state_score;
+} KvLayerCache;
+
+typedef struct{
+    KvLayerCache *layers;
+    u32 head_dim;
+} KvCache;
+
+typedef struct {
     int fd;
     u64 size;      
     u8  *map;
@@ -152,6 +175,8 @@ typedef struct {
 
 typedef struct {
     Engine *en;
+    KvCache cache;
+    u32 ctx_size;
 } Session;
 
 #endif 

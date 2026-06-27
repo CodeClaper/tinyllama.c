@@ -245,6 +245,11 @@ static bool tokenizer_table_get(TokenizerTable *table, Key key, i32 *value) {
     return false;
 }
 
+
+static void kv_cache_init() {
+
+}
+
 /* Sumary model. */
 static const char *gguf_value_type_name(u32 type) {
     switch (type) {
@@ -807,28 +812,6 @@ Model *model_load(const char *path) {
     return m;
 }
 
-
-void model_close(Model *m) {
-
-}
-
-/* Load engine. */
-Engine *engine_load(EngineOptons *opts) {
-    Engine *en = smalloc(sizeof(*en));
-    acquire_instance_lock();
-    en->model = model_load(opts->model_path);
-    if (!opts->inspect) en->vocab = vocab_load(en->model);
-    en->weights = weights_load(en->model);
-    return en;
-}
-
-
-void engine_close(Engine *en) {
-    if (!en) return;
-    vocab_free(en->vocab);
-    model_close(en->model);
-}
-
 static void model_summary(Model *m) {
     slog(INFO, "Metadata:");
     for (u64 i = 0; i < m->n_kv; i++) {
@@ -878,8 +861,39 @@ static void model_summary(Model *m) {
 }
 
 
+void model_close(Model *m) {
+
+}
+
+/* Open engine. */
+Engine *engine_open(EngineOptons *opts) {
+    Engine *en = smalloc(sizeof(*en));
+    acquire_instance_lock();
+    en->model = model_load(opts->model_path);
+    if (!opts->inspect) en->vocab = vocab_load(en->model);
+    en->weights = weights_load(en->model);
+    return en;
+}
+
 /* Summary engine. */
 void engine_summary(Engine *en) {
     model_summary(en->model);
+}
+
+void engine_close(Engine *en) {
+    if (!en) return;
+    vocab_free(en->vocab);
+    model_close(en->model);
+}
+
+/* Create session. */
+Session *session_create(Engine *en, int ctx_size) {
+    if (!en || ctx_size <= 0) return NULL; 
+
+    Session *s = smalloc(sizeof(*s));
+    s->en = en;
+    s->ctx_size = ctx_size;
+
+    return s;
 }
 

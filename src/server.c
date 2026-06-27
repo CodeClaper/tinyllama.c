@@ -17,7 +17,8 @@
 #include "core.h"
 
 typedef struct  {
-    Engine *en;
+    Engine *engine;
+    Session *session;
 } Server;
 
 
@@ -101,7 +102,7 @@ static int listen_on(const char *host, int port) {
 
 
 static void server_resource_close(Server *server) {
-    engine_close(server->en);
+    engine_close(server->engine);
 }
 
 int main(int argc, char *argv[]) {
@@ -114,11 +115,13 @@ int main(int argc, char *argv[]) {
     sigaction(SIGTERM, &sa, NULL);
 
     ServerOptions so = parse_options(argc, argv);
-    Engine *en = engine_load(&so.engine);
-    if (so.inspect) engine_summary(en);
+    Engine *engine = engine_open(&so.engine);
+    if (so.inspect) engine_summary(engine);
+
+    Session *session;
 
     Server server;
-    server.en = en;
+    server.engine = engine;
 
     int fd = listen_on(so.host, so.port);
     if (fd < 0) {
