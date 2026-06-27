@@ -7,7 +7,7 @@ endif
 LDADDCFLAGS = -lm
 
 OBJS = server.o core.o mm.o slog.o utils.o \
-       arch/arch_common.o arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o
+       arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o
 
 all: server
 
@@ -28,9 +28,6 @@ slog.o: slog.c def.h slog.h
 
 utils.o: utils.c def.h utils.h
 	$(CC) $(CFLAGS) -c utils.c -o $@
-
-arch/arch_common.o: arch/arch_common.c arch/arch.h def.h
-	$(CC) $(CFLAGS) -c arch/arch_common.c -o $@
 
 arch/llama.o: arch/llama.c arch/arch.h def.h
 	$(CC) $(CFLAGS) -c arch/llama.c -o $@
