@@ -244,6 +244,9 @@ struct Session {
     /* ---- KV cache ---- */
     KvCache    cache;
 
+    /* ---- Arch-specific workspace ---- */
+    void       *arch_data;
+
     /* ---- Sampling ---- */
     float      temperature;
     u32        top_k;

@@ -404,7 +404,7 @@ static u32 model_count_layers(Model *m) {
     return max_n + 1;
 }
 
-/* Load KVs.. */
+/* Load KVs. */
 KV *kv_load(Model *m, Cursor *c) {
     KV *kv = scalloc(m->n_kv, sizeof(m->kv[0]));
     m->alignment = GGUF_DEFAULT_ALIGNMENT;
@@ -474,6 +474,12 @@ static TokenizerType tokenizer_type(Model *m) {
 static bool vocab_try_lookup(Vocab *v, const char *text, i32 *id) {
     Key key = {.content = (char *)text, .len = strlen(text)};
     return tokenizer_table_get(&v->tokens, key, id);
+}
+
+i32 vocab_lookup(Vocab *v, const char *text) {
+    i32 id;
+    if (vocab_try_lookup(v, text, &id)) return id;
+    return (i32)VOCAB_ID_NONE;
 }
 
 /* Load vocab for BPE. */

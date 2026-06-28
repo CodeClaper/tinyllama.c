@@ -1,5 +1,5 @@
 #include <signal.h>
-#include <errno.h>
+#include <pthread.h>
 #include "anet.h"
 #include "el.h"
 #include <stdio.h>
@@ -47,18 +47,107 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     el->stop = true;
 }
 
-/* Callback for accepting new connections. */
-static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
-    UNUSED(el);
+/* Greedy sampling: argmax over logits. */
+static u32 sample_greedy(float *logits, u32 n_vocab) {
+    u32 best = 0;
+    float best_val = logits[0];
+    for (u32 i = 1; i < n_vocab; i++) {
+        if (logits[i] > best_val) {
+            best_val = logits[i];
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Callback for reading client data and running inference. */
+static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
-    UNUSED(privdata);
-    int cfd = accept(fd, NULL, NULL);
-    if (cfd < 0) {
-        if (errno == EINTR) return;
-        slog(WARN, "Accept failed: %s", strerror(errno));
+    Server *server = (Server *)privdata;
+    Session *s = server->session;
+    Vocab *v = server->engine->vocab;
+
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        if (n < 0) slog_errno("Client read error");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
         return;
     }
-    close(cfd);
+    buf[n] = '\0';
+
+    /* Reset session state for new request. */
+    s->ops.reset(s);
+
+    /* ---- Prefill: tokenize prompt character-by-character ---- */
+    u32 prompt_tokens[4096];
+    int n_prompt = 0;
+    int max_prompt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
+    for (int i = 0; i < n && n_prompt < max_prompt; i++) {
+        char tmp[2] = {buf[i], '\0'};
+        i32 tid = vocab_lookup(v, tmp);
+        if (tid != (i32)VOCAB_ID_NONE)
+            prompt_tokens[n_prompt++] = (u32)tid;
+    }
+
+    if (n_prompt == 0) {
+        const char *err = "Error: no valid tokens in input\n";
+        (void)write(fd, err, strlen(err));
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
+    /* Feed prompt tokens into the model. */
+    for (int i = 0; i < n_prompt; i++) {
+        if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
+            const char *err = "Error: forward pass failed\n";
+            (void)write(fd, err, strlen(err));
+            delete_file_event(el, fd, ELOOP_READABLE);
+            close(fd);
+            return;
+        }
+    }
+
+    /* ---- Generate phase ---- */
+    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
+
+    /* Sample first token from prefill logits. */
+    u32 next_token = sample_greedy(s->logits, s->cfg.n_vocab);
+
+    for (u32 i = 0; i < max_tokens; i++) {
+        /* Stop on EOS. */
+        if (next_token == (u32)v->eos_id) break;
+
+        /* Write token text back to client. */
+        if (next_token < v->n_vocab && v->token[next_token].content) {
+            Key *tk = &v->token[next_token];
+            (void)write(fd, tk->content, tk->len);
+        }
+
+        /* Forward to get logits for next prediction. */
+        if (!s->ops.forward(s, next_token, s->logits)) break;
+        next_token = sample_greedy(s->logits, s->cfg.n_vocab);
+    }
+
+    delete_file_event(el, fd, ELOOP_READABLE);
+    close(fd);
+}
+
+/* Callback for accepting new connections. */
+static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
+    UNUSED(mask);
+    Server *server = (Server *)privdata;
+
+    int cfd, port;
+    char ip[128];
+
+    cfd = server_accept(fd, ip, &port);
+    if (cfd == ANET_ERR) slog_errno("Accept failed");
+    slog(INFO, "Accepted %s:%d attached thread id %ld.", ip, port, pthread_self());
+    if (create_file_event(el, cfd, ELOOP_READABLE, client_read_proc, server) == ELOOP_ERR)
+        slog(ERROR, "Create file event fail.");
 }
 
 /* Useage. */
@@ -123,7 +212,7 @@ static int setup_server_el(Server *server, ServerOptions so) {
         return ELOOP_ERR;
     }
 
-    retval = create_file_event(server->el, fd, ELOOP_READABLE, accept_proc, NULL);
+    retval = create_file_event(server->el, fd, ELOOP_READABLE, accept_proc, server);
     if (retval == ELOOP_ERR) return ELOOP_ERR;
     server->serverfd = fd;
 

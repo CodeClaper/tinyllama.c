@@ -7,3 +7,4 @@ void engine_close(Engine *en);
 void engine_summary(Engine *en);
 Session *session_create(Engine *en, u32 ctx_size);
 void session_free(Session *s);
+i32 vocab_lookup(Vocab *v, const char *text);
