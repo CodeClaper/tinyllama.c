@@ -49,17 +49,15 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     el->stop = true;
 }
 
-/* ---- Greedy longest-match tokenizer ---------------------------- */
-
-/* Tokenize text by greedily picking the longest vocab match at
+/* Greedy longest-match tokenizer.
+ * Tokenize text by greedily picking the longest vocab match at
  * each position.  Returns the number of tokens placed in tokens[]. */
-static int tokenize(Vocab *v, const char *text, int text_len,
-                    u32 *tokens, int max_tokens) {
+static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
     int n = 0, pos = 0;
     while (pos < text_len && n < max_tokens) {
         int best_len = 0;
-        i32 best_id   = (i32)VOCAB_ID_NONE;
-        int max_try   = text_len - pos;
+        i32 best_id  = (i32)VOCAB_ID_NONE;
+        int max_try  = text_len - pos;
         if (max_try > 64) max_try = 64;
 
         char tmp[65];

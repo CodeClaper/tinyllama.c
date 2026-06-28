@@ -16,7 +16,6 @@ void *smalloc(size_t n) {
     return p;
 }
 
-
 void *scalloc(size_t n, size_t s) {
     void *p = calloc(n, s);
     if (!p) fatal("Out of memory");
