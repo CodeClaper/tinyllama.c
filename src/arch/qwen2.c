@@ -4,6 +4,7 @@
 #include "../slog.h"
 #include "../utils.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ---- Qwen2 workspace ------------------------------------------- */
@@ -27,6 +28,27 @@ typedef struct {
 /* Read a single f32/f16/bf16 weight from a GGUF tensor at index i.
  * Logs a warning and returns 0 for unsupported quantisation types. */
 static inline float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
+    /* Bounds check: catch OOB access with diagnostic info. */
+    if (i >= ti->n_element) {
+        char name[128];
+        snprintf(name, sizeof(name), "%.*s",
+                 ti->key.len < 127 ? ti->key.len : 127, ti->key.content);
+        slog(WARN, "tensor_get_f32 OOB: tensor='%s' n_element=%llu "
+             "index=%llu type=%u ndim=%u",
+             name, (unsigned long long)ti->n_element,
+             (unsigned long long)i, ti->type, ti->ndim);
+        if (ti->ndim > 0) {
+            slog(WARN, "  dims: [%llu%s%s",
+                 (unsigned long long)ti->dim[0],
+                 ti->ndim > 1 ? "," : "]",
+                 ti->ndim > 1 ? "" : "");
+            for (u32 d = 1; d < ti->ndim && d < 8; d++)
+                slog(WARN, "         %llu%s",
+                     (unsigned long long)ti->dim[d],
+                     d + 1 < ti->ndim ? "," : "]");
+        }
+        slog(ERROR, "Fatal: out-of-bounds tensor access");
+    }
     switch (ti->type) {
         case 0: { /* f32 */
             const float *f = (const float *)(base + ti->offset);
@@ -109,6 +131,26 @@ static bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
         /* Proceed with tensor dims to avoid OOB access. */
         rows = tr;
         cols = tc;
+    }
+    /* Validate that the loop won't access beyond tensor bounds. */
+    if (rows == 0 || cols == 0) {
+        slog(WARN, "mat_vec_mul: zero-dim tensor rows=%llu cols=%llu",
+             (unsigned long long)rows, (unsigned long long)cols);
+        return false;
+    }
+    if (rows > 0 && cols > 0) {
+        u64 last_idx = (rows - 1) * cols + (cols - 1);
+        if (last_idx >= tw->n_element || cols * rows > tw->n_element) {
+            char name[128];
+            snprintf(name, sizeof(name), "%.*s",
+                     tw->key.len < 127 ? tw->key.len : 127, tw->key.content);
+            slog(WARN, "mat_vec_mul: OOB predict tensor='%s' n_el=%llu "
+                 "rows=%llu cols=%llu last_idx=%llu",
+                 name, (unsigned long long)tw->n_element,
+                 (unsigned long long)rows, (unsigned long long)cols,
+                 (unsigned long long)last_idx);
+            slog(ERROR, "Fatal: mat_vec_mul would access tensor out of bounds");
+        }
     }
     for (u64 r = 0; r < rows; r++) {
         float sum = 0.0f;
@@ -231,6 +273,16 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
     const u32 kv_dim    = n_kv_head * head_dim;
     const u32 q_dim     = n_head * head_dim;
     const u32 pos       = s->n_tokens;
+
+    /* Validate critical config values — crash-avoidance. */
+    if (n_embd == 0 || n_head == 0 || n_kv_head == 0 || head_dim == 0
+        || n_vocab == 0 || n_layer == 0) {
+        slog(WARN, "qwen2_forward: invalid config n_embd=%u n_head=%u "
+             "n_kv_head=%u head_dim=%u n_vocab=%u n_layer=%u",
+             n_embd, n_head, n_kv_head, head_dim, n_vocab, n_layer);
+        return false;
+    }
+
     const u32 n_rep     = n_head / n_kv_head;
     const float sqrt_d  = sqrtf((float)head_dim);
     const float eps     = 1e-6f;
@@ -277,6 +329,11 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                 u64 tr = t_qkv->dim[0];
                 u64 tc = t_qkv->ndim >= 2 ? t_qkv->dim[1] : 0;
                 u64 total_heads = n_head + 2 * n_kv_head;
+                if (total_heads == 0) {
+                    slog(WARN, "fused QKV: n_head+n_kv_head is 0 — "
+                         "metadata missing?");
+                    return false;
+                }
                 u64 hd = tr / total_heads;  /* head_dim from tensor */
                 u64 q_dim_t  = (u64)n_head * hd;
                 u64 kv_dim_t = (u64)n_kv_head * hd;
@@ -375,18 +432,14 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                for (u64 r = 0; r < n_embd; r++) {
-                    float sum = 0.0f;
-                    for (u64 c = 0; c < q_dim; c++)
-                        sum += tensor_get_f32(t_out, base, r * q_dim + c) * xb2[c];
-                    x[r] = sum;
-                }
+                mat_vec_mul(x, t_out, base, xb2, n_embd, q_dim);
             }
             /* else: no output projection (uses identity, unlikely) */
 
             /* Optional attention gate (QA-LoRA). */
             if (lw->tensors[TENSOR_ATTN_GATE]) {
-                for (u32 i = 0; i < n_embd; i++)
+                u64 gate_n = lw->tensors[TENSOR_ATTN_GATE]->n_element;
+                for (u32 i = 0; i < n_embd && (u64)i < gate_n; i++)
                     x[i] *= tensor_get_f32(lw->tensors[TENSOR_ATTN_GATE],
                                            base, (u64)i);
             }
@@ -426,13 +479,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                 ws->hb[i] *= ws->hb2[i];
 
             /* Down projection → add to residual */
-            for (u64 r = 0; r < n_embd; r++) {
-                float sum = 0.0f;
-                for (u64 c = 0; c < ffn_h; c++)
-                    sum += tensor_get_f32(t_down, base, r * ffn_h + c)
-                         * ws->hb[c];
-                x[r] = xb[r] + sum;
-            }
+            mat_vec_mul(x, t_down, base, ws->hb, n_embd, ffn_h);
+            for (u32 i = 0; i < n_embd; i++)
+                x[i] += xb[i];
         }
     }
 
