@@ -23,7 +23,7 @@ typedef struct {
 
 typedef struct {
     EngineOptons engine;
-    const char *host;
+    char *host;
     int port;
     int ctx_size;
     int default_tokens;

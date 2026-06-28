@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <errno.h>
+#include "anet.h"
 #include "el.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
+#include "anet.h"
 
 typedef struct  {
     Engine *engine;
@@ -105,32 +107,6 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     return so;
 }
 
-static int listen_on(const char *host, int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((uint16_t)port);
-    if (strcmp(host, "localhost") == 0) host = "127.0.0.1";
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
-        close(fd);
-        errno = EINVAL;
-        return -1;
-    }
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        close(fd);
-        return -1;
-    }
-    if (listen(fd, 128) != 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
 
 static int setup_server_el(Server *server, ServerOptions so) {
     int fd, retval;
@@ -141,8 +117,8 @@ static int setup_server_el(Server *server, ServerOptions so) {
     server->el->fileEventHead = NULL;
     server->el->stop = false;
 
-    fd = listen_on(so.host, so.port);
-    if (fd < 0) {
+    fd = create_tcp_server(so.host, so.port);
+    if (fd == ANET_ERR) {
         slog(WARN, "Create tcp socket server fail");
         return ELOOP_ERR;
     }
@@ -190,12 +166,13 @@ int main(int argc, char *argv[]) {
         engine_close(engine);
         slog(ERROR, "Failed to setup server event loop.");
     }
-    slog(INFO, "Server: listening on http://%s:%d", so.host, so.port);
 
     g_event_fd = eventfd(0, EFD_NONBLOCK);
     if (g_event_fd >= 0) {
         create_file_event(server.el, g_event_fd, ELOOP_READABLE, signal_callback, NULL);
     }
+
+    slog(INFO, "Server: listening on http://%s:%d", so.host, so.port);
 
     el_main(server.el);
 
