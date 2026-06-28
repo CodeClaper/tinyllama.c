@@ -87,9 +87,8 @@ static int tokenize(Vocab *v, const char *text, int text_len,
     return n;
 }
 
-/* ---- Chat template (Qwen-style) -------------------------------- */
-
-/* Build the Qwen chat prompt from user/system messages.
+/* Chat template (Qwen-style)
+ * Build the Qwen chat prompt from user/system messages.
  * Looks up "<|im_start|>" and "<|im_end|>" tokens as plain text.
  * Returns total prompt length (excluding NUL). */
 static int build_chat_prompt(const char *user_msg, const char *sys_msg,
@@ -116,8 +115,6 @@ static int build_chat_prompt(const char *user_msg, const char *sys_msg,
     return w;
 }
 
-/* ---- Sampling -------------------------------------------------- */
-
 static u32 sample_greedy(float *logits, u32 n_vocab) {
     u32 best = 0;
     float best_val = logits[0];
@@ -130,7 +127,6 @@ static u32 sample_greedy(float *logits, u32 n_vocab) {
     return best;
 }
 
-/* ---- Client read callback -------------------------------------- */
 
 static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
@@ -148,7 +144,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
     buf[n] = '\0';
 
-    /* ---- 1. Parse HTTP request ---- */
+    /* 1. Parse HTTP request. */
     char *body = http_body(buf, (int)n);
     if (!body) {
         http_respond(fd, 400, "Bad Request",
@@ -175,7 +171,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         }
     }
 
-    /* ---- 2. Extract messages from JSON body ---- */
+    /* 2. Extract messages from JSON body. */
     char user_buf[4096]  = {0};
     char sys_buf[1024]   = {0};
     const char *user_msg = "";
@@ -229,26 +225,25 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         return;
     }
 
-    /* ---- 3. Build chat prompt ---- */
+    /* 3. Build chat prompt. */
     char prompt_buf[8192];
     int prompt_len = build_chat_prompt(user_msg, sys_msg,
                                        prompt_buf, sizeof(prompt_buf) - 1);
     prompt_buf[prompt_len] = '\0';
 
-    /* ---- 4. Tokenize ---- */
+    /* 4. Tokenize. */
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    int n_prompt = tokenize(v, prompt_buf, prompt_len,
-                            prompt_tokens, max_pt);
+    int n_prompt = tokenize(v, prompt_buf, prompt_len, prompt_tokens, max_pt);
     if (n_prompt == 0) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"No valid tokens in input\"}", 34);
+        http_respond(fd, 400, "Bad Request", 
+                    "{\"error\":\"No valid tokens in input\"}", 34);
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
 
-    /* ---- 5. Reset session & prefill ---- */
+    /* 5. Reset session & prefill. */
     s->ops.reset(s);
     for (int i = 0; i < n_prompt; i++) {
         if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
@@ -260,7 +255,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         }
     }
 
-    /* ---- 6. Generate ---- */
+    /*  6. Generate. */
     u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
     char resp_body[65536];
     int  resp_used = 0;
@@ -284,7 +279,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
     resp_body[resp_used] = '\0';
 
-    /* ---- 7. Build OpenAI-compatible JSON response ---- */
+    /* 7. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
     int jw = 0;
 
