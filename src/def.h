@@ -139,6 +139,7 @@ typedef struct {
     u64 n_tensor;
     u64 alignment;
     ModelArch arch;
+    char  arch_name[32];
     KV  *kv;
     TensorInfo *tensor;
     u64 bytes;

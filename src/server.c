@@ -145,7 +145,7 @@ static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     cfd = server_accept(fd, ip, &port);
     if (cfd == ANET_ERR) slog_errno("Accept failed");
-    slog(INFO, "Accepted %s:%d attached thread id %ld.", ip, port, pthread_self());
+    slog(INFO, "Accepted %s:%d attached.", ip, port, pthread_self());
     if (create_file_event(el, cfd, ELOOP_READABLE, client_read_proc, server) == ELOOP_ERR)
         slog(ERROR, "Create file event fail.");
 }

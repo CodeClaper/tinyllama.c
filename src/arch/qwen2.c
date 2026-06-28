@@ -15,6 +15,7 @@ typedef struct {
     float *q;          /* [n_head * head_dim] query buffer           */
     float *k;          /* [n_kv_head * head_dim] key buffer          */
     float *v;          /* [n_kv_head * head_dim] value buffer        */
+    float *qkv_fused;  /* [q_dim + 2*kv_dim] fused QKV buffer        */
     float *scores;     /* [ctx_size] attention scores (per head)     */
     float *hb;         /* [ffn_hidden] FFN hidden buffer             */
     float *hb2;        /* [ffn_hidden] FFN hidden buffer 2           */
@@ -76,6 +77,12 @@ static inline float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
 static void rms_norm(float *o, const float *x,
                      TensorInfo *tw, const u8 *base,
                      int n, float eps) {
+    u64 tn = tw->dim[0]; /* 1-D weight tensor */
+    if ((u64)n > tn) {
+        slog(WARN, "rms_norm: n=%d > tensor dim=%llu, clamping", n,
+             (unsigned long long)tn);
+        n = (int)tn;
+    }
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
     float scale = 1.0f / sqrtf(ss / (float)n + eps);
@@ -85,15 +92,31 @@ static void rms_norm(float *o, const float *x,
     }
 }
 
-/* Matrix-vector multiply: y = W @ x  (W is [rows × cols], stored row-major). */
-static void mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
+/* Matrix-vector multiply: y = W @ x  (W is [rows × cols], stored row-major).
+ * cols is derived from the tensor's last dimension; rows must match dim[0]. */
+static bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
                         const float *x, u64 rows, u64 cols) {
+    if (!tw || tw->ndim < 2) {
+        slog(WARN, "mat_vec_mul: tensor missing or ndim < 2");
+        return false;
+    }
+    u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
+    u64 tr = tw->dim[0];            /* slowest-varying = row count */
+    if (tr != rows || tc != cols) {
+        slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+             (unsigned long)rows, (unsigned long)cols,
+             (unsigned long)tr,   (unsigned long)tc);
+        /* Proceed with tensor dims to avoid OOB access. */
+        rows = tr;
+        cols = tc;
+    }
     for (u64 r = 0; r < rows; r++) {
         float sum = 0.0f;
         for (u64 c = 0; c < cols; c++)
             sum += tensor_get_f32(tw, base, r * cols + c) * x[c];
         y[r] = sum;
     }
+    return true;
 }
 
 /* RoPE: apply rotary position embedding in-place.
@@ -149,6 +172,9 @@ static bool qwen2_init(Session *s) {
     ws->q      = scalloc((u64)c->n_head * (u64)c->head_dim, sizeof(float));
     ws->k      = scalloc((u64)c->n_kv_head * (u64)c->head_dim, sizeof(float));
     ws->v      = scalloc((u64)c->n_kv_head * (u64)c->head_dim, sizeof(float));
+    ws->qkv_fused = scalloc((u64)c->n_head * (u64)c->head_dim
+                           + 2 * (u64)c->n_kv_head * (u64)c->head_dim,
+                           sizeof(float));
     ws->scores = scalloc((u64)s->ctx_size, sizeof(float));
 
     /* Derive FFN hidden dim from layer 0 ffn_gate tensor. */
@@ -159,6 +185,31 @@ static bool qwen2_init(Session *s) {
                      : c->n_embd * 4;
     ws->hb  = scalloc((u64)ws->ffn_hidden, sizeof(float));
     ws->hb2 = scalloc((u64)ws->ffn_hidden, sizeof(float));
+
+    /* Diagnostic: log config and first-layer tensor dims. */
+    slog(INFO, "Qwen2 init: n_embd=%u n_head=%u n_kv_head=%u head_dim=%u "
+         "n_layer=%u n_vocab=%u ctx_size=%u",
+         c->n_embd, c->n_head, c->n_kv_head, c->head_dim,
+         c->n_layer, c->n_vocab, s->ctx_size);
+    slog(INFO, "Qwen2 init: ffn_hidden=%u q_dim=%u kv_dim=%u",
+         ws->ffn_hidden, (u32)(c->n_head * c->head_dim),
+         (u32)(c->n_kv_head * c->head_dim));
+    {
+        LayerWeights *lw0 = &w->layers[0];
+        TensorInfo *t = lw0->tensors[TENSOR_ATTN_QKV];
+        if (t) slog(INFO, "Layer 0: fused QKV dim[0]=%llu dim[1]=%llu ndim=%u",
+                    (unsigned long long)t->dim[0],
+                    (unsigned long long)(t->ndim >= 2 ? t->dim[1] : 0),
+                    t->ndim);
+        t = lw0->tensors[TENSOR_ATTN_Q];
+        if (t) slog(INFO, "Layer 0: separate Q dim[0]=%llu dim[1]=%llu",
+                    (unsigned long long)t->dim[0],
+                    (unsigned long long)(t->ndim >= 2 ? t->dim[1] : 0));
+        t = lw0->tensors[TENSOR_FFN_GATE];
+        if (t) slog(INFO, "Layer 0: ffn_gate dim[0]=%llu dim[1]=%llu",
+                    (unsigned long long)t->dim[0],
+                    (unsigned long long)(t->ndim >= 2 ? t->dim[1] : 0));
+    }
 
     s->arch_data = ws;
     return true;
@@ -216,18 +267,46 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             rms_norm(xb2, x, tn, base, (int)n_embd, eps);
         }
 
-        /* -- 2b. Q, K, V projections -- */
+        /* -- 2b. Q, K, V projections (fused or separate) -- */
         {
-            TensorInfo *tq = lw->tensors[TENSOR_ATTN_Q];
-            TensorInfo *tk = lw->tensors[TENSOR_ATTN_K];
-            TensorInfo *tv = lw->tensors[TENSOR_ATTN_V];
-            if (!tq || !tk || !tv) {
-                slog(WARN, "attn Q/K/V missing layer %u", l);
-                return false;
+            TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
+            if (t_qkv) {
+                /* Fused QKV.  Derive per-head dims from the tensor:
+                 * col dim (dim[1]) n_embd, row dim (dim[0]) =
+                 * q_dim + 2*kv_dim = (n_head + 2*n_kv_head) * head_dim. */
+                u64 tr = t_qkv->dim[0];
+                u64 tc = t_qkv->ndim >= 2 ? t_qkv->dim[1] : 0;
+                u64 total_heads = n_head + 2 * n_kv_head;
+                u64 hd = tr / total_heads;  /* head_dim from tensor */
+                u64 q_dim_t  = (u64)n_head * hd;
+                u64 kv_dim_t = (u64)n_kv_head * hd;
+
+                if (tc != n_embd || q_dim_t + 2 * kv_dim_t != tr) {
+                    slog(WARN, "QKV fused dim anomaly: tr=%llu tc=%llu "
+                         "hd=%llu q=%llu kv=%llu (cfg q=%u kv=%u)",
+                         (unsigned long long)tr, (unsigned long long)tc,
+                         (unsigned long long)hd,
+                         (unsigned long long)q_dim_t,
+                         (unsigned long long)kv_dim_t,
+                         q_dim, kv_dim);
+                }
+                mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2, tr, tc);
+                memcpy(q_buf, ws->qkv_fused,          (size_t)q_dim_t * sizeof(float));
+                memcpy(k_buf, ws->qkv_fused + q_dim_t, (size_t)kv_dim_t * sizeof(float));
+                memcpy(v_buf, ws->qkv_fused + q_dim_t + kv_dim_t,
+                       (size_t)kv_dim_t * sizeof(float));
+            } else {
+                TensorInfo *tq = lw->tensors[TENSOR_ATTN_Q];
+                TensorInfo *tk = lw->tensors[TENSOR_ATTN_K];
+                TensorInfo *tv = lw->tensors[TENSOR_ATTN_V];
+                if (!tq || !tk || !tv) {
+                    slog(WARN, "attn Q/K/V missing layer %u", l);
+                    return false;
+                }
+                mat_vec_mul(q_buf, tq, base, xb2, q_dim, n_embd);
+                mat_vec_mul(k_buf, tk, base, xb2, kv_dim, n_embd);
+                mat_vec_mul(v_buf, tv, base, xb2, kv_dim, n_embd);
             }
-            mat_vec_mul(q_buf, tq, base, xb2, q_dim, n_embd);
-            mat_vec_mul(k_buf, tk, base, xb2, kv_dim, n_embd);
-            mat_vec_mul(v_buf, tv, base, xb2, kv_dim, n_embd);
         }
 
         /* -- 2c. Optional Q/K LayerNorm -- */
@@ -412,6 +491,7 @@ static void qwen2_free(Session *s) {
         sfree(ws->q);
         sfree(ws->k);
         sfree(ws->v);
+        sfree(ws->qkv_fused);
         sfree(ws->scores);
         sfree(ws->hb);
         sfree(ws->hb2);

@@ -372,6 +372,11 @@ bool model_get_i32(Model *m, const char *key, i32 *out) {
 static ModelArch model_detect_arch(Model *m) {
     Key arch_name;
     if (!model_get_key(m, "general.architecture", &arch_name)) return ARCH_UNKNOWN;
+    /* Store the architecture name for metadata key lookups. */
+    u32 n = arch_name.len < sizeof(m->arch_name) - 1 ? arch_name.len
+                                                      : (u32)sizeof(m->arch_name) - 1;
+    memcpy(m->arch_name, arch_name.content, n);
+    m->arch_name[n] = '\0';
     if (key_streq(arch_name, "llama"))   return ARCH_LLAMA;
     if (key_streq(arch_name, "qwen2"))   return ARCH_QWEN2;
     if (key_streq(arch_name, "qwen35"))  return ARCH_QWEN2;
@@ -911,16 +916,31 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (te && te->ndim >= 1) cfg->n_embd = (u32)te->dim[te->ndim - 1];
 
-    const char *pfx = arch_key_prefix(en->model->arch);
+    /* Use the architecture name stored in the model (e.g. "qwen35")
+     * as the metadata key prefix; fall back to the generic prefix
+     * derived from the arch enum for older models. */
+    const char *pfx = en->model->arch_name[0] ? en->model->arch_name
+                                              : arch_key_prefix(en->model->arch);
 
-    /* Helper: try reading an i32 metadata key for this arch. */
+    /* Helper: try reading an i32 metadata key for this arch.
+     * Try the arch-name prefix first, then the generic prefix. */
     i32 v32;
-    #define TRY_I32(suffix, field) do {                       \
-        char k[96];                                           \
-        int  n = snprintf(k, sizeof(k), "%s.%s", pfx, suffix);\
-        if (n > 0 && (size_t)n < sizeof(k))                   \
-            if (model_get_i32(en->model, k, &v32))            \
-                cfg->field = (u32)v32;                        \
+    #define TRY_I32(suffix, field) do {                              \
+        char k[96];                                                  \
+        int  n = snprintf(k, sizeof(k), "%s.%s", pfx, suffix);      \
+        if (n > 0 && (size_t)n < sizeof(k))                         \
+            if (model_get_i32(en->model, k, &v32))                  \
+                cfg->field = (u32)v32;                              \
+        /* Also try the generic arch prefix if different from pfx */ \
+        if (cfg->field == 0) {                                      \
+            const char *gpfx = arch_key_prefix(en->model->arch);    \
+            if (strcmp(gpfx, pfx) != 0) {                           \
+                n = snprintf(k, sizeof(k), "%s.%s", gpfx, suffix); \
+                if (n > 0 && (size_t)n < sizeof(k))                \
+                    if (model_get_i32(en->model, k, &v32))          \
+                        cfg->field = (u32)v32;                      \
+            }                                                       \
+        }                                                           \
     } while(0)
 
     /* Attention head count. */
