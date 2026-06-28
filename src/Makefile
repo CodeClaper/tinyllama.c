@@ -6,7 +6,7 @@ else
 endif
 LDADDCFLAGS = -lm
 
-OBJS = server.o core.o mm.o slog.o utils.o \
+OBJS = server.o core.o mm.o slog.o utils.o el.o \
        arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o
 
 all: server
@@ -28,6 +28,9 @@ slog.o: slog.c def.h slog.h
 
 utils.o: utils.c def.h utils.h
 	$(CC) $(CFLAGS) -c utils.c -o $@
+
+el.o: el.c el.h
+	$(CC) $(CFLAGS) -c el.c -o $@
 
 arch/llama.o: arch/llama.c arch/arch.h def.h
 	$(CC) $(CFLAGS) -c arch/llama.c -o $@
