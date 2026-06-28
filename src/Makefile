@@ -14,7 +14,7 @@ all: server
 server: $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDADDCFLAGS)
 
-server.o: server.c def.h
+server.o: server.c def.h el.h
 	$(CC) $(CFLAGS) -c server.c -o $@
 
 core.o: core.c core.h def.h arch/arch.h

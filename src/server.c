@@ -1,6 +1,6 @@
 #include <signal.h>
 #include <errno.h>
-#include <poll.h>
+#include "el.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,17 +21,42 @@
 typedef struct  {
     Engine *engine;
     Session *session;
+    EventLoop *el;
+    int serverfd;
 } Server;
 
-static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_signal_count = 0;
 static int g_event_fd = -1;
 
 static void signal_handler(int sig) {
     UNUSED(sig);
-    if (g_stop) _exit(130);
-    g_stop = 1;
+    if (g_signal_count > 0) _exit(130);
+    g_signal_count = 1;
     u64 val = 1;
     (void)write(g_event_fd, &val, sizeof(val));
+}
+
+/* Callback for signal eventfd — wake up and stop the event loop. */
+static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
+    UNUSED(mask);
+    UNUSED(privdata);
+    u64 val;
+    (void)read(fd, &val, sizeof(val));
+    el->stop = true;
+}
+
+/* Callback for accepting new connections. */
+static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
+    UNUSED(el);
+    UNUSED(mask);
+    UNUSED(privdata);
+    int cfd = accept(fd, NULL, NULL);
+    if (cfd < 0) {
+        if (errno == EINTR) return;
+        slog(WARN, "Accept failed: %s", strerror(errno));
+        return;
+    }
+    close(cfd);
 }
 
 /* Useage. */
@@ -107,6 +132,28 @@ static int listen_on(const char *host, int port) {
     return fd;
 }
 
+static int setup_server_el(Server *server, ServerOptions so) {
+    int fd, retval;
+
+    server->el = smalloc(sizeof(EventLoop));
+    server->el->numkeys = 0;
+    server->el->maxfd = 0;
+    server->el->fileEventHead = NULL;
+    server->el->stop = false;
+
+    fd = listen_on(so.host, so.port);
+    if (fd < 0) {
+        slog(WARN, "Create tcp socket server fail");
+        return ELOOP_ERR;
+    }
+
+    retval = create_file_event(server->el, fd, ELOOP_READABLE, accept_proc, NULL);
+    if (retval == ELOOP_ERR) return ELOOP_ERR;
+    server->serverfd = fd;
+
+    return ELOOP_OK;
+}
+
 
 static void server_resource_close(Server *server) {
     session_free(server->session);
@@ -136,49 +183,15 @@ int main(int argc, char *argv[]) {
     server.engine = engine;
     server.session = session;
 
-    int sfd = listen_on(so.host, so.port);
-    if (sfd < 0) {
-        server_resource_close(&server);
-        slog_errno("Failed to listen on %s:%d: %s", so.host, so.port);
+    if (setup_server_el(&server, so) == ELOOP_ERR) {
+        engine_close(engine);
+        slog(ERROR, "Failed to setup server event loop.");
     }
-    g_event_fd = eventfd(0, EFD_NONBLOCK);
-    if (g_event_fd < 0) {
-        server_resource_close(&server);
-        close(sfd);
-        slog_errno("Failed to create eventfd");
-    }
+    slog(INFO, "Server: listening on http://%s:%d", so.host, so.port);
 
-    slog(INFO, "Server listening on http://%s:%d", so.host, so.port);
-
-    struct pollfd fds[2] = {
-        {.fd = sfd,     .events = POLLIN},
-        {.fd = g_event_fd, .events = POLLIN},
-    };
-
-    while (!g_stop) {
-        int ret = poll(fds, 2, -1);
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            slog(WARN, "Poll failed: %s", strerror(errno));
-            break;
-        }
-        if (fds[1].revents & (POLLIN | POLLHUP)) break;
-        if (fds[0].revents & POLLIN) {
-            int fd = accept(sfd, NULL, NULL);
-            if (fd < 0) {
-                if (errno == EINTR) continue;
-                slog(WARN, "Accept failed: %s", strerror(errno));
-                continue;
-            }
-            close(fd);
-        }
-    }
-
-    close(sfd);
-    close(g_event_fd);
+    el_main(server.el);
 
     slog(INFO, "Server: shutdown requested, draining requests");
     server_resource_close(&server);
-
     return 0;
 }

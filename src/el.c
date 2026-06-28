@@ -78,8 +78,8 @@ void process_event(EventLoop *el, int flags) {
                 ) {
                     int mask = 0;
                     if (fe->mask & ELOOP_READABLE && FD_ISSET(fd, &rfds)) mask |= ELOOP_READABLE;
-                    if (fe->mask & ELOOP_WRITABLE && FD_ISSET(fd, &rfds)) mask |= ELOOP_WRITABLE;
-                    if (fe->mask & ELOOP_EXCEPTION && FD_ISSET(fd, &rfds)) mask |= ELOOP_EXCEPTION;
+                    if (fe->mask & ELOOP_WRITABLE && FD_ISSET(fd, &wfds)) mask |= ELOOP_WRITABLE;
+                    if (fe->mask & ELOOP_EXCEPTION && FD_ISSET(fd, &efds)) mask |= ELOOP_EXCEPTION;
                     
                     /* Procee file event. */
                     fe->proc(el, fd, mask, fe->privdata);
