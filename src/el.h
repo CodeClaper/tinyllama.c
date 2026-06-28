@@ -39,6 +39,7 @@ typedef struct FileEvent {
 
 int create_file_event(EventLoop *el, int fd, int mask, elFileProc *proc, void *privdata);
 void delete_file_event(EventLoop *el, int fd, int mask);
+void el_free(EventLoop *el);
 void process_event(EventLoop *el, int flags);
 void el_main(EventLoop *el);
 

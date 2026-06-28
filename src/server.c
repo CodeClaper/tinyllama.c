@@ -158,6 +158,9 @@ static int setup_server_el(Server *server, ServerOptions so) {
 static void server_resource_close(Server *server) {
     session_free(server->session);
     engine_close(server->engine);
+    el_free(server->el);
+    if (server->serverfd >= 0) close(server->serverfd);
+    if (g_event_fd >= 0)    close(g_event_fd);
 }
 
 int main(int argc, char *argv[]) {
@@ -188,6 +191,11 @@ int main(int argc, char *argv[]) {
         slog(ERROR, "Failed to setup server event loop.");
     }
     slog(INFO, "Server: listening on http://%s:%d", so.host, so.port);
+
+    g_event_fd = eventfd(0, EFD_NONBLOCK);
+    if (g_event_fd >= 0) {
+        create_file_event(server.el, g_event_fd, ELOOP_READABLE, signal_callback, NULL);
+    }
 
     el_main(server.el);
 

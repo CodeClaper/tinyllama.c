@@ -95,6 +95,17 @@ void process_event(EventLoop *el, int flags) {
 
 }
 
+/* Free all file events and the event loop itself. */
+void el_free(EventLoop *el) {
+    FileEvent *fe = el->fileEventHead, *next;
+    while (fe != NULL) {
+        next = fe->next;
+        sfree(fe);
+        fe = next;
+    }
+    sfree(el);
+}
+
 /* The main entry for event loop. */
 void el_main(EventLoop *el) {
     while (!el->stop) {
