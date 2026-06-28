@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <time.h>
+#include <strings.h>
 #include <unistd.h>
 #include "def.h"
 #include "slog.h"
@@ -47,7 +49,198 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     el->stop = true;
 }
 
-/* Greedy sampling: argmax over logits. */
+/* ---- HTTP helpers ---------------------------------------------- */
+
+/* Find the body of an HTTP request (after \r\n\r\n).  Returns NULL
+ * if the request is incomplete. */
+static char *http_body(char *req, int len) {
+    for (int i = 0; i + 3 < len; i++) {
+        if (req[i] == '\r' && req[i+1] == '\n' &&
+            req[i+2] == '\r' && req[i+3] == '\n')
+            return req + i + 4;
+    }
+    return NULL;
+}
+
+/* Extract an HTTP header value (returns pointer into buf, or ""). */
+static const char *http_header(char *buf, const char *name) {
+    /* Headers end at \r\n\r\n */
+    char *end = strstr(buf, "\r\n\r\n");
+    if (!end) return "";
+    int name_len = strlen(name);
+
+    /* Walk lines after the request line */
+    char *line = strstr(buf, "\r\n");
+    if (!line) return "";
+    line += 2;
+
+    while (line < end) {
+        if (strncasecmp(line, name, name_len) == 0 &&
+            line[name_len] == ':') {
+            const char *val = line + name_len + 1;
+            while (*val == ' ') val++;
+            return val;  /* points into buf, lives long enough */
+        }
+        char *next = strstr(line, "\r\n");
+        if (!next) break;
+        line = next + 2;
+    }
+    return "";
+}
+
+/* ---- JSON helpers (minimal, no-library) ------------------------ */
+
+/* Extract a JSON string value associated with key.  Returns a
+ * pointer into json (the value between the quotes), and sets *len
+ * to the byte length.  Handles basic \" and \\ escapes. */
+static char *json_get_string(char *json, const char *key, int *len) {
+    char search[128];
+    int slen = snprintf(search, sizeof(search), "\"%s\"", key);
+    if (slen < 0 || slen >= (int)sizeof(search)) return NULL;
+
+    char *pos = json;
+    while ((pos = strstr(pos, search)) != NULL) {
+        pos += slen;
+        /* Skip whitespace before colon */
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        if (*pos != ':') continue;
+        pos++;
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        if (*pos != '"') continue;
+        pos++; /* skip opening quote */
+        char *start = pos;
+        /* Scan to closing unescaped quote */
+        while (*pos && *pos != '"') {
+            if (*pos == '\\' && *(pos + 1)) pos++;
+            pos++;
+        }
+        if (*pos != '"') continue;
+        *len = (int)(pos - start);
+        return start;
+    }
+    return NULL;
+}
+
+/* Copy src[0..len] to dst, unescaping JSON escape sequences.
+ * Returns the number of bytes written (excluding NUL). */
+static int json_unescape(char *dst, const char *src, int len) {
+    int w = 0;
+    for (int i = 0; i < len; i++) {
+        if (src[i] == '\\' && i + 1 < len) {
+            i++;
+            switch (src[i]) {
+                case '"':  dst[w++] = '"';  break;
+                case '\\': dst[w++] = '\\'; break;
+                case '/':  dst[w++] = '/';  break;
+                case 'n':  dst[w++] = '\n'; break;
+                case 'r':  dst[w++] = '\r'; break;
+                case 't':  dst[w++] = '\t'; break;
+                case 'u':  dst[w++] = '?';  i += 4; break; /* simplify */
+                default:   dst[w++] = src[i]; break;
+            }
+        } else {
+            dst[w++] = src[i];
+        }
+    }
+    return w;
+}
+
+/* Escape a string for JSON output.  Returns number of bytes written
+ * (excluding NUL).  Truncates if out_len is too small. */
+static int json_escape_str(char *out, int out_len, const char *in, int in_len) {
+    int w = 0;
+    for (int i = 0; i < in_len && w + 6 < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        switch (c) {
+            case '"':  out[w++] = '\\'; out[w++] = '"';  break;
+            case '\\': out[w++] = '\\'; out[w++] = '\\'; break;
+            case '\n': out[w++] = '\\'; out[w++] = 'n';  break;
+            case '\r': out[w++] = '\\'; out[w++] = 'r';  break;
+            case '\t': out[w++] = '\\'; out[w++] = 't';  break;
+            case '\b': out[w++] = '\\'; out[w++] = 'b';  break;
+            case '\f': out[w++] = '\\'; out[w++] = 'f';  break;
+            default:
+                if (c < 0x20) {
+                    w += snprintf(out + w, out_len - w, "\\u%04x", c);
+                } else {
+                    out[w++] = (char)c;
+                }
+        }
+    }
+    return w;
+}
+
+/* ---- Greedy longest-match tokenizer ---------------------------- */
+
+/* Tokenize text by greedily picking the longest vocab match at
+ * each position.  Returns the number of tokens placed in tokens[]. */
+static int tokenize(Vocab *v, const char *text, int text_len,
+                    u32 *tokens, int max_tokens) {
+    int n = 0, pos = 0;
+    while (pos < text_len && n < max_tokens) {
+        int best_len = 0;
+        i32 best_id   = (i32)VOCAB_ID_NONE;
+        int max_try   = text_len - pos;
+        if (max_try > 64) max_try = 64;
+
+        char tmp[65];
+        for (int len = 1; len <= max_try; len++) {
+            tmp[len - 1] = text[pos + len - 1];
+            tmp[len] = '\0';
+            i32 id = vocab_lookup(v, tmp);
+            if (id != (i32)VOCAB_ID_NONE) {
+                best_len = len;
+                best_id  = id;
+            }
+        }
+        if (best_len > 0) {
+            tokens[n++] = (u32)best_id;
+            pos += best_len;
+        } else {
+            /* Single-byte fallback */
+            char byte[2] = {text[pos], '\0'};
+            i32 id = vocab_lookup(v, byte);
+            if (id != (i32)VOCAB_ID_NONE)
+                tokens[n++] = (u32)id;
+            pos++;
+        }
+    }
+    return n;
+}
+
+/* ---- Chat template (Qwen-style) -------------------------------- */
+
+/* Build the Qwen chat prompt from user/system messages.
+ * Looks up "<|im_start|>" and "<|im_end|>" tokens as plain text.
+ * Returns total prompt length (excluding NUL). */
+static int build_chat_prompt(const char *user_msg, const char *sys_msg,
+                             char *out, int out_len) {
+    int w = 0;
+    /* Safe append helper */
+    #define APPEND(s) do {                                   \
+        int slen = (int)strlen(s);                            \
+        if (w + slen >= out_len) return w;                    \
+        memcpy(out + w, s, slen); w += slen;                 \
+    } while (0)
+
+    if (sys_msg && sys_msg[0]) {
+        APPEND("<|im_start|>system\n");
+        APPEND(sys_msg);
+        APPEND("<|im_end|>\n");
+    }
+    APPEND("<|im_start|>user\n");
+    APPEND(user_msg);
+    APPEND("<|im_end|>\n");
+    APPEND("<|im_start|>assistant\n");
+
+    #undef APPEND
+    return w;
+}
+
+/* ---- Sampling -------------------------------------------------- */
+
 static u32 sample_greedy(float *logits, u32 n_vocab) {
     u32 best = 0;
     float best_val = logits[0];
@@ -60,14 +253,33 @@ static u32 sample_greedy(float *logits, u32 n_vocab) {
     return best;
 }
 
-/* Callback for reading client data and running inference. */
+/* ---- HTTP response --------------------------------------------- */
+
+/* Send a minimal HTTP response with a JSON body. */
+static void http_respond(int fd, int status, const char *status_msg,
+                         const char *body, int body_len) {
+    char hdr[256];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 %d %s\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %d\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      status, status_msg, body_len);
+    (void)write(fd, hdr, hl);
+    if (body && body_len > 0)
+        (void)write(fd, body, body_len);
+}
+
+/* ---- Client read callback -------------------------------------- */
+
 static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
     Server *server = (Server *)privdata;
     Session *s = server->session;
-    Vocab *v = server->engine->vocab;
+    Vocab   *v = server->engine->vocab;
 
-    char buf[4096];
+    char buf[8192];
     ssize_t n = read(fd, buf, sizeof(buf) - 1);
     if (n <= 0) {
         if (n < 0) slog_errno("Client read error");
@@ -77,59 +289,179 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
     buf[n] = '\0';
 
-    /* Reset session state for new request. */
-    s->ops.reset(s);
-
-    /* ---- Prefill: tokenize prompt character-by-character ---- */
-    u32 prompt_tokens[4096];
-    int n_prompt = 0;
-    int max_prompt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    for (int i = 0; i < n && n_prompt < max_prompt; i++) {
-        char tmp[2] = {buf[i], '\0'};
-        i32 tid = vocab_lookup(v, tmp);
-        if (tid != (i32)VOCAB_ID_NONE)
-            prompt_tokens[n_prompt++] = (u32)tid;
-    }
-
-    if (n_prompt == 0) {
-        const char *err = "Error: no valid tokens in input\n";
-        (void)write(fd, err, strlen(err));
+    /* ---- 1. Parse HTTP request ---- */
+    char *body = http_body(buf, (int)n);
+    if (!body) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"Incomplete HTTP request\"}", 33);
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
 
-    /* Feed prompt tokens into the model. */
+    /* Check Content-Length and read remaining body if needed. */
+    {
+        const char *cl_str = http_header(buf, "Content-Length");
+        int cl = cl_str[0] ? atoi(cl_str) : 0;
+        int body_len = (int)((buf + n) - body);
+        if (cl > 0 && body_len < cl) {
+            int to_read = cl - body_len;
+            if (to_read > 0 && (int)sizeof(buf) - n > to_read) {
+                ssize_t more = read(fd, buf + n, to_read);
+                if (more > 0) {
+                    n += more;
+                    buf[n] = '\0';
+                }
+            }
+        }
+    }
+
+    /* ---- 2. Extract messages from JSON body ---- */
+    char user_buf[4096]  = {0};
+    char sys_buf[1024]   = {0};
+    const char *user_msg = "";
+    const char *sys_msg  = NULL;
+
+    /* Look for system message */
+    int slen = 0;
+    char *sys_raw = json_get_string(body, "content", &slen);
+    if (sys_raw) {
+        /* Check if this content belongs to a system-role message */
+        char *role_search = sys_raw - 40; /* rough lookback */
+        if (role_search < body) role_search = body;
+        if (strstr(role_search, "\"system\"")) {
+            int ul = json_unescape(sys_buf, sys_raw,
+                                   slen < (int)sizeof(sys_buf) - 1
+                                   ? slen : (int)sizeof(sys_buf) - 1);
+            sys_buf[ul] = '\0';
+            sys_msg = sys_buf;
+        }
+    }
+
+    /* Look for all "content" fields — pick the last one preceded by "user" */
+    {
+        char *scan = body;
+        char *last_user_content = NULL;
+        int   last_user_len = 0;
+        int   clen = 0;
+        while ((scan = json_get_string(scan, "content", &clen)) != NULL) {
+            /* Look backwards for "role": "user" within ~60 chars */
+            char *check = scan - 60;
+            if (check < body) check = body;
+            if (strstr(check, "\"user\"")) {
+                last_user_content = scan;
+                last_user_len = clen;
+            }
+            scan += clen + 2;
+        }
+        if (last_user_content) {
+            int ul = json_unescape(user_buf, last_user_content,
+                                   last_user_len < (int)sizeof(user_buf) - 1
+                                   ? last_user_len : (int)sizeof(user_buf) - 1);
+            user_buf[ul] = '\0';
+            user_msg = user_buf;
+        }
+    }
+    if (!user_msg[0]) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"No user message found\"}", 31);
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
+    /* ---- 3. Build chat prompt ---- */
+    char prompt_buf[8192];
+    int prompt_len = build_chat_prompt(user_msg, sys_msg,
+                                       prompt_buf, sizeof(prompt_buf) - 1);
+    prompt_buf[prompt_len] = '\0';
+
+    /* ---- 4. Tokenize ---- */
+    u32 prompt_tokens[4096];
+    int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
+    int n_prompt = tokenize(v, prompt_buf, prompt_len,
+                            prompt_tokens, max_pt);
+    if (n_prompt == 0) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"No valid tokens in input\"}", 34);
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
+    /* ---- 5. Reset session & prefill ---- */
+    s->ops.reset(s);
     for (int i = 0; i < n_prompt; i++) {
         if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
-            const char *err = "Error: forward pass failed\n";
-            (void)write(fd, err, strlen(err));
+            http_respond(fd, 500, "Internal Server Error",
+                         "{\"error\":\"Forward pass failed\"}", 30);
             delete_file_event(el, fd, ELOOP_READABLE);
             close(fd);
             return;
         }
     }
 
-    /* ---- Generate phase ---- */
+    /* ---- 6. Generate ---- */
     u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
+    char resp_body[65536];
+    int  resp_used = 0;
 
-    /* Sample first token from prefill logits. */
     u32 next_token = sample_greedy(s->logits, s->cfg.n_vocab);
+    u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
-        /* Stop on EOS. */
         if (next_token == (u32)v->eos_id) break;
-
-        /* Write token text back to client. */
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
-            (void)write(fd, tk->content, tk->len);
+            int remaining = (int)sizeof(resp_body) - resp_used - 1;
+            if ((int)tk->len < remaining) {
+                memcpy(resp_body + resp_used, tk->content, tk->len);
+                resp_used += tk->len;
+            }
         }
-
-        /* Forward to get logits for next prediction. */
+        n_gen++;
         if (!s->ops.forward(s, next_token, s->logits)) break;
         next_token = sample_greedy(s->logits, s->cfg.n_vocab);
     }
+    resp_body[resp_used] = '\0';
+
+    /* ---- 7. Build OpenAI-compatible JSON response ---- */
+    char json_buf[65536];
+    int jw = 0;
+
+    /* JSON-escape the generated text */
+    char escaped[65536];
+    int esc_len = json_escape_str(escaped, (int)sizeof(escaped) - 1,
+                                  resp_body, resp_used);
+    escaped[esc_len] = '\0';
+
+    time_t now = time(NULL);
+    jw = snprintf(json_buf, sizeof(json_buf),
+                  "{"
+                  "\"id\":\"chatcmpl-%ld\","
+                  "\"object\":\"chat.completion\","
+                  "\"created\":%ld,"
+                  "\"model\":\"default\","
+                  "\"choices\":[{"
+                      "\"index\":0,"
+                      "\"message\":{"
+                          "\"role\":\"assistant\","
+                          "\"content\":\"%s\""
+                      "},"
+                      "\"finish_reason\":\"%s\""
+                  "}],"
+                  "\"usage\":{"
+                      "\"prompt_tokens\":%d,"
+                      "\"completion_tokens\":%u,"
+                      "\"total_tokens\":%d"
+                  "}"
+                  "}",
+                  (long)now, (long)now,
+                  escaped,
+                  (next_token == (u32)v->eos_id) ? "stop" : "length",
+                  n_prompt, n_gen, n_prompt + (int)n_gen);
+
+    http_respond(fd, 200, "OK", json_buf, jw);
 
     delete_file_event(el, fd, ELOOP_READABLE);
     close(fd);
