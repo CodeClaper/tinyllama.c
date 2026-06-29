@@ -93,10 +93,10 @@ static int build_chat_prompt(const char *user_msg, const char *sys_msg,
                              char *out, int out_len) {
     int w = 0;
     /* Safe append helper */
-    #define APPEND(s) do {                                   \
-        int slen = (int)strlen(s);                            \
-        if (w + slen >= out_len) return w;                    \
-        memcpy(out + w, s, slen); w += slen;                 \
+    #define APPEND(s) do {                  \
+        int slen = (int)strlen(s);          \
+        if (w + slen >= out_len) return w;  \
+        memcpy(out + w, s, slen); w += slen;\
     } while (0)
 
     if (sys_msg && sys_msg[0]) {
@@ -423,7 +423,11 @@ int main(int argc, char *argv[]) {
 
     ServerOptions so = parse_options(argc, argv);
     Engine *engine = engine_open(&so.engine);
-    if (so.inspect) engine_summary(engine);
+    if (so.inspect) { 
+        engine_summary(engine);
+        engine_close(engine);
+        return 0;
+    }
 
     Session *session = session_create(engine, (u32)so.ctx_size);
     if (!session) {
@@ -436,7 +440,7 @@ int main(int argc, char *argv[]) {
     server.session = session;
 
     if (setup_server_el(&server, so) == ELOOP_ERR) {
-        engine_close(engine);
+        server_resource_close(&server);
         slog(ERROR, "Failed to setup server event loop.");
     }
 

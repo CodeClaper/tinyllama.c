@@ -47,7 +47,7 @@ static inline float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
                      (unsigned long long)ti->dim[d],
                      d + 1 < ti->ndim ? "," : "]");
         }
-        slog(ERROR, "Fatal: out-of-bounds tensor access");
+        slog(ERROR, "Fatal: out-of-bounds tensor access: %ld >= %ld", i, ti->n_element);
     }
     switch (ti->type) {
         case 0: { /* f32 */
