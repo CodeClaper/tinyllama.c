@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- Qwen2 workspace ------------------------------------------- */
 
 typedef struct {
     float *x;          /* [n_embd] hidden state                      */
@@ -23,7 +22,6 @@ typedef struct {
     u32    ffn_hidden;
 } Qwen2Workspace;
 
-/* ---- Weight dequantization ------------------------------------- */
 
 /* Read a single f32/f16/bf16 weight from a GGUF tensor at index i.
  * Logs a warning and returns 0 for unsupported quantisation types. */
@@ -50,11 +48,11 @@ static inline float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
         slog(ERROR, "Fatal: out-of-bounds tensor access: %ld >= %ld", i, ti->n_element);
     }
     switch (ti->type) {
-        case 0: { /* f32 */
+        case GGUF_TYPE_F32: {
             const float *f = (const float *)(base + ti->offset);
             return f[i];
         }
-        case 1: { /* f16 — IEEE 754 binary16 → float */
+        case GGUF_TYPE_F16: { /* IEEE 754 binary16 → float */
             const u16 *h = (const u16 *)(base + ti->offset);
             u16 bits = h[i];
             u32 sign = (u32)(bits >> 15) << 31;
@@ -79,7 +77,7 @@ static inline float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
             memcpy(&out, &f32, sizeof(out));
             return out;
         }
-        case 30: { /* bf16 */
+        case GGUF_TYPE_BF16: {
             const u16 *b = (const u16 *)(base + ti->offset);
             u32 f32 = (u32)b[i] << 16;
             float out;

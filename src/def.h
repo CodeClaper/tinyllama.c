@@ -16,6 +16,13 @@ typedef int16_t     i16;
 typedef int32_t     i32;
 typedef int64_t     i64;
 
+/* GGUF tensor types — format-level constants, shared by all arches. */
+typedef enum {
+    GGUF_TYPE_F32  = 0,
+    GGUF_TYPE_F16  = 1,
+    GGUF_TYPE_BF16 = 30,
+} GGUFType;
+
 typedef struct {
     const char *model_path;
     bool inspect;
