@@ -1,5 +1,9 @@
 #include "def.h"
 
+#define DEFAULT_TEMPERATURE 1.0f
+#define DEFAULT_TOP_P 1.0f
+#define DEFAULT_MIN_P 0.05f
+
 bool model_get_i32(Model *m, const char *key, i32 *out);
 Model *model_load(const char *path);
 Engine *engine_open(EngineOptons *opts);

@@ -978,8 +978,8 @@ Session *session_create(Engine *en, u32 ctx_size) {
     Session *s = smalloc(sizeof(*s));
     s->en          = en;
     s->ctx_size    = ctx_size;
-    s->temperature = 0.0f;
-    s->top_p       = 1.0f;
+    s->temperature = DEFAULT_TEMPERATURE;
+    s->top_p       = DEFAULT_TOP_P ;
     s->top_k       = 1;
     s->max_tokens  = 0;
 
