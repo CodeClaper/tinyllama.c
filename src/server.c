@@ -381,7 +381,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
 }
 
 
-static int setup_server_el(Server *server, ServerOptions so) {
+static int setup_server_eventloop(Server *server, ServerOptions so) {
     int fd, retval;
 
     server->el = smalloc(sizeof(EventLoop));
@@ -409,7 +409,7 @@ static void server_resource_close(Server *server) {
     engine_close(server->engine);
     el_free(server->el);
     if (server->serverfd >= 0) close(server->serverfd);
-    if (g_event_fd >= 0)    close(g_event_fd);
+    if (g_event_fd >= 0) close(g_event_fd);
 }
 
 int main(int argc, char *argv[]) {
@@ -439,7 +439,7 @@ int main(int argc, char *argv[]) {
     server.engine = engine;
     server.session = session;
 
-    if (setup_server_el(&server, so) == ELOOP_ERR) {
+    if (setup_server_eventloop(&server, so) == ELOOP_ERR) {
         server_resource_close(&server);
         slog(ERROR, "Failed to setup server event loop.");
     }

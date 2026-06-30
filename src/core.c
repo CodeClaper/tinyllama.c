@@ -925,22 +925,22 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     /* Helper: try reading an i32 metadata key for this arch.
      * Try the arch-name prefix first, then the generic prefix. */
     i32 v32;
-    #define TRY_I32(suffix, field) do {                              \
-        char k[96];                                                  \
-        int  n = snprintf(k, sizeof(k), "%s.%s", pfx, suffix);      \
-        if (n > 0 && (size_t)n < sizeof(k))                         \
-            if (model_get_i32(en->model, k, &v32))                  \
-                cfg->field = (u32)v32;                              \
-        /* Also try the generic arch prefix if different from pfx */ \
-        if (cfg->field == 0) {                                      \
-            const char *gpfx = arch_key_prefix(en->model->arch);    \
-            if (strcmp(gpfx, pfx) != 0) {                           \
-                n = snprintf(k, sizeof(k), "%s.%s", gpfx, suffix); \
-                if (n > 0 && (size_t)n < sizeof(k))                \
-                    if (model_get_i32(en->model, k, &v32))          \
-                        cfg->field = (u32)v32;                      \
-            }                                                       \
-        }                                                           \
+    #define TRY_I32(suffix, field) do {                                 \
+        char k[96];                                                     \
+        int  n = snprintf(k, sizeof(k), "%s.%s", pfx, suffix);          \
+        if (n > 0 && (size_t)n < sizeof(k))                             \
+            if (model_get_i32(en->model, k, &v32))                      \
+                cfg->field = (u32)v32;                                  \
+        /* Also try the generic arch prefix if different from pfx */    \
+        if (cfg->field == 0) {                                          \
+            const char *gpfx = arch_key_prefix(en->model->arch);        \
+            if (strcmp(gpfx, pfx) != 0) {                               \
+                n = snprintf(k, sizeof(k), "%s.%s", gpfx, suffix);      \
+                if (n > 0 && (size_t)n < sizeof(k))                     \
+                    if (model_get_i32(en->model, k, &v32))              \
+                        cfg->field = (u32)v32;                          \
+            }                                                           \
+        }                                                               \
     } while(0)
 
     /* Attention head count. */
