@@ -98,7 +98,7 @@ char *get_datetime(TimeLevel level) {
     gettimeofday(&tv, NULL);
     t = tv.tv_sec;
     ptm = localtime(&t);
-    char *res = smalloc(30);
+    char *res = smalloc(45);
 
     switch (level) {
         case SECOND:
