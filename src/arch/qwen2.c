@@ -346,10 +346,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                          q_dim, kv_dim);
                 }
                 mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2, tr, tc);
-                memcpy(q_buf, ws->qkv_fused,          (size_t)q_dim_t * sizeof(float));
+                memcpy(q_buf, ws->qkv_fused, (size_t)q_dim_t * sizeof(float));
                 memcpy(k_buf, ws->qkv_fused + q_dim_t, (size_t)kv_dim_t * sizeof(float));
-                memcpy(v_buf, ws->qkv_fused + q_dim_t + kv_dim_t,
-                       (size_t)kv_dim_t * sizeof(float));
+                memcpy(v_buf, ws->qkv_fused + q_dim_t + kv_dim_t, (size_t)kv_dim_t * sizeof(float));
             } else {
                 TensorInfo *tq = lw->tensors[TENSOR_ATTN_Q];
                 TensorInfo *tk = lw->tensors[TENSOR_ATTN_K];
