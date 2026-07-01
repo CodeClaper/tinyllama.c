@@ -123,12 +123,10 @@ static bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count */
     if (tr != rows || tc != cols) {
-        slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+        slog(WARN, "Bad GGUF file: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
              (unsigned long)rows, (unsigned long)cols,
              (unsigned long)tr,   (unsigned long)tc);
-        /* Proceed with tensor dims to avoid OOB access. */
-        rows = tr;
-        cols = tc;
+        return false;
     }
     /* Validate that the loop won't access beyond tensor bounds. */
     if (rows == 0 || cols == 0) {
@@ -345,7 +343,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                          (unsigned long long)kv_dim_t,
                          q_dim, kv_dim);
                 }
-                mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2, tr, tc);
+                if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2, tr, tc)) return false;
                 memcpy(q_buf, ws->qkv_fused, (size_t)q_dim_t * sizeof(float));
                 memcpy(k_buf, ws->qkv_fused + q_dim_t, (size_t)kv_dim_t * sizeof(float));
                 memcpy(v_buf, ws->qkv_fused + q_dim_t + kv_dim_t, (size_t)kv_dim_t * sizeof(float));
@@ -357,9 +355,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                     slog(WARN, "attn Q/K/V missing layer %u", l);
                     return false;
                 }
-                mat_vec_mul(q_buf, tq, base, xb2, q_dim, n_embd);
-                mat_vec_mul(k_buf, tk, base, xb2, kv_dim, n_embd);
-                mat_vec_mul(v_buf, tv, base, xb2, kv_dim, n_embd);
+                if (!mat_vec_mul(q_buf, tq, base, xb2, q_dim, n_embd)) return false;
+                if (!mat_vec_mul(k_buf, tk, base, xb2, kv_dim, n_embd)) return false;
+                if (!mat_vec_mul(v_buf, tv, base, xb2, kv_dim, n_embd)) return false;
             }
         }
 
@@ -429,7 +427,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                mat_vec_mul(x, t_out, base, xb2, n_embd, q_dim);
+                if (!mat_vec_mul(x, t_out, base, xb2, n_embd, q_dim)) return false;
             }
             /* else: no output projection (uses identity, unlikely) */
 
@@ -468,15 +466,15 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             }
 
             u32 ffn_h = ws->ffn_hidden;
-            mat_vec_mul(ws->hb,  t_gate, base, xb2, ffn_h, n_embd);
-            mat_vec_mul(ws->hb2, t_up,   base, xb2, ffn_h, n_embd);
+            if (!mat_vec_mul(ws->hb,  t_gate, base, xb2, ffn_h, n_embd)) return false;
+            if (!mat_vec_mul(ws->hb2, t_up,   base, xb2, ffn_h, n_embd)) return false;
 
             silu(ws->hb, (int)ffn_h);
             for (u32 i = 0; i < ffn_h; i++)
                 ws->hb[i] *= ws->hb2[i];
 
             /* Down projection → add to residual */
-            mat_vec_mul(x, t_down, base, ws->hb, n_embd, ffn_h);
+            if (!mat_vec_mul(x, t_down, base, ws->hb, n_embd, ffn_h)) return false;
             for (u32 i = 0; i < n_embd; i++)
                 x[i] += xb[i];
         }
@@ -498,7 +496,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             slog(WARN, "output tensor not found");
             return false;
         }
-        mat_vec_mul(logits, out, base, xb, n_vocab, n_embd);
+        if (!mat_vec_mul(logits, out, base, xb, n_vocab, n_embd)) return false;
     }
 
     s->n_tokens++;
