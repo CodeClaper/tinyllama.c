@@ -1,11 +1,11 @@
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include "arch.h"
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
 #include "../utils.h"
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
 
 
 typedef struct {
@@ -123,9 +123,10 @@ static bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count */
     if (tr != rows || tc != cols) {
-        slog(WARN, "Bad GGUF file: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+        slog(WARN, "Bad GGUF file: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu] for tensor=%s",
              (unsigned long)rows, (unsigned long)cols,
-             (unsigned long)tr,   (unsigned long)tc);
+             (unsigned long)tr,   (unsigned long)tc, 
+             get_key_name(tw->key));
         return false;
     }
     /* Validate that the loop won't access beyond tensor bounds. */
