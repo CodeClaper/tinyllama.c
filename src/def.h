@@ -96,6 +96,9 @@ typedef struct {
     i32 think_start_id;
     i32 think_end_id;
     i32 dsml_id;
+    i32 im_start_id;
+    i32 im_end_id;
+    i32 byte_token_ids[256];
     TokenizerType  tokenizer_type;
     TokenizerTable tokens;
     TokenizerTable merges;

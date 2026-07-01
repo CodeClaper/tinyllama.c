@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/eventfd.h>
@@ -49,80 +50,157 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     el->stop = true;
 }
 
-/* Greedy longest-match tokenizer.
- * Tokenize text by greedily picking the longest vocab match at
- * each position.  Returns the number of tokens placed in tokens[].
- * Suitable for SentencePiece (SPM) vocabularies. */
-static int tokenize_longest_match(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
-    int n = 0, pos = 0;
-    while (pos < text_len && n < max_tokens) {
-        int best_len = 0;
-        i32 best_id  = (i32)VOCAB_ID_NONE;
-        int max_try  = text_len - pos;
-        if (max_try > 64) max_try = 64;
-
-        char tmp[65];
-        for (int len = 1; len <= max_try; len++) {
-            tmp[len - 1] = text[pos + len - 1];
-            tmp[len] = '\0';
-            i32 id = vocab_lookup(v, tmp);
-            if (id != (i32)VOCAB_ID_NONE) {
-                best_len = len;
-                best_id  = id;
-            }
-        }
-        if (best_len > 0) {
-            tokens[n++] = (u32)best_id;
-            pos += best_len;
-        } else {
-            /* Single-byte fallback */
-            i32 id;
-            if (vocab_lookup_len(v, &text[pos], 1, &id))
-                tokens[n++] = (u32)id;
-            pos++;
-        }
-    }
-    return n;
+/* GPT-2 style pre-tokenizer character classification.
+ * 1=letter (including non-ASCII UTF-8 bytes), 2=digit,
+ * 3=whitespace, 4=other (punctuation/symbol) */
+static int char_category(int c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc >= 0x80)              return 1;
+    if (isalpha(uc))             return 1;
+    if (isdigit(uc))             return 2;
+    if (isspace(uc))             return 3;
+    return 4;
 }
 
-/* BPE tokenizer for GPT-2 style vocabularies (Qwen2, LLaMA, etc.).
- * First encodes the input as UTF-8 byte tokens, then iteratively
- * merges adjacent pairs using merge ranks from the vocab. */
-static int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
-    #define BPE_MAX_SYMBOLS 4096
-    u32 symbols[BPE_MAX_SYMBOLS];
+/* Try to match a special token (format: <|...|>) at text[pos].
+ * Returns token ID on success, VOCAB_ID_NONE on failure.
+ * On success, *matched_len is set to bytes consumed. */
+static i32 match_special_token(Vocab *v, const char *text, int text_len, int *matched_len) {
+    if (text_len < 3) return (i32)VOCAB_ID_NONE;
+    if (text[0] != '<' || text[1] != '|') return (i32)VOCAB_ID_NONE;
+
+    int max_try = text_len < 64 ? text_len : 64;
+    int best_len = 0;
+    i32 best_id  = (i32)VOCAB_ID_NONE;
+    for (int len = 2; len <= max_try; len++) {
+        i32 id;
+        if (vocab_lookup_len(v, text, len, &id)) {
+            best_len = len;
+            best_id  = id;
+        }
+    }
+    if (best_len > 0) {
+        *matched_len = best_len;
+        return best_id;
+    }
+    return (i32)VOCAB_ID_NONE;
+}
+
+/* Byte-level encode a text chunk and apply BPE merges within it.
+ * Returns the number of tokens produced. */
+static int bpe_encode_chunk(Vocab *v, const char *chunk, int chunk_len,
+                            u32 *out, int max_out) {
+    u32 syms[512];
     int n = 0;
 
-    /* Step 1: byte-level encoding — map each UTF-8 byte to its token ID. */
-    for (int i = 0; i < text_len && n < BPE_MAX_SYMBOLS; i++) {
-        i32 id;
-        if (vocab_lookup_len(v, &text[i], 1, &id))
-            symbols[n++] = (u32)id;
+    for (int i = 0; i < chunk_len && n < (int)(sizeof(syms)/sizeof(syms[0])); i++) {
+        i32 id = v->byte_token_ids[(unsigned char)chunk[i]];
+        if (id >= 0)
+            syms[n++] = (u32)id;
     }
 
-    /* Step 2: iteratively merge the adjacent pair with the lowest rank. */
     while (n > 1) {
         i32 best_rank = INT32_MAX;
         int best_idx  = -1;
-
         for (int i = 0; i < n - 1; i++) {
-            i32 rank = vocab_merge_rank(v, (i32)symbols[i], (i32)symbols[i + 1]);
+            i32 rank = vocab_merge_rank(v, (i32)syms[i], (i32)syms[i + 1]);
             if (rank >= 0 && rank < best_rank) {
                 best_rank = rank;
                 best_idx  = i;
             }
         }
-
-        if (best_idx < 0) break; /* no more merges */
-
-        i32 merged_id = vocab_merge_result(v, (i32)symbols[best_idx], (i32)symbols[best_idx + 1]);
-        if (merged_id == (i32)VOCAB_ID_NONE) break;
-
-        /* Replace the pair (best_idx, best_idx+1) with the merged token. */
-        symbols[best_idx] = (u32)merged_id;
-        memmove(&symbols[best_idx + 1], &symbols[best_idx + 2],
+        if (best_idx < 0) break;
+        i32 merged = vocab_merge_result(v, (i32)syms[best_idx], (i32)syms[best_idx + 1]);
+        if (merged == (i32)VOCAB_ID_NONE) break;
+        syms[best_idx] = (u32)merged;
+        memmove(&syms[best_idx + 1], &syms[best_idx + 2],
                 (size_t)(n - best_idx - 2) * sizeof(u32));
         n--;
+    }
+
+    if (n > max_out) n = max_out;
+    memcpy(out, syms, (size_t)n * sizeof(u32));
+    return n;
+}
+
+/* BPE tokenizer for GPT-2 style vocabularies (Qwen2, LLaMA, etc.).
+ * 1. Detects special tokens (<|...|>) by direct vocab lookup.
+ * 2. Applies GPT-2 regex pre-tokenization to split text into chunks.
+ * 3. Byte-encodes and BPE-merges within each chunk independently. */
+static int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+    #define BPE_MAX_SYMBOLS 4096
+    u32 symbols[BPE_MAX_SYMBOLS];
+    int n = 0, pos = 0;
+
+    while (pos < text_len && n < BPE_MAX_SYMBOLS) {
+        /* Step 0: try to match a special token (<|...|>) first. */
+        int special_len = 0;
+        i32 special_id = match_special_token(v, text + pos, text_len - pos, &special_len);
+        if (special_id >= 0) {
+            symbols[n++] = (u32)special_id;
+            pos += special_len;
+            continue;
+        }
+
+        /* Step 1: locate the next pre-tokenizer chunk. */
+
+        /* Contractions: 's, 't, 're, 've, 'm, 'll, 'd */
+        if (text[pos] == '\'' && pos + 1 < text_len) {
+            char nxt = text[pos + 1];
+            int clen = 0;
+            if (nxt == 's' || nxt == 't' || nxt == 'm' || nxt == 'd')
+                clen = 2;
+            else if ((nxt == 'r' || nxt == 'v') && pos + 2 < text_len &&
+                     text[pos + 2] == 'e')
+                clen = 3;
+            else if (nxt == 'l' && pos + 2 < text_len && text[pos + 2] == 'l')
+                clen = 3;
+            if (clen > 0) {
+                int added = bpe_encode_chunk(v, text + pos, clen,
+                                             symbols + n, BPE_MAX_SYMBOLS - n);
+                n += added; pos += clen;
+                continue;
+            }
+        }
+
+        /* Whitespace: single leading space is absorbed by the next chunk
+         * (GPT-2 regex semantics); multi-space runs form their own chunk. */
+        if (char_category(text[pos]) == 3) {
+            int ws_start = pos;
+            int ws_len = 0;
+            while (pos < text_len && char_category(text[pos]) == 3) {
+                pos++; ws_len++;
+            }
+            if (ws_len != 1 || pos >= text_len) {
+                int added = bpe_encode_chunk(v, text + ws_start, ws_len,
+                                             symbols + n, BPE_MAX_SYMBOLS - n);
+                n += added;
+                continue;
+            }
+            /* Single space before non-whitespace: let next chunk absorb it. */
+            pos = ws_start;
+        }
+
+        /* Non-whitespace chunk (letter, digit, or other). */
+        int chunk_start = pos;
+        if (pos < text_len && char_category(text[pos]) == 3)
+            pos++;                    /* absorb optional leading space */
+        if (pos >= text_len) continue;
+
+        int cat = char_category(text[pos]);
+        if (cat == 1) {
+            while (pos < text_len && char_category(text[pos]) == 1) pos++;
+        } else if (cat == 2) {
+            while (pos < text_len && char_category(text[pos]) == 2) pos++;
+        } else {
+            while (pos < text_len && char_category(text[pos]) == 4) pos++;
+        }
+
+        if (pos == chunk_start) continue;
+
+        int added = bpe_encode_chunk(v, text + chunk_start, pos - chunk_start,
+                                     symbols + n, BPE_MAX_SYMBOLS - n);
+        n += added;
     }
 
     if (n > max_tokens) n = max_tokens;
@@ -133,45 +211,56 @@ static int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, i
 
 /* Tokenize dispatch — selects tokenization strategy based on the
  * tokenizer type declared in the GGUF metadata. */
-static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
-    switch (v->tokenizer_type) {
-        case TOKENIZER_TYPE_BPE: 
-            return tokenize_bpe(v, text, text_len, tokens, max_tokens);
-        case TOKENIZER_TYPE_SPM:
-        case TOKENIZER_TYPE_WPM:
-        case TOKENIZER_TYPE_UGM:
-        case TOKENIZER_TYPE_RWKV:
-        default: 
-            return tokenize_longest_match(v, text, text_len, tokens, max_tokens);
-    }
-}
+/* Chat template (Qwen-style) — build token ID array directly.
+ * Pre-looks up format tokens from the vocabulary; tokenizes user/system
+ * message content via BPE. Returns total number of prompt tokens. */
+static int build_chat_tokens(Vocab *v, const char *user_msg, const char *sys_msg,
+                             u32 *tokens, int max_tokens) {
+    int n = 0;
 
-/* Chat template (Qwen-style)
- * Build the Qwen chat prompt from user/system messages.
- * Looks up "<|im_start|>" and "<|im_end|>" tokens as plain text.
- * Returns total prompt length (excluding NUL). */
-static int build_chat_prompt(const char *user_msg, const char *sys_msg,
-                             char *out, int out_len) {
-    int w = 0;
-    /* Safe append helper */
-    #define APPEND(s) do {                  \
-        int slen = (int)strlen(s);          \
-        if (w + slen >= out_len) return w;  \
-        memcpy(out + w, s, slen); w += slen;\
+    /* Pre-lookup format tokens. */
+    i32 im_start_id = v->im_start_id;
+    i32 im_end_id   = v->im_end_id;
+    if (im_start_id == (i32)VOCAB_ID_NONE) {
+        im_start_id = vocab_lookup(v, "<|im_start|>");
+        if (im_start_id == (i32)VOCAB_ID_NONE) return 0;
+    }
+    if (im_end_id == (i32)VOCAB_ID_NONE) {
+        im_end_id = vocab_lookup(v, "<|im_end|>");
+        if (im_end_id == (i32)VOCAB_ID_NONE) return 0;
+    }
+    i32 nl_id = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        int tlen = (int)strlen(txt); \
+        int added = tokenize_bpe(v, txt, tlen, tokens + n, max_tokens - n); \
+        n += added; \
     } while (0)
 
     if (sys_msg && sys_msg[0]) {
-        APPEND("<|im_start|>system\n");
-        APPEND(sys_msg);
-        APPEND("<|im_end|>\n");
+        ADD(im_start_id);
+        ADD_TEXT("system");
+        ADD(nl_id);
+        ADD_TEXT(sys_msg);
+        ADD(im_end_id);
+        ADD(nl_id);
     }
-    APPEND("<|im_start|>user\n");
-    APPEND(user_msg);
-    APPEND("<|im_end|>\n");
-    APPEND("<|im_start|>assistant\n");
+    ADD(im_start_id);
+    ADD_TEXT("user");
+    ADD(nl_id);
+    ADD_TEXT(user_msg);
+    ADD(im_end_id);
+    ADD(nl_id);
+    ADD(im_start_id);
+    ADD_TEXT("assistant");
+    ADD(nl_id);
 
-    #undef APPEND
-    return w;
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
 }
 
 static u32 sample_greedy(float *logits, u32 n_vocab) {
@@ -284,24 +373,19 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         return;
     }
 
-    /* 3. Build chat prompt. */
-    char prompt_buf[8192];
-    int prompt_len = build_chat_prompt(user_msg, sys_msg, prompt_buf, sizeof(prompt_buf) - 1);
-    prompt_buf[prompt_len] = '\0';
-
-    /* 4. Tokenize. */
+    /* 3. Build chat prompt tokens. */
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    int n_prompt = tokenize(v, prompt_buf, prompt_len, prompt_tokens, max_pt);
+    int n_prompt = build_chat_tokens(v, user_msg, sys_msg, prompt_tokens, max_pt);
     if (n_prompt == 0) {
-        http_respond(fd, 400, "Bad Request", 
+        http_respond(fd, 400, "Bad Request",
                     "{\"error\":\"No valid tokens in input\"}", 34);
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
 
-    /* 5. Reset session & prefill. */
+    /* 4. Reset session & prefill. */
     s->ops.reset(s);
     for (int i = 0; i < n_prompt; i++) {
         if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
@@ -313,7 +397,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         }
     }
 
-    /*  6. Generate. */
+    /* 5. Generate. */
     u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
     char resp_body[65536];
     int  resp_used = 0;
@@ -337,7 +421,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
     resp_body[resp_used] = '\0';
 
-    /* 7. Build OpenAI-compatible JSON response. */
+    /* 6. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
     int jw = 0;
 
