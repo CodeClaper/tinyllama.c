@@ -23,6 +23,7 @@
 #include "anet.h"
 #include "http.h"
 
+#define JSON_WRAPPER_RESERVE 256 
 typedef struct  {
     Engine *engine;
     Session *session;
@@ -423,8 +424,9 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 6. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
-    /* JSON-escape the generated text */
-    char escaped[65536];
+    /* JSON-escape the generated text.  Reserve 256 bytes for the
+     * JSON wrapper so the final snprintf can't overflow json_buf. */
+    char escaped[65536 - JSON_WRAPPER_RESERVE];
     int esc_len = json_escape_str(escaped, (int)sizeof(escaped) - 1,
                                   resp_body, resp_used);
     escaped[esc_len] = '\0';
