@@ -296,7 +296,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     char *body = http_body(buf, (int)n);
     if (!body) {
         http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"Incomplete HTTP request\"}", 33);
+                     "{\"error\":\"Incomplete HTTP request\"}");
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
@@ -367,7 +367,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
     if (!user_msg[0]) {
         http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"No user message found\"}", 31);
+                     "{\"error\":\"No user message found\"}");
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
@@ -379,7 +379,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     int n_prompt = build_chat_tokens(v, user_msg, sys_msg, prompt_tokens, max_pt);
     if (n_prompt == 0) {
         http_respond(fd, 400, "Bad Request",
-                    "{\"error\":\"No valid tokens in input\"}", 34);
+                    "{\"error\":\"No valid tokens in input\"}");
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
@@ -390,7 +390,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     for (int i = 0; i < n_prompt; i++) {
         if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
             http_respond(fd, 500, "Internal Server Error",
-                         "{\"error\":\"Forward pass failed\"}", 30);
+                         "{\"error\":\"Forward pass failed\"}");
             delete_file_event(el, fd, ELOOP_READABLE);
             close(fd);
             return;
@@ -423,8 +423,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 6. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
-    int jw = 0;
-
     /* JSON-escape the generated text */
     char escaped[65536];
     int esc_len = json_escape_str(escaped, (int)sizeof(escaped) - 1,
@@ -432,7 +430,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     escaped[esc_len] = '\0';
 
     time_t now = time(NULL);
-    jw = snprintf(json_buf, sizeof(json_buf),
+    (void)snprintf(json_buf, sizeof(json_buf),
                   "{"
                   "\"id\":\"chatcmpl-%ld\","
                   "\"object\":\"chat.completion\","
@@ -457,7 +455,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                   (next_token == (u32)v->eos_id) ? "stop" : "length",
                   n_prompt, n_gen, n_prompt + (int)n_gen);
 
-    http_respond(fd, 200, "OK", json_buf, jw);
+    http_respond(fd, 200, "OK", json_buf);
 
     delete_file_event(el, fd, ELOOP_READABLE);
     close(fd);

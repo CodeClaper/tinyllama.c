@@ -128,7 +128,8 @@ int json_escape_str(char *out, int out_len, const char *in, int in_len) {
 
 /* Send a minimal HTTP response with a JSON body. */
 void http_respond(int fd, int status, const char *status_msg,
-                  const char *body, int body_len) {
+                  const char *body) {
+    int body_len = body ? (int)strlen(body) : 0;
     char hdr[256];
     int hl = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 %d %s\r\n"
