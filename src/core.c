@@ -84,15 +84,6 @@ typedef struct {
     char error[125];
 } Cursor;
 
-typedef enum {
-    TOKENIZER_TYPE_NONE,
-    TOKENIZER_TYPE_SPM,
-    TOKENIZER_TYPE_BPE,
-    TOKENIZER_TYPE_WPM,
-    TOKENIZER_TYPE_UGM,
-    TOKENIZER_TYPE_RWKV,
-    TOKENIZER_TYPE_WHISPER
-} TokenizerType;
 
 
 static int global_lock_fd = -1;
@@ -493,6 +484,7 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     ArrayRef tokens, merges;
     
     v = smalloc(sizeof(Vocab));
+    v->tokenizer_type = TOKENIZER_TYPE_BPE;
     if (!model_get_array(m, "tokenizer.ggml.tokens", &tokens) ||
         tokens.type != GGUF_VALUE_STRING ||
         tokens.len > INT32_MAX

@@ -11,7 +11,6 @@
 #include "utils.h"
 
 /* Create TCP server. 
- * ------------------
  * Return the server socket fd.
  * Return ANET_ERR if fail.
  * */

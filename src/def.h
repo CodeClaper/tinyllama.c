@@ -23,6 +23,16 @@ typedef enum {
     GGUF_TYPE_BF16 = 30,
 } GGUFType;
 
+typedef enum {
+    TOKENIZER_TYPE_NONE,
+    TOKENIZER_TYPE_SPM,
+    TOKENIZER_TYPE_BPE,
+    TOKENIZER_TYPE_WPM,
+    TOKENIZER_TYPE_UGM,
+    TOKENIZER_TYPE_RWKV,
+    TOKENIZER_TYPE_WHISPER
+} TokenizerType;
+
 typedef struct {
     const char *model_path;
     bool inspect;
@@ -86,6 +96,7 @@ typedef struct {
     i32 think_start_id;
     i32 think_end_id;
     i32 dsml_id;
+    TokenizerType  tokenizer_type;
     TokenizerTable tokens;
     TokenizerTable merges;
 } Vocab;

@@ -225,8 +225,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 3. Build chat prompt. */
     char prompt_buf[8192];
-    int prompt_len = build_chat_prompt(user_msg, sys_msg,
-                                       prompt_buf, sizeof(prompt_buf) - 1);
+    int prompt_len = build_chat_prompt(user_msg, sys_msg, prompt_buf, sizeof(prompt_buf) - 1);
     prompt_buf[prompt_len] = '\0';
 
     /* 4. Tokenize. */
