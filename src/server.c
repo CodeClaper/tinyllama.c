@@ -557,6 +557,7 @@ static void server_resource_close(Server *server) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc < 2) usage(stderr, 2);
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
