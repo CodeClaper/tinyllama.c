@@ -478,6 +478,51 @@ i32 vocab_lookup(Vocab *v, const char *text) {
     return (i32)VOCAB_ID_NONE;
 }
 
+/* Look up a token by explicit length — needed for byte tokens
+ * (e.g. NUL byte) that strlen() cannot handle. */
+bool vocab_lookup_len(Vocab *v, const char *text, int len, i32 *id) {
+    Key key = {.content = (char *)text, .len = (u8)len};
+    return tokenizer_table_get(&v->tokens, key, id);
+}
+
+/* Return merge rank for a pair of token IDs, or -1 if no merge exists. */
+i32 vocab_merge_rank(Vocab *v, i32 id1, i32 id2) {
+    if (id1 < 0 || id2 < 0 || (u32)id1 >= v->n_vocab || (u32)id2 >= v->n_vocab)
+        return -1;
+    Key *t1 = &v->token[id1];
+    Key *t2 = &v->token[id2];
+    int key_len = t1->len + 1 + t2->len;
+    if (key_len > 255) return -1;
+
+    char merge_key[256];
+    memcpy(merge_key, t1->content, t1->len);
+    merge_key[t1->len] = ' ';
+    memcpy(merge_key + t1->len + 1, t2->content, t2->len);
+
+    Key key = {.content = merge_key, .len = (u8)key_len};
+    i32 rank;
+    if (tokenizer_table_get(&v->merges, key, &rank)) return rank;
+    return -1;
+}
+
+/* Return the merged token ID for a pair (id1+id2), or VOCAB_ID_NONE. */
+i32 vocab_merge_result(Vocab *v, i32 id1, i32 id2) {
+    if (id1 < 0 || id2 < 0 || (u32)id1 >= v->n_vocab || (u32)id2 >= v->n_vocab)
+        return (i32)VOCAB_ID_NONE;
+    Key *t1 = &v->token[id1];
+    Key *t2 = &v->token[id2];
+    int merged_len = t1->len + t2->len;
+    if (merged_len > 255) return (i32)VOCAB_ID_NONE;
+
+    char merged[256];
+    memcpy(merged, t1->content, t1->len);
+    memcpy(merged + t1->len, t2->content, t2->len);
+
+    i32 id;
+    if (vocab_lookup_len(v, merged, merged_len, &id)) return id;
+    return (i32)VOCAB_ID_NONE;
+}
+
 /* Load vocab for BPE. */
 static Vocab *vocab_load_for_bpe(Model *m) {
     Vocab *v;

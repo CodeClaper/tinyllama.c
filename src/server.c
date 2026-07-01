@@ -51,8 +51,9 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
 
 /* Greedy longest-match tokenizer.
  * Tokenize text by greedily picking the longest vocab match at
- * each position.  Returns the number of tokens placed in tokens[]. */
-static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+ * each position.  Returns the number of tokens placed in tokens[].
+ * Suitable for SentencePiece (SPM) vocabularies. */
+static int tokenize_longest_match(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
     int n = 0, pos = 0;
     while (pos < text_len && n < max_tokens) {
         int best_len = 0;
@@ -75,14 +76,74 @@ static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int m
             pos += best_len;
         } else {
             /* Single-byte fallback */
-            char byte[2] = {text[pos], '\0'};
-            i32 id = vocab_lookup(v, byte);
-            if (id != (i32)VOCAB_ID_NONE)
+            i32 id;
+            if (vocab_lookup_len(v, &text[pos], 1, &id))
                 tokens[n++] = (u32)id;
             pos++;
         }
     }
     return n;
+}
+
+/* BPE tokenizer for GPT-2 style vocabularies (Qwen2, LLaMA, etc.).
+ * First encodes the input as UTF-8 byte tokens, then iteratively
+ * merges adjacent pairs using merge ranks from the vocab. */
+static int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+    #define BPE_MAX_SYMBOLS 4096
+    u32 symbols[BPE_MAX_SYMBOLS];
+    int n = 0;
+
+    /* Step 1: byte-level encoding — map each UTF-8 byte to its token ID. */
+    for (int i = 0; i < text_len && n < BPE_MAX_SYMBOLS; i++) {
+        i32 id;
+        if (vocab_lookup_len(v, &text[i], 1, &id))
+            symbols[n++] = (u32)id;
+    }
+
+    /* Step 2: iteratively merge the adjacent pair with the lowest rank. */
+    while (n > 1) {
+        i32 best_rank = INT32_MAX;
+        int best_idx  = -1;
+
+        for (int i = 0; i < n - 1; i++) {
+            i32 rank = vocab_merge_rank(v, (i32)symbols[i], (i32)symbols[i + 1]);
+            if (rank >= 0 && rank < best_rank) {
+                best_rank = rank;
+                best_idx  = i;
+            }
+        }
+
+        if (best_idx < 0) break; /* no more merges */
+
+        i32 merged_id = vocab_merge_result(v, (i32)symbols[best_idx], (i32)symbols[best_idx + 1]);
+        if (merged_id == (i32)VOCAB_ID_NONE) break;
+
+        /* Replace the pair (best_idx, best_idx+1) with the merged token. */
+        symbols[best_idx] = (u32)merged_id;
+        memmove(&symbols[best_idx + 1], &symbols[best_idx + 2],
+                (size_t)(n - best_idx - 2) * sizeof(u32));
+        n--;
+    }
+
+    if (n > max_tokens) n = max_tokens;
+    memcpy(tokens, symbols, (size_t)n * sizeof(u32));
+    return n;
+    #undef BPE_MAX_SYMBOLS
+}
+
+/* Tokenize dispatch — selects tokenization strategy based on the
+ * tokenizer type declared in the GGUF metadata. */
+static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+    switch (v->tokenizer_type) {
+        case TOKENIZER_TYPE_BPE: 
+            return tokenize_bpe(v, text, text_len, tokens, max_tokens);
+        case TOKENIZER_TYPE_SPM:
+        case TOKENIZER_TYPE_WPM:
+        case TOKENIZER_TYPE_UGM:
+        case TOKENIZER_TYPE_RWKV:
+        default: 
+            return tokenize_longest_match(v, text, text_len, tokens, max_tokens);
+    }
 }
 
 /* Chat template (Qwen-style)
