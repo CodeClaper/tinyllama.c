@@ -343,6 +343,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                          (unsigned long long)q_dim_t,
                          (unsigned long long)kv_dim_t,
                          q_dim, kv_dim);
+                    return false;
                 }
                 if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2, tr, tc)) return false;
                 memcpy(q_buf, ws->qkv_fused, (size_t)q_dim_t * sizeof(float));
