@@ -18,9 +18,35 @@ typedef int64_t     i64;
 
 /* GGUF tensor types — format-level constants, shared by all arches. */
 typedef enum {
-    GGUF_TYPE_F32  = 0,
-    GGUF_TYPE_F16  = 1,
-    GGUF_TYPE_BF16 = 30,
+    GGUF_TYPE_F32      = 0,
+    GGUF_TYPE_F16      = 1,
+    GGUF_TYPE_Q4_0     = 2,
+    GGUF_TYPE_Q4_1     = 3,
+    GGUF_TYPE_Q5_0     = 6,
+    GGUF_TYPE_Q5_1     = 7,
+    GGUF_TYPE_Q8_0     = 8,
+    GGUF_TYPE_Q8_1     = 9,
+    GGUF_TYPE_Q2_K     = 10,
+    GGUF_TYPE_Q3_K     = 11,
+    GGUF_TYPE_Q4_K     = 12,
+    GGUF_TYPE_Q5_K     = 13,
+    GGUF_TYPE_Q6_K     = 14,
+    GGUF_TYPE_Q8_K     = 15,
+    GGUF_TYPE_IQ2_XXS  = 16,
+    GGUF_TYPE_IQ2_XS   = 17,
+    GGUF_TYPE_IQ3_XXS  = 18,
+    GGUF_TYPE_IQ1_S    = 19,
+    GGUF_TYPE_IQ4_NL   = 20,
+    GGUF_TYPE_IQ3_S    = 21,
+    GGUF_TYPE_IQ2_S    = 22,
+    GGUF_TYPE_IQ4_XS   = 23,
+    GGUF_TYPE_I8       = 24,
+    GGUF_TYPE_I16      = 25,
+    GGUF_TYPE_I32      = 26,
+    GGUF_TYPE_I64      = 27,
+    GGUF_TYPE_F64      = 28,
+    GGUF_TYPE_IQ1_M    = 29,
+    GGUF_TYPE_BF16     = 30,
 } GGUFType;
 
 typedef enum {

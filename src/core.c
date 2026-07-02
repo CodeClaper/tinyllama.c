@@ -963,18 +963,22 @@ static void model_summary(Model *m) {
 
     /* ---- Tensor summary ---- */
     u64 total_bytes = 0;
-    u32 type_count[64] = {0};
     for (u64 i = 0; i < m->n_tensor; i++) {
         TensorInfo *t = &m->tensor[i];
         total_bytes += t->bytes;
-        if (t->type < 64) type_count[t->type]++;
     }
     fprintf(stdout, "Tensors:\n\tcount=%" PRIu64 "  total_bytes=%" PRIu64 " (%.2f MB)\n",
          m->n_tensor, total_bytes, size_convert(total_bytes, MB));
-    for (u32 ty = 0; ty < 64; ty++) {
-        if (type_count[ty] == 0) continue;
-        const GGUFTypeInfo *info = tensor_type(ty);
-        fprintf(stdout, "\ttype[%u] %-10s: %u", ty, info ? info->name : "?", type_count[ty]);
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        TensorInfo *t = &m->tensor[i];
+        fprintf(stdout, "\t-|%-45s", get_key_name(t->key));
+        fprintf(stdout, "\t\t= (%s)", gguf_types[t->type].name);
+        fprintf(stdout, "[");
+        for (u32 j = 0; j < t->ndim; j++) {
+            fprintf(stdout, "%ld", t->dim[j]);
+            if (j < t->ndim - 1) fprintf(stdout, ",");
+        }
+        fprintf(stdout, "]\n");
     }
 }
 
