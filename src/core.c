@@ -909,34 +909,41 @@ Model *model_load(const char *path) {
 }
 
 static void model_summary(Model *m) {
-    slog(INFO, "Metadata:");
+    /* ---- Header ---- */
+    const char *arch_name = m->arch_name[0] ? m->arch_name : "unknown";
+    fprintf(stdout, "Header:\n\tversion=%u  tensors=%" PRIu64 "  kvs=%" PRIu64
+         "  alignment=%" PRIu64 "  arch=%s",
+         m->version, m->n_tensor, m->n_kv, m->alignment, arch_name);
+
+    /* ---- Metadata ---- */
+    fprintf(stdout, "\nMetadata:\n");
     for (u64 i = 0; i < m->n_kv; i++) {
         KV *kv = &m->kv[i];
-        printf("-|%-45s", get_key_name(kv->key));
+        fprintf(stdout, "\t-|%-45s", get_key_name(kv->key));
         Cursor c = cursor_at(m->map, m->size, kv->value_pos);
         switch (kv->type) {
             case GGUF_VALUE_UINT32: {
                 u32 v = 0;
                 cursor_u32(&c, &v);
-                printf("\t\t= %d\n", v);
+                fprintf(stdout, "\t\t= %d\n", v);
                 break;
             }
             case GGUF_VALUE_UINT64: {
                 u64 v = 0;
                 cursor_u64(&c, &v);
-                printf("\t\t= %"PRIu64 "\n", v);
+                fprintf(stdout, "\t\t= %"PRIu64 "\n", v);
                 break;
             }
             case GGUF_VALUE_FLOAT32: {
                 float v = 0;
                 cursor_float(&c, &v);
-                printf("\t\t= %.2f\n", v);
+                fprintf(stdout, "\t\t= %.2f\n", v);
                 break;
             }
             case GGUF_VALUE_STRING: {
                 Key v = {0};
                 cursor_key(&c, &v);
-                printf("\t\t= %s\n", get_key_name(v));
+                fprintf(stdout, "\t\t= %s\n", get_key_name(v));
                 break;
             }
             case GGUF_VALUE_ARRAY: {
@@ -944,8 +951,7 @@ static void model_summary(Model *m) {
                 u64 len;
                 cursor_u32(&c, &item_type);
                 cursor_u64(&c, &len);
-                printf("\t\t= [%s * %"PRIu64"]\n",
-                       gguf_value_type_name(item_type), len);
+                fprintf(stdout, "\t\t= [%s * %"PRIu64"]\n", gguf_value_type_name(item_type), len);
                 break;
             }
             default: {
@@ -953,6 +959,22 @@ static void model_summary(Model *m) {
                 break;
             }
         }
+    }
+
+    /* ---- Tensor summary ---- */
+    u64 total_bytes = 0;
+    u32 type_count[64] = {0};
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        TensorInfo *t = &m->tensor[i];
+        total_bytes += t->bytes;
+        if (t->type < 64) type_count[t->type]++;
+    }
+    fprintf(stdout, "Tensors:\n\tcount=%" PRIu64 "  total_bytes=%" PRIu64 " (%.2f MB)\n",
+         m->n_tensor, total_bytes, size_convert(total_bytes, MB));
+    for (u32 ty = 0; ty < 64; ty++) {
+        if (type_count[ty] == 0) continue;
+        const GGUFTypeInfo *info = tensor_type(ty);
+        fprintf(stdout, "\ttype[%u] %-10s: %u", ty, info ? info->name : "?", type_count[ty]);
     }
 }
 
@@ -997,10 +1019,9 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (te && te->ndim >= 2) {
         if (te->dim[0] == cfg->n_vocab) cfg->n_embd = (u32)te->dim[1];
-        else                            cfg->n_embd = (u32)te->dim[0];
-    } else if (te && te->ndim == 1) {
+        else cfg->n_embd = (u32)te->dim[0];
+    } else if (te && te->ndim == 1)
         cfg->n_embd = (u32)te->dim[0];
-    }
     if (cfg->n_embd == 0 && cfg->n_vocab > 0)
         cfg->n_embd = cfg->n_vocab; /* ultimate fallback */
 
