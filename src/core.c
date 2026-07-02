@@ -323,7 +323,7 @@ static void acquire_instance_lock(void) {
         slog_errno("Failed to truncated lock file:", path);
     }
 
-    (void)dprintf(fd, "%ld\n", (long)getpid());
+    (void)dprintf(fd, "%ld", (long)getpid());
     global_lock_fd = fd;
     atexit(release_instance_lock);
 }
@@ -967,8 +967,8 @@ static void model_summary(Model *m) {
         TensorInfo *t = &m->tensor[i];
         total_bytes += t->bytes;
     }
-    fprintf(stdout, "Tensors:\n\tcount=%" PRIu64 "  total_bytes=%" PRIu64 " (%.2f MB)\n",
-         m->n_tensor, total_bytes, size_convert(total_bytes, MB));
+    fprintf(stdout, "Tensors:\n\tcount=%" PRIu64 "  total_bytes=%" PRIu64 " (%.2f GB)\n",
+         m->n_tensor, total_bytes, size_convert(total_bytes, GB));
     for (u64 i = 0; i < m->n_tensor; i++) {
         TensorInfo *t = &m->tensor[i];
         fprintf(stdout, "\t-|%-45s", get_key_name(t->key));

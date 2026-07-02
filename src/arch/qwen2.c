@@ -331,7 +331,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                          "metadata missing?");
                     return false;
                 }
-                u64 hd = tr / total_heads;  /* head_dim from tensor */
+                u64 hd = n_head;  /* head_dim from tensor */
                 u64 q_dim_t  = (u64)n_head * hd;
                 u64 kv_dim_t = (u64)n_kv_head * hd;
 
