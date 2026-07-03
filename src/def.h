@@ -157,6 +157,8 @@ typedef enum {
     TENSOR_SSM_CONV1D,
     TENSOR_SSM_ALPHA,
     TENSOR_SSM_BETA,
+    TENSOR_SSM_A,
+    TENSOR_SSM_DT_BIAS,
     TENSOR_SSM_OUT,
     TENSOR_SSM_NORM,
     TENSOR_ATTN_Q_NORM,
@@ -207,7 +209,8 @@ typedef struct {
 typedef struct {
     u32 n_head;           /* attention.head_count                  */
     u32 n_kv_head;        /* attention.head_count_kv (1 = MHA)     */
-    u32 head_dim;         /* attention head dimension              */
+    u32 head_dim;         /* attention head dimension (Q)          */
+    u32 kv_head_dim;      /* K/V per-head dimension                */
     u32 n_embd;           /* embedding_length                     */
     u32 n_layer;          /* block_count                          */
     u32 n_vocab;          /* vocabulary size                      */

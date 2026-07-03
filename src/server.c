@@ -396,6 +396,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
             close(fd);
             return;
         }
+        slog(INFO, "Forward (%d|%d)", i + 1, n_prompt);
     }
 
     /* 5. Generate. */
@@ -407,6 +408,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
+        slog(INFO, "Loop (%d|%d)", i + 1, max_tokens);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];

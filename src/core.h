@@ -5,6 +5,7 @@
 #define DEFAULT_MIN_P 0.05f
 
 bool model_get_i32(Model *m, const char *key, i32 *out);
+bool model_get_f32(Model *m, const char *key, float *out);
 Model *model_load(const char *path);
 Engine *engine_open(EngineOptons *opts);
 void engine_close(Engine *en);

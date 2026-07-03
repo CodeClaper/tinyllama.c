@@ -360,6 +360,13 @@ bool model_get_i32(Model *m, const char *key, i32 *out) {
     return cursor_i32(&c, out);
 }
 
+bool model_get_f32(Model *m, const char *key, float *out) {
+    KV *kv = model_find_kv(m, (char *)key);
+    if (!kv || kv->type != GGUF_VALUE_FLOAT32) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    return cursor_float(&c, out);
+}
+
 static ModelArch model_detect_arch(Model *m) {
     Key arch_name;
     if (!model_get_key(m, "general.architecture", &arch_name)) return ARCH_UNKNOWN;
@@ -737,6 +744,8 @@ static const LayerTensorMap qwen2_layer_map[] = {
     {TENSOR_SSM_CONV1D,       "ssm_conv1d",            false},
     {TENSOR_SSM_ALPHA,        "ssm_alpha",             false},
     {TENSOR_SSM_BETA,         "ssm_beta",              false},
+    {TENSOR_SSM_A,            "ssm_a",                 false},
+    {TENSOR_SSM_DT_BIAS,      "ssm_dt.bias",           false},
     {TENSOR_SSM_NORM,         "ssm_norm",              false},
     {TENSOR_SSM_OUT,          "ssm_out",               false},
     {TENSOR_FFN_GATE,         "ffn_gate",              true},
@@ -809,15 +818,16 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
         const char *suffix_start = (const char *)k->content + j + 1;
         u32 suffix_len = k->len - j - 1;
 
-        /* Strip trailing ".weight" (GGUF tensors always end with it). */
-        if (suffix_len <= 7 || memcmp(suffix_start + suffix_len - 7, ".weight", 7) != 0)
-            continue;
-        suffix_len -= 7;
+        /* Strip trailing ".weight" if present (most GGUF tensors have it,
+         * but some like ssm_a / ssm_dt.bias do not). */
+        u32 match_len = suffix_len;
+        if (suffix_len > 7 && memcmp(suffix_start + suffix_len - 7, ".weight", 7) == 0)
+            match_len = suffix_len - 7;
 
         for (int e = 0; e < map_count; e++) {
             const char *s = map[e].suffix;
             u32 slen = (u32)strlen(s);
-            if (slen == suffix_len && memcmp(suffix_start, s, slen) == 0) {
+            if (slen == match_len && memcmp(suffix_start, s, slen) == 0) {
                 layers[n].tensors[map[e].role] = &m->tensor[i];
                 break;
             }
@@ -1068,6 +1078,10 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     if (cfg->head_dim == 0 && cfg->n_head > 0)
         cfg->head_dim = cfg->n_embd / cfg->n_head;
 
+    /* KV head dimension (may differ from Q head_dim in Qwen3.5 etc.). */
+    TRY_I32("attention.key_length",      kv_head_dim);
+    if (cfg->kv_head_dim == 0) cfg->kv_head_dim = cfg->head_dim;
+
     /* ---- DeepSeek MLA ---- */
     TRY_I32("attention.kv_lora_rank",     kv_lora_rank);
     TRY_I32("attention.qk_nope_head_dim", qk_nope_head_dim);
@@ -1075,9 +1089,9 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 
     #undef TRY_I32
 
-    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u n_layer=%u n_vocab=%u",
+    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u kv_head_dim=%u n_layer=%u n_vocab=%u",
          arch_key_prefix(en->model->arch), cfg->n_embd, cfg->n_head,
-         cfg->n_kv_head, cfg->head_dim, cfg->n_layer, cfg->n_vocab);
+         cfg->n_kv_head, cfg->head_dim, cfg->kv_head_dim, cfg->n_layer, cfg->n_vocab);
 
     if (cfg->kv_lora_rank)
         slog(INFO, "ArchConfig MLA: kv_lora_rank=%u qk_nope_head_dim=%u qk_rope_head_dim=%u",
