@@ -400,7 +400,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
 
     /* 5. Generate. */
-    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
+    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 10;
     char resp_body[65536];
     int  resp_used = 0;
 
@@ -408,7 +408,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
-        slog(INFO, "Loop (%d|%d)", i + 1, max_tokens);
+        slog(INFO, "Loop (%d|%d), Next token: %d", i + 1, max_tokens, next_token);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];

@@ -1206,6 +1206,8 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                 }
 
                 /* RoPE */
+                rope(q_buf, n_head, q_head_dim, pos, rope_theta);
+                rope(k_buf, n_kv_head, kv_head_dim, pos, rope_theta);
                 {
                     float *kd = akc->k + (u64)pos * kv_dim;
                     float *vd = akc->v + (u64)pos * kv_dim;

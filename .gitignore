@@ -114,3 +114,4 @@ core
 compile_commands.json
 
 src/server
+test/c/llm
