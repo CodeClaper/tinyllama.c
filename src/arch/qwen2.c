@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -125,7 +126,7 @@ static bool qwen2_init(Session *s) {
     ws->conv_channels = ssm_channels;
     if (has_ssm && ssm_channels > 0 && d_state > 0) {
         /* conv_state: [n_layer * 3 * conv_channels] — last 3 inputs for depthwise conv1d */
-        ws->conv_state = scalloc((u64)c->n_layer * 3 * (u64)ssm_channels, sizeof(float));
+        ws->conv_state = scalloc((u64)c->n_layer * 3 * (u64)d_inner, sizeof(float));
         /* ssm_state: [n_layer * d_inner * d_state] — SSM hidden state */
         ws->ssm_state  = scalloc((u64)c->n_layer * (u64)d_inner * (u64)d_state, sizeof(float));
     }
@@ -489,7 +490,7 @@ static void qwen2_reset(Session *s) {
         u32 n_layer = kc->n_layer;
         if (ws->conv_state)
             memset(ws->conv_state, 0,
-                   (u64)n_layer * 3 * (u64)ws->conv_channels * sizeof(float));
+                   (u64)n_layer * 3 * (u64)ws->d_inner * sizeof(float));
         if (ws->ssm_state)
             memset(ws->ssm_state, 0,
                    (u64)n_layer * (u64)ws->d_inner * (u64)ws->d_state * sizeof(float));
