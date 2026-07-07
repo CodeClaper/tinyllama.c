@@ -160,602 +160,319 @@ static bool qwen2_init(Session *s) {
     return true;
 }
 
-static bool qwen2_forward(Session *s, u32 token, float *logits) {
-    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
-    ArchConfig *c      = &s->cfg;
-    Weights    *w      = s->en->weights;
-    KvCache    *kc     = &s->cache;
-    const u8   *base   = s->en->model->map;
+/* Run the SSM (Mamba-style) block for one layer at one position.
+ * x_ssm and z are [d_inner] each, read from fused QKV output.
+ * conv_state and ssm_state are updated in-place. */
+static void ssm_block(Qwen2Workspace *ws, const u8 *base, LayerWeights *lw,
+                      float *x_ssm, float *z, u32 layer_idx,
+                      u32 d_inner, u32 d_state) {
+    TensorInfo *t_conv1d  = lw->tensors[TENSOR_SSM_CONV1D];
+    TensorInfo *t_a       = lw->tensors[TENSOR_SSM_A];
+    TensorInfo *t_dt_bias = lw->tensors[TENSOR_SSM_DT_BIAS];
 
-    const u32 n_embd      = c->n_embd;
-    const u32 n_head      = c->n_head;
-    const u32 n_kv_head   = c->n_kv_head;
-    const u32 q_head_dim  = c->head_dim;
-    const u32 kv_head_dim = c->kv_head_dim;
-    const u32 n_vocab     = c->n_vocab;
-    const u32 n_layer     = c->n_layer;
-    const u32 kv_dim      = n_kv_head * kv_head_dim;
-    const u32 q_dim       = n_head * q_head_dim;
-    const u32 pos         = s->n_tokens;
-    const u32 n_rep       = n_head / n_kv_head;
+    /* 1. SiLU on input. */
+    silu(x_ssm, d_inner);
 
-    /* Validate critical config values. */
-    if (n_embd == 0 || n_head == 0 || n_kv_head == 0
-        || q_head_dim == 0 || kv_head_dim == 0
-        || n_vocab == 0 || n_layer == 0) {
-        slog(WARN, "qwen2_forward: invalid config n_embd=%u n_head=%u "
-             "n_kv_head=%u q_head_dim=%u kv_head_dim=%u n_vocab=%u n_layer=%u",
-             n_embd, n_head, n_kv_head, q_head_dim, kv_head_dim, n_vocab, n_layer);
-        return false;
+    /* 2. Depthwise conv1d (kernel = 4). */
+    float *cstate = ws->conv_state + (u64)layer_idx * 3 * (u64)d_inner;
+    for (u32 i = 0; i < d_inner; i++) {
+        float w0 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 0) : 0.0f;
+        float w1 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 1) : 0.0f;
+        float w2 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 2) : 0.0f;
+        float w3 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 3) : 1.0f;
+        float y = w3 * x_ssm[i]
+                + w2 * cstate[0 * d_inner + i]
+                + w1 * cstate[1 * d_inner + i]
+                + w0 * cstate[2 * d_inner + i];
+        /* Shift state window. */
+        cstate[2 * d_inner + i] = cstate[1 * d_inner + i];
+        cstate[1 * d_inner + i] = cstate[0 * d_inner + i];
+        cstate[0 * d_inner + i] = x_ssm[i];
+        x_ssm[i] = y;
     }
 
-    const u32  qk_score_dim = q_head_dim < kv_head_dim ? q_head_dim : kv_head_dim;
-    const float sqrt_d       = sqrtf((float)qk_score_dim);
-    const float eps          = 1e-6f;
-    const float rope_theta   = ws->rope_theta;
+    /* 3. SiLU on conv output. */
+    silu(x_ssm, d_inner);
 
-    float *x        = ws->x;
-    float *xb       = ws->xb;
-    float *xb2      = ws->xb2;
-    float *q_buf    = ws->q;
-    float *k_buf    = ws->k;
-    float *v_buf    = ws->v;
-    float *scores   = ws->scores;
-    u32    d_inner  = ws->d_inner;
-    u32    d_state  = ws->d_state;
-    u32    ssm_ch   = ws->conv_channels;
+    /* 4. Selective SSM scan. */
+    float *sm = ws->ssm_state + (u64)layer_idx * (u64)d_inner * (u64)d_state;
+    for (u32 i = 0; i < d_inner; i++) {
+        float dt_bias = t_dt_bias ? tensor_get_f32(t_dt_bias, base, i) : 0.0f;
+        float dt = softplus(x_ssm[i] + dt_bias);
+
+        float y = 0.0f;
+        for (u32 j = 0; j < d_state; j++) {
+            float A_j = t_a ? tensor_get_f32(t_a, base, j) : -(float)(j + 1);
+            float A_bar = expf(dt * A_j);
+            float h = sm[(u64)i * d_state + j];
+            h = A_bar * h + dt * x_ssm[i];  /* B = 1 (simplified) */
+            sm[(u64)i * d_state + j] = h;
+            y += h;  /* C = 1 */
+        }
+        x_ssm[i] = y;
+    }
+
+    /* 5. Gate with z. */
+    silu(z, d_inner);
+    for (u32 i = 0; i < d_inner; i++)
+        x_ssm[i] *= z[i];
+}
+
+static bool qwen2_forward(Session *s, u32 token, float *logits) {
+    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
+    ArchConfig     *c  = &s->cfg;
+    Weights        *w  = s->en->weights;
+    const u8       *base = s->en->model->map;
+
+    u32 n_head      = c->n_head;
+    u32 n_kv_head   = c->n_kv_head;
+    u32 q_head_dim  = c->head_dim;
+    u32 kv_head_dim = c->kv_head_dim;
+    u32 q_dim       = n_head * q_head_dim;
+    u32 kv_dim      = n_kv_head * kv_head_dim;
+    u32 n_embd      = c->n_embd;
+    u32 n_layer     = c->n_layer;
+    u32 pos         = s->n_tokens;
+    u32 gqa_ratio   = n_head / n_kv_head;
+    float scale     = 1.0f / sqrtf((float)kv_head_dim);
+    float eps       = 1e-6f;
 
     /* ---- 1. Token embedding ---- */
     {
         TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
-        if (!te) { slog(WARN, "token_embd tensor not found"); return false; }
-        /* Handle both storage conventions: [n_vocab × n_embd] and [n_embd × n_vocab]. */
-        if (te->ndim >= 2 && te->dim[0] == (u64)n_embd) {
-            /* [n_embd, n_vocab]: x[i] = W[i][token] */
+        if (te->dim[0] == c->n_vocab) {
+            /* [n_vocab, n_embd] */
             for (u32 i = 0; i < n_embd; i++)
-                x[i] = tensor_get_f32(te, base, (u64)i * (u64)n_vocab + (u64)token);
+                ws->x[i] = tensor_get_f32(te, base, (u64)token * n_embd + i);
         } else {
-            /* [n_vocab, n_embd]: x[i] = W[token][i] */
+            /* [n_embd, n_vocab] */
             for (u32 i = 0; i < n_embd; i++)
-                x[i] = tensor_get_f32(te, base, (u64)token * (u64)n_embd + (u64)i);
+                ws->x[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + token);
         }
     }
 
-    s->tokens[pos % (u32)s->ctx_size] = token;
-
-    /* ---- 2. Transformer layers ---- */
+    /* ---- 2. Per-layer ---- */
     for (u32 l = 0; l < n_layer; l++) {
         LayerWeights *lw  = &w->layers[l];
-        AttnKvCache  *akc = &kc->std[l];
+        AttnKvCache  *akc = &s->cache.std[l];
+        bool is_ssm_layer = (lw->tensors[TENSOR_SSM_CONV1D] != NULL);
 
-        bool is_ssm        = (lw->tensors[TENSOR_SSM_CONV1D] != NULL);
-        bool has_fused_qkv = (lw->tensors[TENSOR_ATTN_QKV] != NULL);
+        /* ---- 2a. Attention norm ---- */
+        rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_ATTN_NORM], base, n_embd, eps);
 
-        /* -- 2a. RMS Norm (pre-attention) -- */
-        memcpy(xb, x, n_embd * sizeof(float));
-        {
-            TensorInfo *tn = lw->tensors[TENSOR_ATTN_NORM];
-            if (!tn) { slog(WARN, "attn_norm missing layer %u", l); return false; }
-            rms_norm(xb2, x, tn, base, (int)n_embd, eps);
-        }
+        /* ---- 2b. Q / K / V projections ---- */
+        TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
+        TensorInfo *t_q   = lw->tensors[TENSOR_ATTN_Q];
+        u32 fused_total   = 0;  /* total output dim of fused QKV */
 
-        /* -- 2b. Q, K, V projections -- */
-        if (has_fused_qkv) {
-            /* ---- Fused QKV path (SSM layers or standard fused QKV) ---- */
-            TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
-            bool trans = (t_qkv->dim[0] == (u64)n_embd);
-            u32 total_out = (u32)(trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-
-            /* Compute fused projection. */
-            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, xb2,
-                             trans ? (u64)t_qkv->dim[1] : (u64)t_qkv->dim[0],
-                             trans ? (u64)n_embd : (u64)(t_qkv->ndim >= 2 ? t_qkv->dim[1] : 0),
-                             trans)) return false;
-
-            if (is_ssm) {
-                /* SSM hybrid layer: conv1d+SiLU on all channels, then split. */
-                u32 conv_ch = ssm_ch > 0 ? ssm_ch : total_out;
-                float *conv_state_l = ws->conv_state
-                    + (u64)l * 3 * (u64)conv_ch;
-                float *ssm_state_l  = ws->ssm_state
-                    + (u64)l * (u64)d_inner * (u64)d_state;
-
-                /* Depthwise conv1d + SiLU on the fused output (per-channel, in-place). */
-                TensorInfo *t_conv = lw->tensors[TENSOR_SSM_CONV1D];
-                if (t_conv) {
-                    for (u32 ch = 0; ch < conv_ch; ch++) {
-                        float cur = ws->qkv_fused[ch]; /* save before overwriting */
-                        float sum = tensor_get_f32(t_conv, base,
-                                                   (u64)0 * (u64)conv_ch + (u64)ch)
-                                   * conv_state_l[0 * conv_ch + ch];
-                        for (u32 k = 1; k < 3; k++)
-                            sum += tensor_get_f32(t_conv, base,
-                                                  (u64)k * (u64)conv_ch + (u64)ch)
-                                   * conv_state_l[k * conv_ch + ch];
-                        sum += tensor_get_f32(t_conv, base,
-                                              (u64)3 * (u64)conv_ch + (u64)ch)
-                               * cur;
-                        ws->qkv_fused[ch] = sum / (1.0f + expf(-sum)); /* silu */
-                        /* Shift conv state per channel. */
-                        conv_state_l[0 * conv_ch + ch] = conv_state_l[1 * conv_ch + ch];
-                        conv_state_l[1 * conv_ch + ch] = conv_state_l[2 * conv_ch + ch];
-                        conv_state_l[2 * conv_ch + ch] = cur;
-                    }
-                }
-
-                /* Split: Q[0:q_dim], K[q_dim:q_dim+kv_dim], V[q_dim+kv_dim:q_dim+2*kv_dim],
-                 *       x[q_dim+2*kv_dim : q_dim+2*kv_dim+d_inner],
-                 *       z[q_dim+2*kv_dim+d_inner : q_dim+2*kv_dim+2*d_inner] */
-                u32 attn_total = q_dim + 2 * kv_dim;
-                memcpy(q_buf, ws->qkv_fused, (u64)q_dim * sizeof(float));
-                memcpy(k_buf, ws->qkv_fused + q_dim, (u64)kv_dim * sizeof(float));
-                memcpy(v_buf, ws->qkv_fused + q_dim + kv_dim, (u64)kv_dim * sizeof(float));
-
-                float *x_ssm = ws->qkv_fused + attn_total;
-                float *z_ssm = ws->qkv_fused + attn_total + d_inner;
-
-                /* -- RoPE -- */
-                rope(q_buf, n_head, q_head_dim, pos, rope_theta);
-                rope(k_buf, n_kv_head, kv_head_dim, pos, rope_theta);
-
-                /* -- Store K/V into cache -- */
-                {
-                    float *kd = akc->k + (u64)pos * kv_dim;
-                    float *vd = akc->v + (u64)pos * kv_dim;
-                    memcpy(kd, k_buf, kv_dim * sizeof(float));
-                    memcpy(vd, v_buf, kv_dim * sizeof(float));
-                    akc->n = pos + 1;
-                }
-
-                /* -- Attention (GQA, causal) -- */
-                u32 attn_out_dim = n_head * kv_head_dim;
-                {
-                    u32 n_kv = pos + 1;
-                    float *attn_out = ws->hb; /* reuse hb (size ffn_hidden >= attn_out_dim) */
-                    memset(attn_out, 0, (u64)attn_out_dim * sizeof(float));
-
-                    for (u32 h = 0; h < n_head; h++) {
-                        u32 kv_h  = h / n_rep;
-                        float *qh = q_buf + h * q_head_dim;
-
-                        float max_s = -INFINITY;
-                        for (u32 t = 0; t < n_kv; t++) {
-                            const float *kt = akc->k + (u64)t * kv_dim
-                                              + kv_h * kv_head_dim;
-                            float s = 0.0f;
-                            for (u32 d = 0; d < qk_score_dim; d++)
-                                s += qh[d] * kt[d];
-                            s /= sqrt_d;
-                            scores[t] = s;
-                            if (s > max_s) max_s = s;
-                        }
-                        float sum = 0.0f;
-                        for (u32 t = 0; t < n_kv; t++) {
-                            scores[t] = expf(scores[t] - max_s);
-                            sum += scores[t];
-                        }
-                        for (u32 t = 0; t < n_kv; t++)
-                            scores[t] /= sum;
-
-                        float *out_h = attn_out + h * kv_head_dim;
-                        for (u32 t = 0; t < n_kv; t++) {
-                            float a = scores[t];
-                            const float *vt = akc->v + (u64)t * kv_dim
-                                              + kv_h * kv_head_dim;
-                            for (u32 d = 0; d < kv_head_dim; d++)
-                                out_h[d] += a * vt[d];
-                        }
-                    }
-
-                    /* -- Gate attention output -- */
-                    TensorInfo *t_gate = lw->tensors[TENSOR_ATTN_GATE];
-                    if (t_gate && d_inner > 0) {
-                        bool gate_trans = (t_gate->dim[0] == (u64)n_embd);
-                        float *gate = ws->hb2; /* reuse hb2 for gate [d_inner] */
-                        if (!mat_vec_mul(gate, t_gate, base, xb2,
-                                         gate_trans ? (u64)t_gate->dim[1] : (u64)t_gate->dim[0],
-                                         gate_trans ? (u64)n_embd
-                                                    : (u64)(t_gate->ndim >= 2 ? t_gate->dim[1] : 0),
-                                         gate_trans)) return false;
-                        for (u32 i = 0; i < d_inner && i < attn_out_dim; i++) {
-                            gate[i] = gate[i] / (1.0f + expf(-gate[i])); /* silu */
-                            attn_out[i] *= gate[i];
-                        }
-                    }
-
-                    /* -- SSM forward -- */
-                    float *ssm_hidden = ws->hb2; /* reuse hb2 after gate (size ffn_hidden >= d_inner) */
-                    memset(ssm_hidden, 0, (u64)d_inner * sizeof(float));
-
-                    if (d_inner > 0 && d_state > 0) {
-                        /* dt = softplus(ssm_alpha @ xb2 + ssm_dt_bias) */
-                        TensorInfo *t_alpha = lw->tensors[TENSOR_SSM_ALPHA];
-                        TensorInfo *t_dt_bias = lw->tensors[TENSOR_SSM_DT_BIAS];
-                        float dt_buf[32]; /* d_state <= 32 */
-                        memset(dt_buf, 0, sizeof(dt_buf));
-                        if (t_alpha) {
-                            bool at = (t_alpha->dim[0] == (u64)n_embd);
-                            u32 a_rows = (u32)(at ? t_alpha->dim[1] : t_alpha->dim[0]);
-                            u32 a_cols = (u32)(at ? n_embd : (t_alpha->ndim >= 2 ? t_alpha->dim[1] : 0));
-                            if (a_rows <= 32 && a_cols == n_embd) {
-                                /* Compute manually — small projection. */
-                                for (u32 r = 0; r < a_rows && r < d_state; r++) {
-                                    float s_dt = 0.0f;
-                                    for (u32 c_ = 0; c_ < n_embd; c_++)
-                                        s_dt += tensor_get_f32(t_alpha, base,
-                                            at ? (u64)c_ * (u64)t_alpha->dim[1] + (u64)r
-                                               : (u64)r * (u64)a_cols + (u64)c_) * xb2[c_];
-                                    if (t_dt_bias && r < (u32)t_dt_bias->n_element)
-                                        s_dt += tensor_get_f32(t_dt_bias, base, (u64)r);
-                                    if (s_dt < 20.0f)
-                                        dt_buf[r] = logf(1.0f + expf(s_dt));
-                                    else
-                                        dt_buf[r] = s_dt;
-                                }
-                            }
-                        }
-
-                        /* B = ssm_beta @ xb2 */
-                        TensorInfo *t_beta = lw->tensors[TENSOR_SSM_BETA];
-                        float B_buf[32] = {0};
-                        if (t_beta) {
-                            bool bt = (t_beta->dim[0] == (u64)n_embd);
-                            u32 b_rows = (u32)(bt ? t_beta->dim[1] : t_beta->dim[0]);
-                            u32 b_cols = (u32)(bt ? n_embd : (t_beta->ndim >= 2 ? t_beta->dim[1] : 0));
-                            if (b_rows <= 32) {
-                                for (u32 r = 0; r < b_rows; r++) {
-                                    float sb = 0.0f;
-                                    for (u32 c_ = 0; c_ < n_embd && c_ < b_cols; c_++)
-                                        sb += tensor_get_f32(t_beta, base,
-                                            bt ? (u64)c_ * (u64)t_beta->dim[1] + (u64)r
-                                               : (u64)r * (u64)b_cols + (u64)c_) * xb2[c_];
-                                    B_buf[r] = sb;
-                                }
-                            }
-                        }
-
-                        /* Selective scan: h_new[i] = dA * h[i] + B * x_ssm[i].
-                         * Results accumulated in ssm_hidden (hb2). */
-                        for (u32 i = 0; i < d_inner; i++) {
-                            float xi = x_ssm[i];
-                            float *h_i = ssm_state_l + (u64)i * (u64)d_state;
-                            float s = 0.0f;
-                            for (u32 j = 0; j < d_state; j++) {
-                                float A_j = -expf(tensor_get_f32(
-                                    lw->tensors[TENSOR_SSM_A], base, (u64)j));
-                                float dt_j = dt_buf[j];
-                                float dA = expf(A_j * dt_j);
-                                float dB = B_buf[j] * xi;
-                                h_i[j] = dA * h_i[j] + dB;
-                                s += h_i[j];
-                            }
-                            ssm_hidden[i] = s;
-                        }
-
-                        /* z gate + combine with attention output. */
-                        for (u32 i = 0; i < d_inner; i++) {
-                            ssm_hidden[i] *= z_ssm[i] / (1.0f + expf(-z_ssm[i]));
-                            if (i < attn_out_dim)
-                                ssm_hidden[i] += ws->hb[i]; /* add gated attn output */
-                        }
-
-                        /* SSM output projection writes directly to x (n_embd). */
-                        TensorInfo *t_ssm_out = lw->tensors[TENSOR_SSM_OUT];
-                        if (t_ssm_out) {
-                            bool so_trans = (t_ssm_out->dim[0] == (u64)d_inner);
-                            if (!mat_vec_mul(x, t_ssm_out, base, ssm_hidden,
-                                             so_trans ? (u64)t_ssm_out->dim[1] : (u64)t_ssm_out->dim[0],
-                                             so_trans ? (u64)d_inner
-                                                      : (u64)(t_ssm_out->ndim >= 2 ? t_ssm_out->dim[1] : 0),
-                                             so_trans)) return false;
-                        }
-                    }
-                }
-
-            } else {
-                /* Standard fused QKV (non-SSM). */
-                memcpy(q_buf, ws->qkv_fused, (u64)q_dim * sizeof(float));
-                memcpy(k_buf, ws->qkv_fused + q_dim, (u64)kv_dim * sizeof(float));
-                memcpy(v_buf, ws->qkv_fused + q_dim + kv_dim, (u64)kv_dim * sizeof(float));
-
-                /* Optional Q/K LayerNorm (per-head). */
-                {
-                    TensorInfo *t_qn = lw->tensors[TENSOR_ATTN_Q_NORM];
-                    if (t_qn) {
-                        u32 norm_dim = (u32)t_qn->dim[0];
-                        for (u32 h = 0; h < n_head; h++)
-                            rms_norm(q_buf + h * q_head_dim,
-                                     q_buf + h * q_head_dim,
-                                     t_qn, base,
-                                     (int)(norm_dim < q_head_dim ? norm_dim : q_head_dim), eps);
-                    }
-                }
-                {
-                    TensorInfo *t_kn = lw->tensors[TENSOR_ATTN_K_NORM];
-                    if (t_kn) {
-                        u32 norm_dim = (u32)t_kn->dim[0];
-                        for (u32 h = 0; h < n_kv_head; h++)
-                            rms_norm(k_buf + h * kv_head_dim,
-                                     k_buf + h * kv_head_dim,
-                                     t_kn, base,
-                                     (int)(norm_dim < kv_head_dim ? norm_dim : kv_head_dim), eps);
-                    }
-                }
-
-                /* RoPE */
-                rope(q_buf, n_head, q_head_dim, pos, rope_theta);
-                rope(k_buf, n_kv_head, kv_head_dim, pos, rope_theta);
-                {
-                    float *kd = akc->k + (u64)pos * kv_dim;
-                    float *vd = akc->v + (u64)pos * kv_dim;
-                    memcpy(kd, k_buf, kv_dim * sizeof(float));
-                    memcpy(vd, v_buf, kv_dim * sizeof(float));
-                    akc->n = pos + 1;
-                }
-
-                /* Attention (GQA) */
-                u32 attn_out_dim = n_head * kv_head_dim;
-                u32 n_kv = pos + 1;
-                memset(xb2, 0, (u64)attn_out_dim * sizeof(float));
-                for (u32 h = 0; h < n_head; h++) {
-                    u32 kv_h  = h / n_rep;
-                    float *qh = q_buf + h * q_head_dim;
-                    float max_s = -INFINITY;
-                    for (u32 t = 0; t < n_kv; t++) {
-                        const float *kt = akc->k + (u64)t * kv_dim + kv_h * kv_head_dim;
-                        float s = 0.0f;
-                        for (u32 d = 0; d < qk_score_dim; d++) s += qh[d] * kt[d];
-                        s /= sqrt_d;
-                        scores[t] = s;
-                        if (s > max_s) max_s = s;
-                    }
-                    float sum = 0.0f;
-                    for (u32 t = 0; t < n_kv; t++) {
-                        scores[t] = expf(scores[t] - max_s);
-                        sum += scores[t];
-                    }
-                    for (u32 t = 0; t < n_kv; t++) scores[t] /= sum;
-                    float *out_h = xb2 + h * kv_head_dim;
-                    for (u32 t = 0; t < n_kv; t++) {
-                        float a = scores[t];
-                        const float *vt = akc->v + (u64)t * kv_dim + kv_h * kv_head_dim;
-                        for (u32 d = 0; d < kv_head_dim; d++) out_h[d] += a * vt[d];
-                    }
-                }
-
-                /* Output projection */
-                TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
-                if (t_out) {
-                    bool out_trans = (t_out->dim[0] == (u64)attn_out_dim);
-                    if (!mat_vec_mul(x, t_out, base, xb2,
-                                     out_trans ? (u64)t_out->dim[1] : (u64)t_out->dim[0],
-                                     out_trans ? (u64)attn_out_dim
-                                               : (u64)(t_out->ndim >= 2 ? t_out->dim[1] : 0),
-                                     out_trans)) return false;
-                } else {
-                    /* No output projection — use residual as passthrough.
-                     * x already holds residual in xb. */
-                }
-
-                /* Optional attention gate. */
-                if (lw->tensors[TENSOR_ATTN_GATE]) {
-                    u64 gate_n = lw->tensors[TENSOR_ATTN_GATE]->n_element;
-                    for (u32 i = 0; i < n_embd && (u64)i < gate_n; i++)
-                        x[i] *= tensor_get_f32(lw->tensors[TENSOR_ATTN_GATE], base, (u64)i);
-                }
-            }
-
+        if (t_qkv) {
+            bool qkv_trans = (t_qkv->dim[0] == n_embd);
+            fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
+            mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb,
+                        fused_total, n_embd, qkv_trans);
+            /* Split into q / k / v. */
+            memcpy(ws->q, ws->qkv_fused, q_dim * sizeof(float));
+            memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
+            memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
+        } else if (t_q) {
+            /* Separate Q / K / V tensors. */
+            TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
+            TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
+            mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd,
+                        t_q->dim[0] == n_embd);
+            mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd,
+                        t_k->dim[0] == n_embd);
+            mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd,
+                        t_v->dim[0] == n_embd);
         } else {
-            /* ---- Separate Q/K/V path (full attention layers) ---- */
-            TensorInfo *tq = lw->tensors[TENSOR_ATTN_Q];
-            TensorInfo *tk = lw->tensors[TENSOR_ATTN_K];
-            TensorInfo *tv = lw->tensors[TENSOR_ATTN_V];
-            if (!tq || !tk || !tv) {
-                slog(WARN, "attn Q/K/V missing layer %u", l);
-                return false;
+            slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
+            return false;
+        }
+
+        /* Extract SSM channels when present. */
+        u32 ssm_d_inner = 0;
+        float *ssm_x = NULL, *ssm_z = NULL;
+        if (is_ssm_layer && t_qkv && fused_total > q_dim + 2 * kv_dim) {
+            u32 attn_ch = q_dim + 2 * kv_dim;
+            ssm_d_inner = (fused_total - attn_ch) / 2;
+            ssm_x = ws->qkv_fused + attn_ch;
+            ssm_z = ws->qkv_fused + attn_ch + ssm_d_inner;
+        }
+
+        /* ---- 2c. Q / K norms (Qwen3.5) ---- */
+        if (lw->tensors[TENSOR_ATTN_Q_NORM])
+            rms_norm(ws->q, ws->q, lw->tensors[TENSOR_ATTN_Q_NORM],
+                     base, q_dim, eps);
+        if (lw->tensors[TENSOR_ATTN_K_NORM])
+            rms_norm(ws->k, ws->k, lw->tensors[TENSOR_ATTN_K_NORM],
+                     base, kv_dim, eps);
+
+        /* ---- 2d. RoPE ---- */
+        rope(ws->q, n_head, q_head_dim, pos, ws->rope_theta);
+        rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+
+        /* ---- 2e. KV cache write ---- */
+        memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
+        memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+        akc->n = pos + 1;
+
+        /* ---- 2f. Attention ---- */
+        u32 n_cached = akc->n;
+        float *attn_out = ws->q;  /* reuse Q buffer for per-head output */
+        memset(attn_out, 0, q_dim * sizeof(float));
+
+        for (u32 h = 0; h < n_head; h++) {
+            u32 kv_h   = h / gqa_ratio;
+            float *qh  = ws->q + (u64)h * q_head_dim;
+            float *kh_base = akc->k + (u64)kv_h * kv_head_dim;
+            float *vh_base = akc->v + (u64)kv_h * kv_head_dim;
+
+            /* Q·K^T scores. */
+            for (u32 t = 0; t < n_cached; t++) {
+                float *kt = kh_base + (u64)t * kv_dim;
+                float s = 0.0f;
+                for (u32 d = 0; d < kv_head_dim; d++)
+                    s += qh[d] * kt[d];
+                ws->scores[t] = s * scale;
             }
+            softmax(ws->scores, n_cached);
 
-            /* Detect convention: if dim[0] == n_embd, weights are transposed. */
-            bool q_trans = (tq->dim[0] == (u64)n_embd);
-            bool k_trans = (tk->dim[0] == (u64)n_embd);
-            bool v_trans = (tv->dim[0] == (u64)n_embd);
-
-            /* Use actual tensor output dims (may differ from config-derived q_dim/kv_dim). */
-            u32 eff_q_dim  = (u32)(q_trans ? tq->dim[1] : tq->dim[0]);
-            u32 eff_kv_dim = (u32)(k_trans ? tk->dim[1] : tk->dim[0]);
-            u32 eff_q_head_dim  = eff_q_dim / n_head;
-            u32 eff_kv_head_dim_local = eff_kv_dim / n_kv_head;
-
-            if (!mat_vec_mul(q_buf, tq, base, xb2,
-                             q_trans ? (u64)tq->dim[1] : (u64)tq->dim[0],
-                             q_trans ? (u64)n_embd : (u64)(tq->ndim >= 2 ? tq->dim[1] : 0),
-                             q_trans)) return false;
-            if (!mat_vec_mul(k_buf, tk, base, xb2,
-                             k_trans ? (u64)tk->dim[1] : (u64)tk->dim[0],
-                             k_trans ? (u64)n_embd : (u64)(tk->ndim >= 2 ? tk->dim[1] : 0),
-                             k_trans)) return false;
-            if (!mat_vec_mul(v_buf, tv, base, xb2,
-                             v_trans ? (u64)tv->dim[1] : (u64)tv->dim[0],
-                             v_trans ? (u64)n_embd : (u64)(tv->ndim >= 2 ? tv->dim[1] : 0),
-                             v_trans)) return false;
-
-            /* Q/K LayerNorm (per-head). */
-            {
-                TensorInfo *t_qn = lw->tensors[TENSOR_ATTN_Q_NORM];
-                if (t_qn) {
-                    u32 norm_dim = (u32)t_qn->dim[0];
-                    u32 n_heads_q = n_head;
-                    u32 head_dim_q = eff_q_dim / n_heads_q;
-                    for (u32 h = 0; h < n_heads_q; h++)
-                        rms_norm(q_buf + h * head_dim_q,
-                                 q_buf + h * head_dim_q,
-                                 t_qn, base,
-                                 (int)(norm_dim < head_dim_q ? norm_dim : head_dim_q), eps);
-                }
-            }
-            {
-                TensorInfo *t_kn = lw->tensors[TENSOR_ATTN_K_NORM];
-                if (t_kn) {
-                    u32 norm_dim = (u32)t_kn->dim[0];
-                    u32 n_heads_k = n_kv_head;
-                    u32 head_dim_k = eff_kv_dim / n_heads_k;
-                    for (u32 h = 0; h < n_heads_k; h++)
-                        rms_norm(k_buf + h * head_dim_k,
-                                 k_buf + h * head_dim_k,
-                                 t_kn, base,
-                                 (int)(norm_dim < head_dim_k ? norm_dim : head_dim_k), eps);
-                }
-            }
-
-            /* RoPE */
-            rope(q_buf, n_head, eff_q_head_dim, pos, rope_theta);
-            rope(k_buf, n_kv_head, eff_kv_head_dim_local, pos, rope_theta);
-
-            /* Store K/V into cache (using full kv_dim from config for cache sizing) */
-            {
-                float *kd = akc->k + (u64)pos * kv_dim;
-                float *vd = akc->v + (u64)pos * kv_dim;
-                memcpy(kd, k_buf, kv_dim * sizeof(float));
-                memcpy(vd, v_buf, kv_dim * sizeof(float));
-                akc->n = pos + 1;
-            }
-
-            /* Attention (GQA) — output into hb (size ffn_hidden >= attn_out_dim). */
-            u32 attn_out_dim = n_head * kv_head_dim;
-            u32 n_kv = pos + 1;
-            u32 score_dim = eff_q_head_dim < eff_kv_head_dim_local
-                            ? eff_q_head_dim : eff_kv_head_dim_local;
-            u32 eff_n_rep = n_head / n_kv_head;
-
-            float *attn_buf = ws->hb; /* borrow hb for attn output */
-            memset(attn_buf, 0, (u64)attn_out_dim * sizeof(float));
-            for (u32 h = 0; h < n_head; h++) {
-                u32 kv_h  = h / eff_n_rep;
-                float *qh = q_buf + h * eff_q_head_dim;
-                float max_s = -INFINITY;
-                for (u32 t = 0; t < n_kv; t++) {
-                    const float *kt = akc->k + (u64)t * kv_dim + kv_h * kv_head_dim;
-                    float s = 0.0f;
-                    for (u32 d = 0; d < score_dim; d++) s += qh[d] * kt[d];
-                    s /= sqrtf((float)score_dim);
-                    scores[t] = s;
-                    if (s > max_s) max_s = s;
-                }
-                float sum = 0.0f;
-                for (u32 t = 0; t < n_kv; t++) {
-                    scores[t] = expf(scores[t] - max_s);
-                    sum += scores[t];
-                }
-                for (u32 t = 0; t < n_kv; t++) scores[t] /= sum;
-                float *out_h = attn_buf + h * kv_head_dim;
-                for (u32 t = 0; t < n_kv; t++) {
-                    float a = scores[t];
-                    const float *vt = akc->v + (u64)t * kv_dim + kv_h * kv_head_dim;
-                    for (u32 d = 0; d < kv_head_dim; d++) out_h[d] += a * vt[d];
-                }
-            }
-
-            /* Attention output projection. */
-            {
-                TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
-                if (t_out) {
-                    bool out_trans = (t_out->dim[0] == (u64)attn_out_dim);
-                    if (!mat_vec_mul(x, t_out, base, attn_buf,
-                                     out_trans ? (u64)t_out->dim[1] : (u64)t_out->dim[0],
-                                     out_trans ? (u64)attn_out_dim
-                                               : (u64)(t_out->ndim >= 2 ? t_out->dim[1] : 0),
-                                     out_trans)) return false;
-                }
-            }
-
-            /* Optional attention gate. */
-            if (lw->tensors[TENSOR_ATTN_GATE]) {
-                u64 gate_n = lw->tensors[TENSOR_ATTN_GATE]->n_element;
-                for (u32 i = 0; i < n_embd && (u64)i < gate_n; i++)
-                    x[i] *= tensor_get_f32(lw->tensors[TENSOR_ATTN_GATE], base, (u64)i);
+            /* Weighted V sum. */
+            float *oh = attn_out + (u64)h * q_head_dim;
+            for (u32 t = 0; t < n_cached; t++) {
+                float *vt = vh_base + (u64)t * kv_dim;
+                float st  = ws->scores[t];
+                for (u32 d = 0; d < kv_head_dim; d++)
+                    oh[d] += st * vt[d];
             }
         }
 
-        /* -- Residual connection -- */
-        for (u32 i = 0; i < n_embd; i++)
-            x[i] += xb[i];
-
-        /* -- 2h. RMS Norm (pre-FFN) -- */
-        memcpy(xb, x, n_embd * sizeof(float));
+        /* ---- 2g. Attention output projection ---- */
         {
-            TensorInfo *tn = lw->tensors[TENSOR_POST_ATTN_NORM];
-            if (!tn) {
-                slog(WARN, "post_attn_norm missing layer %u", l);
-                return false;
-            }
-            rms_norm(xb2, x, tn, base, (int)n_embd, eps);
+            TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
+            if (t_out) mat_vec_mul(ws->xb2, t_out, base, attn_out, 
+                            n_embd, q_dim, t_out->dim[0] == q_dim);
         }
 
-        /* -- 2i. SwiGLU FFN -- */
+        /* ---- 2h. Attention gate (Qwen3.5) ---- */
+        {
+            TensorInfo *t_gate = lw->tensors[TENSOR_ATTN_GATE];
+            if (t_gate) {
+                /* Gate: ws->xb2 *= sigmoid(W_gate @ ws->xb).
+                 * W_gate shape: [n_embd, n_embd] or [1, n_embd]. */
+                u32 gate_out = t_gate->dim[0] > t_gate->dim[1]
+                               ? (u32)t_gate->dim[0] : (u32)(t_gate->ndim >= 2
+                                   ? t_gate->dim[1] : t_gate->dim[0]);
+                /* gate_out == 1 means scalar gate; otherwise per-channel. */
+                float *gate_buf = ws->hb;
+                mat_vec_mul(gate_buf, t_gate, base, ws->xb,
+                            gate_out, n_embd, t_gate->dim[0] == n_embd);
+                if (gate_out == 1) {
+                    float g = 1.0f / (1.0f + expf(-gate_buf[0]));  /* sigmoid */
+                    for (u32 i = 0; i < n_embd; i++)
+                        ws->xb2[i] *= g;
+                } else {
+                    for (u32 i = 0; i < n_embd && i < gate_out; i++) {
+                        float g = 1.0f / (1.0f + expf(-gate_buf[i]));
+                        ws->xb2[i] *= g;
+                    }
+                }
+            }
+        }
+
+        /* ---- 2i. Attention residual ---- */
+        for (u32 i = 0; i < n_embd; i++)
+            ws->x[i] += ws->xb2[i];
+
+        /* ---- 2j. SSM block (Qwen3.5 hybrid layers) ---- */
+        if (is_ssm_layer && ssm_d_inner > 0) {
+            /* Copy SSM channels into hb / hb2 for in-place processing. */
+            float *x_ssm = ws->hb;   /* [d_inner] */
+            float *z     = ws->hb2;  /* [d_inner] */
+            memcpy(x_ssm, ssm_x, ssm_d_inner * sizeof(float));
+            memcpy(z,     ssm_z, ssm_d_inner * sizeof(float));
+
+            ssm_block(ws, base, lw, x_ssm, z, l, ssm_d_inner, ws->d_state);
+
+            /* Project back: ssm_out @ x_ssm -> [n_embd]. */
+            TensorInfo *t_ssm_out = lw->tensors[TENSOR_SSM_OUT];
+            if (t_ssm_out) {
+                mat_vec_mul(ws->xb2, t_ssm_out, base, x_ssm,
+                            n_embd, ssm_d_inner,
+                            t_ssm_out->dim[0] == ssm_d_inner);
+            } else {
+                /* No output projection: x_ssm is already [n_embd]. */
+                memcpy(ws->xb2, x_ssm, n_embd * sizeof(float));
+            }
+            for (u32 i = 0; i < n_embd; i++)
+                ws->x[i] += ws->xb2[i];
+        }
+
+        /* ---- 2k. Post-attention norm (pre-FFN) ---- */
+        if (lw->tensors[TENSOR_POST_ATTN_NORM])
+            rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_POST_ATTN_NORM],
+                     base, n_embd, eps);
+
+        /* ---- 2l. SwiGLU FFN ---- */
         {
             TensorInfo *t_gate = lw->tensors[TENSOR_FFN_GATE];
             TensorInfo *t_up   = lw->tensors[TENSOR_FFN_UP];
             TensorInfo *t_down = lw->tensors[TENSOR_FFN_DOWN];
-            if (!t_gate || !t_up || !t_down) {
-                slog(WARN, "FFN tensors missing layer %u", l);
-                return false;
-            }
+            u32 fh = ws->ffn_hidden;
 
-            bool gate_trans = (t_gate->dim[0] == (u64)n_embd);
-            bool up_trans   = (t_up->dim[0]   == (u64)n_embd);
-            bool down_trans = (t_down->dim[0] == (u64)ws->ffn_hidden);
+            /* Gate projection: hb = W_gate @ xb. */
+            mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd,
+                        t_gate->dim[0] == n_embd);
+            /* Up projection: hb2 = W_up @ xb. */
+            mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd,
+                        t_up->dim[0] == n_embd);
 
-            u32 ffn_h = ws->ffn_hidden;
-            if (!mat_vec_mul(ws->hb,  t_gate, base, xb2,
-                             gate_trans ? (u64)t_gate->dim[1] : (u64)t_gate->dim[0],
-                             gate_trans ? (u64)n_embd
-                                        : (u64)(t_gate->ndim >= 2 ? t_gate->dim[1] : 0),
-                             gate_trans)) return false;
-            if (!mat_vec_mul(ws->hb2, t_up,   base, xb2,
-                             up_trans ? (u64)t_up->dim[1] : (u64)t_up->dim[0],
-                             up_trans ? (u64)n_embd
-                                      : (u64)(t_up->ndim >= 2 ? t_up->dim[1] : 0),
-                             up_trans)) return false;
-
-            silu(ws->hb, (int)ffn_h);
-            for (u32 i = 0; i < ffn_h; i++)
+            /* SiLU(gate) * up. */
+            silu(ws->hb, fh);
+            for (u32 i = 0; i < fh; i++)
                 ws->hb[i] *= ws->hb2[i];
 
-            if (!mat_vec_mul(x, t_down, base, ws->hb,
-                             down_trans ? (u64)t_down->dim[1] : (u64)t_down->dim[0],
-                             down_trans ? (u64)ffn_h
-                                        : (u64)(t_down->ndim >= 2 ? t_down->dim[1] : 0),
-                             down_trans)) return false;
+            /* Down projection: xb = W_down @ hb. */
+            mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh,
+                        t_down->dim[0] == fh);
+
+            /* Residual. */
             for (u32 i = 0; i < n_embd; i++)
-                x[i] += xb[i];
+                ws->x[i] += ws->xb[i];
         }
     }
 
-    /* ---- 3. Final RMS Norm ---- */
+    /* ---- 3. Final RMS norm ---- */
     {
-        TensorInfo *out_norm = w->tensors[TENSOR_OUTPUT_NORM];
-        if (out_norm)
-            rms_norm(xb, x, out_norm, base, (int)n_embd, eps);
-        else
-            memcpy(xb, x, n_embd * sizeof(float));
+        TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
+        /* Some Qwen2 models use TENSOR_POST_ATTN_NORM from layer 0
+         * as the final norm; try output_norm first, then fall back. */
+        if (!t_norm)
+            t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+        rms_norm(ws->xb, ws->x, t_norm, base, n_embd, eps);
     }
 
     /* ---- 4. LM head ---- */
     {
-        TensorInfo *out = w->tensors[TENSOR_OUTPUT];
-        if (!out) out = w->tensors[TENSOR_TOKEN_EMBD]; /* tied embeddings */
-        if (!out) {
-            slog(WARN, "output tensor not found");
-            return false;
+        TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+        if (!t_out)
+            t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
+        u64 out_embd = (t_out->dim[0] == n_embd) ? t_out->dim[1] : t_out->dim[0];
+        if (out_embd != c->n_vocab) {
+            /* If the second dimension doesn't match, the first might. */
+            out_embd = (t_out->dim[0] == c->n_vocab) ? t_out->dim[0] : t_out->dim[1];
         }
-        bool out_trans = (out->dim[0] == (u64)n_embd);
-        if (!mat_vec_mul(logits, out, base, xb,
-                         out_trans ? (u64)out->dim[1] : (u64)out->dim[0],
-                         out_trans ? (u64)n_embd : (u64)(out->ndim >= 2 ? out->dim[1] : 0),
-                         out_trans)) return false;
+        mat_vec_mul(s->logits, t_out, base, ws->xb,
+                    c->n_vocab, n_embd, t_out->dim[0] == n_embd);
     }
 
-    s->n_tokens++;
+    /* ---- 5. Copy to user buffer ---- */
+    if (logits)
+        memcpy(logits, s->logits, (u64)c->n_vocab * sizeof(float));
+
+    /* ---- 6. Update session state ---- */
+    s->tokens[pos] = token;
+    s->n_tokens    = pos + 1;
     return true;
 }
 

@@ -681,9 +681,7 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
 /* ---- Math primitives ------------------------------------------- */
 
 /* RMS Normalisation: o = x / rms(x) * w  (in-place ok when o == x). */
-void rms_norm(float *o, const float *x,
-                     TensorInfo *tw, const u8 *base,
-                     int n, float eps) {
+void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps) {
     u64 tn = tw->dim[0]; /* 1-D weight tensor */
     if ((u64)n > tn) {
         slog(WARN, "rms_norm: n=%d > tensor dim=%llu, clamping", n,
@@ -704,8 +702,7 @@ void rms_norm(float *o, const float *x,
  *
  * When trans=true, the weight is treated as transposed: y = W^T @ x.
  * In that case dim[0] is the input dimension and dim[ndim-1] is the output. */
-bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base,
-                        const float *x, u64 rows, u64 cols, bool trans) {
+bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans) {
     if (!tw || tw->ndim < 2) {
         slog(WARN, "mat_vec_mul: tensor missing or ndim < 2");
         return false;
@@ -798,6 +795,25 @@ void silu(float *x, int n) {
         x[i] = x[i] / (1.0f + expf(-x[i]));
 }
 
+/* Softmax in-place on a slice of length n. */
+void softmax(float *x, u32 n) {
+    float mx = x[0];
+    for (u32 i = 1; i < n; i++)
+        if (x[i] > mx) mx = x[i];
+    float sum = 0.0f;
+    for (u32 i = 0; i < n; i++) {
+        x[i] = expf(x[i] - mx);
+        sum += x[i];
+    }
+    for (u32 i = 0; i < n; i++)
+        x[i] /= sum;
+}
+
+/* Softplus: y = log(1 + exp(x)). */
+float softplus(float x) {
+    return logf(1.0f + expf(x));
+}
+
 
 typedef struct {
     u8 *base;
@@ -805,7 +821,6 @@ typedef struct {
     u64 post;
     char error[125];
 } Cursor;
-
 
 
 static int global_lock_fd = -1;

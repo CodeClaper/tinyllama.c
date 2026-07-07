@@ -9,6 +9,8 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
 bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans);
 void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
 void silu(float *x, int n);
+void softmax(float *x, u32 n);
+float softplus(float x);
 bool model_get_i32(Model *m, const char *key, i32 *out);
 bool model_get_f32(Model *m, const char *key, float *out);
 Model *model_load(const char *path);
