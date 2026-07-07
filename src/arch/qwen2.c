@@ -409,9 +409,10 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         }
 
         /* ---- 2k. Post-attention norm (pre-FFN) ---- */
-        if (lw->tensors[TENSOR_POST_ATTN_NORM])
-            rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_POST_ATTN_NORM],
-                     base, n_embd, eps);
+        {
+            TensorInfo *ti_att = lw->tensors[TENSOR_POST_ATTN_NORM];
+            if (ti_att) rms_norm(ws->xb, ws->x, ti_att, base, n_embd, eps);
+        }
 
         /* ---- 2l. SwiGLU FFN ---- */
         {
