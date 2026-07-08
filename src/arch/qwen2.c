@@ -27,6 +27,9 @@ typedef struct {
     u32    conv_channels;   /* total channels for conv1d (fused projection) */
     u32    d_inner;         /* SSM inner dimension                          */
     u32    d_state;         /* SSM state dimension                          */
+    u32    conv_kernel;     /* conv1d kernel size (from KV metadata)        */
+    u32    group_count;     /* SSM group count (from KV metadata)           */
+    u32    time_step_rank;  /* SSM time step rank (from KV metadata)        */
     bool   is_ssm;          /* true if this layer has SSM tensors           */
     float  rope_theta;      /* RoPE frequency base                          */
 } Qwen2Workspace;
@@ -59,15 +62,22 @@ static bool qwen2_init(Session *s) {
     s->tokens = scalloc((u64)s->ctx_size, sizeof(u32));
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
+    /* Determine arch prefix for KV metadata lookups. */
+    const char *pfx = s->en->model->arch_name[0]
+                      ? s->en->model->arch_name : "qwen2";
+
     /* Detect SSM presence and dimensions from layer 0. */
     Weights *w = s->en->weights;
     bool has_ssm = (w->layers[0].tensors[TENSOR_SSM_CONV1D] != NULL);
 
-    /* Compute max fused QKV / separate Q output dimensions from first layer. */
+    /* Compute max fused QKV dimension from first fused QKV tensor. */
     u32 max_fused = q_dim + 2 * kv_dim; /* default for non-SSM */
     u32 ssm_channels = 0;
     u32 d_inner = 0;
     u32 d_state = 0;
+    u32 conv_kernel = 4;
+    u32 group_count = 1;
+    u32 time_step_rank = 16;
     if (has_ssm) {
         TensorInfo *t_qkv = w->layers[0].tensors[TENSOR_ATTN_QKV];
         if (t_qkv && t_qkv->ndim >= 2) {
@@ -75,15 +85,27 @@ static bool qwen2_init(Session *s) {
                         ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
             max_fused = (u32)total;
             ssm_channels = (u32)total;
-            /* d_inner = (total_channels - attention_channels) / 2
-             * attention = q_dim + 2*kv_dim = n_head*q_head_dim + 2*n_kv_head*kv_head_dim */
             u32 attn_ch = q_dim + 2 * kv_dim;
             d_inner = (max_fused > attn_ch) ? (max_fused - attn_ch) / 2 : 0;
         }
-        /* d_state from ssm_a tensor. */
+        /* d_state from ssm_a tensor (fallback). */
         TensorInfo *t_ssm_a = w->layers[0].tensors[TENSOR_SSM_A];
         if (t_ssm_a && t_ssm_a->ndim >= 1)
             d_state = (u32)t_ssm_a->dim[0];
+
+        /* Read SSM params from KV metadata (override derived values). */
+        { i32 v; char k[96];
+          if (snprintf(k, sizeof(k), "%s.ssm.inner_size", pfx) > 0
+              && model_get_i32(s->en->model, k, &v)) d_inner = (u32)v;
+          if (snprintf(k, sizeof(k), "%s.ssm.state_size", pfx) > 0
+              && model_get_i32(s->en->model, k, &v)) d_state = (u32)v;
+          if (snprintf(k, sizeof(k), "%s.ssm.conv_kernel", pfx) > 0
+              && model_get_i32(s->en->model, k, &v)) conv_kernel = (u32)v;
+          if (snprintf(k, sizeof(k), "%s.ssm.group_count", pfx) > 0
+              && model_get_i32(s->en->model, k, &v)) group_count = (u32)v;
+          if (snprintf(k, sizeof(k), "%s.ssm.time_step_rank", pfx) > 0
+              && model_get_i32(s->en->model, k, &v)) time_step_rank = (u32)v;
+        }
         if (d_state == 0) d_state = 16; /* fallback */
     }
 
@@ -112,20 +134,21 @@ static bool qwen2_init(Session *s) {
     ws->rope_theta = 1000000.0f;
     {
         char k[96];
-        const char *pfx = s->en->model->arch_name[0]
-                          ? s->en->model->arch_name : "qwen2";
         if (snprintf(k, sizeof(k), "%s.rope.freq_base", pfx) > 0)
             model_get_f32(s->en->model, k, &ws->rope_theta);
     }
 
     /* SSM state allocation. */
-    ws->is_ssm    = has_ssm;
-    ws->d_inner   = d_inner;
-    ws->d_state   = d_state;
+    ws->is_ssm        = has_ssm;
+    ws->d_inner       = d_inner;
+    ws->d_state       = d_state;
     ws->conv_channels = ssm_channels;
+    ws->conv_kernel   = conv_kernel;
+    ws->group_count   = group_count;
+    ws->time_step_rank = time_step_rank;
     if (has_ssm && ssm_channels > 0 && d_state > 0) {
-        /* conv_state: [n_layer * 3 * conv_channels] — last 3 inputs for depthwise conv1d */
-        ws->conv_state = scalloc((u64)c->n_layer * 3 * (u64)ssm_channels, sizeof(float));
+        /* conv_state: [n_layer * (conv_kernel-1) * conv_channels] */
+        ws->conv_state = scalloc((u64)c->n_layer * (u64)(conv_kernel - 1) * (u64)ssm_channels, sizeof(float));
         /* ssm_state: [n_layer * d_inner * d_state] — SSM hidden state */
         ws->ssm_state  = scalloc((u64)c->n_layer * (u64)d_inner * (u64)d_state, sizeof(float));
     }
@@ -137,8 +160,10 @@ static bool qwen2_init(Session *s) {
          c->n_layer, c->n_vocab, s->ctx_size);
     slog(INFO, "Qwen2 init: q_dim=%u kv_dim=%u ffn_hidden=%u max_fused=%u ssm=%d",
          q_dim, kv_dim, ws->ffn_hidden, max_fused, has_ssm);
-    if (has_ssm) slog(INFO, "Qwen2 init SSM: channels=%u d_inner=%u d_state=%u",
-                      ssm_channels, d_inner, d_state);
+    if (has_ssm) slog(INFO, "Qwen2 init SSM: channels=%u d_inner=%u d_state=%u "
+                      "conv_kernel=%u group_count=%u time_step_rank=%u",
+                      ssm_channels, d_inner, d_state,
+                      conv_kernel, group_count, time_step_rank);
     {
         LayerWeights *lw0 = &w->layers[0];
         TensorInfo *t = lw0->tensors[TENSOR_ATTN_QKV];
@@ -173,20 +198,25 @@ static void ssm_block(Qwen2Workspace *ws, const u8 *base, LayerWeights *lw,
     /* 1. SiLU on input. */
     silu(x_ssm, d_inner);
 
-    /* 2. Depthwise conv1d (kernel = 4). */
-    float *cstate = ws->conv_state + (u64)layer_idx * 3 * (u64)d_inner;
+    /* 2. Depthwise conv1d. */
+    u32 ksize = ws->conv_kernel;
+    float *cstate = ws->conv_state
+                  + (u64)layer_idx * (u64)(ksize - 1) * (u64)d_inner;
     for (u32 i = 0; i < d_inner; i++) {
-        float w0 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 0) : 0.0f;
-        float w1 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 1) : 0.0f;
-        float w2 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 2) : 0.0f;
-        float w3 = t_conv1d ? tensor_get_f32(t_conv1d, base, (u64)i * 4 + 3) : 1.0f;
-        float y = w3 * x_ssm[i]
-                + w2 * cstate[0 * d_inner + i]
-                + w1 * cstate[1 * d_inner + i]
-                + w0 * cstate[2 * d_inner + i];
+        /* Current input * last weight (default 1.0). */
+        float y = (t_conv1d
+                   ? tensor_get_f32(t_conv1d, base, (u64)i * ksize + (ksize - 1))
+                   : 1.0f) * x_ssm[i];
+        /* Historical states. */
+        for (u32 k = 0; k < ksize - 1; k++) {
+            float wk = t_conv1d
+                       ? tensor_get_f32(t_conv1d, base, (u64)i * ksize + k)
+                       : 0.0f;
+            y += wk * cstate[(ksize - 2 - k) * d_inner + i];
+        }
         /* Shift state window. */
-        cstate[2 * d_inner + i] = cstate[1 * d_inner + i];
-        cstate[1 * d_inner + i] = cstate[0 * d_inner + i];
+        for (u32 k = ksize - 2; k > 0; k--)
+            cstate[k * d_inner + i] = cstate[(k - 1) * d_inner + i];
         cstate[0 * d_inner + i] = x_ssm[i];
         x_ssm[i] = y;
     }
@@ -291,8 +321,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         float *ssm_x = NULL, *ssm_z = NULL;
         if (is_ssm_layer && t_qkv && fused_total > q_dim + 2 * kv_dim) {
             u32 attn_ch = q_dim + 2 * kv_dim;
-            ssm_d_inner = (fused_total - attn_ch) / 2;
-            Assert(ssm_d_inner == ws->d_inner);
+            ssm_d_inner = ws->d_inner > 0 ? ws->d_inner : (fused_total - attn_ch) / 2;
             ssm_x = ws->qkv_fused + attn_ch;
             ssm_z = ws->qkv_fused + attn_ch + ssm_d_inner;
         }
@@ -471,7 +500,7 @@ static void qwen2_reset(Session *s) {
         u32 n_layer = kc->n_layer;
         if (ws->conv_state)
             memset(ws->conv_state, 0,
-                   (u64)n_layer * 3 * (u64)ws->conv_channels * sizeof(float));
+                   (u64)n_layer * (u64)(ws->conv_kernel - 1) * (u64)ws->conv_channels * sizeof(float));
         if (ws->ssm_state)
             memset(ws->ssm_state, 0,
                    (u64)n_layer * (u64)ws->d_inner * (u64)ws->d_state * sizeof(float));
