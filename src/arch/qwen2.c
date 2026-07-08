@@ -197,7 +197,8 @@ static void ssm_block(Qwen2Workspace *ws, const u8 *base, LayerWeights *lw,
     /* 4. Selective SSM scan. */
     float *sm = ws->ssm_state + (u64)layer_idx * (u64)d_inner * (u64)d_state;
     for (u32 i = 0; i < d_inner; i++) {
-        float dt_bias = t_dt_bias ? tensor_get_f32(t_dt_bias, base, i) : 0.0f;
+        float dt_bias = (t_dt_bias && i < t_dt_bias->n_element) 
+                           ? tensor_get_f32(t_dt_bias, base, i) : 0.0f;
         float dt = softplus(x_ssm[i] + dt_bias);
 
         float y = 0.0f;
