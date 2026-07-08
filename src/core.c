@@ -1816,13 +1816,19 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
     TRY_I32("attention.head_count_kv",  n_kv_head);
     if (cfg->n_kv_head == 0) cfg->n_kv_head = cfg->n_head; /* MHA fallback */
 
-    /* Head dimension. */
+    /* Head dimension (Q). */
     TRY_I32("attention.head_dim",       head_dim);
-    if (cfg->head_dim == 0 && cfg->n_head > 0)
-        cfg->head_dim = cfg->n_embd / cfg->n_head;
 
     /* KV head dimension (may differ from Q head_dim in Qwen3.5 etc.). */
     TRY_I32("attention.key_length",      kv_head_dim);
+
+    /* Fallback: prefer kv_head_dim if head_dim not explicitly given
+     * (Qwen3.5 models store key_length but not head_dim in metadata). */
+    if (cfg->head_dim == 0 && cfg->kv_head_dim > 0)
+        cfg->head_dim = cfg->kv_head_dim;
+    else if (cfg->head_dim == 0 && cfg->n_head > 0)
+        cfg->head_dim = cfg->n_embd / cfg->n_head;
+
     if (cfg->kv_head_dim == 0) cfg->kv_head_dim = cfg->head_dim;
 
     /* ---- DeepSeek MLA ---- */
