@@ -728,8 +728,11 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
         /* y[r] = sum_c W_stored[c][r] * x[c] = sum_c data[c * tc + r] * x[c] */
         for (u64 r = 0; r < rows; r++) {
             float sum = 0.0f;
-            for (u64 c = 0; c < cols; c++)
-                sum += tensor_get_f32(tw, base, c * tc + r) * x[c];
+            for (u64 c = 0; c < cols; c++) {
+                float s = tensor_get_f32(tw, base, c * tc + r);
+                AssertFalse(isnan(s));
+                sum += s * x[c];
+            }
             y[r] = sum;
         }
         return true;
@@ -765,8 +768,11 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     }
     for (u64 r = 0; r < rows; r++) {
         float sum = 0.0f;
-        for (u64 c = 0; c < cols; c++)
-            sum += tensor_get_f32(tw, base, r * cols + c) * x[c];
+        for (u64 c = 0; c < cols; c++) {
+            float s = tensor_get_f32(tw, base, r * cols + c);
+            AssertFalse(isnan(s));
+            sum += s * x[c];
+        }
         y[r] = sum;
     }
     return true;
