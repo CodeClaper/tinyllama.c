@@ -450,30 +450,20 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
         /* Some Qwen2 models use TENSOR_POST_ATTN_NORM from layer 0
          * as the final norm; try output_norm first, then fall back. */
-        if (!t_norm)
-            t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+        if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         rms_norm(ws->xb, ws->x, t_norm, base, n_embd, eps);
     }
 
     /* ---- 4. LM head ---- */
     {
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
-        if (!t_out)
-            t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
-        u64 out_embd = (t_out->dim[0] == n_embd) ? t_out->dim[1] : t_out->dim[0];
-        if (out_embd != c->n_vocab) {
-            /* If the second dimension doesn't match, the first might. */
-            out_embd = (t_out->dim[0] == c->n_vocab) ? t_out->dim[0] : t_out->dim[1];
-        }
-        mat_vec_mul(s->logits, t_out, base, ws->xb,
+        if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
+        float *dst = logits ? logits : s->logits;
+        mat_vec_mul(dst, t_out, base, ws->xb,
                     c->n_vocab, n_embd, t_out->dim[0] == n_embd);
     }
 
-    /* ---- 5. Copy to user buffer ---- */
-    if (logits)
-        memcpy(logits, s->logits, (u64)c->n_vocab * sizeof(float));
-
-    /* ---- 6. Update session state ---- */
+    /* ---- 5. Update session state ---- */
     s->tokens[pos] = token;
     s->n_tokens    = pos + 1;
     return true;
