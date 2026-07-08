@@ -269,8 +269,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         if (t_qkv) {
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-            mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb,
-                        fused_total, n_embd, qkv_trans);
+            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans)) return false;
             /* Split into q / k / v. */
             memcpy(ws->q, ws->qkv_fused, q_dim * sizeof(float));
             memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
@@ -279,12 +278,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             /* Separate Q / K / V tensors. */
             TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
             TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
-            mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd,
-                        t_q->dim[0] == n_embd);
-            mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd,
-                        t_k->dim[0] == n_embd);
-            mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd,
-                        t_v->dim[0] == n_embd);
+            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, t_q->dim[0] == n_embd)) return false;
+            if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd)) return false;
+            if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd)) return false;
         } else {
             slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
             return false;
@@ -352,8 +348,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         /* ---- 2g. Attention output projection ---- */
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
-            if (t_out) mat_vec_mul(ws->xb2, t_out, base, attn_out, 
-                            n_embd, q_dim, t_out->dim[0] == q_dim);
+            if (t_out) {
+                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, t_out->dim[0] == q_dim)) return false;
+            }
         }
 
         /* ---- 2h. Attention gate (Qwen3.5) ---- */
@@ -367,8 +364,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                                    ? t_gate->dim[1] : t_gate->dim[0]);
                 /* gate_out == 1 means scalar gate; otherwise per-channel. */
                 float *gate_buf = ws->hb;
-                mat_vec_mul(gate_buf, t_gate, base, ws->xb,
-                            gate_out, n_embd, t_gate->dim[0] == n_embd);
+                if (!mat_vec_mul(gate_buf, t_gate, base, ws->xb, gate_out, n_embd, t_gate->dim[0] == n_embd)) return false;
                 if (gate_out == 1) {
                     float g = 1.0f / (1.0f + expf(-gate_buf[0]));  /* sigmoid */
                     for (u32 i = 0; i < n_embd; i++)
@@ -399,9 +395,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             /* Project back: ssm_out @ x_ssm -> [n_embd]. */
             TensorInfo *t_ssm_out = lw->tensors[TENSOR_SSM_OUT];
             if (t_ssm_out) {
-                mat_vec_mul(ws->xb2, t_ssm_out, base, x_ssm,
-                            n_embd, ssm_d_inner,
-                            t_ssm_out->dim[0] == ssm_d_inner);
+                if (!mat_vec_mul(ws->xb2, t_ssm_out, base, x_ssm, n_embd, ssm_d_inner, t_ssm_out->dim[0] == ssm_d_inner)) return false;
             } else {
                 /* No output projection: x_ssm is already [n_embd]. */
                 memcpy(ws->xb2, x_ssm, n_embd * sizeof(float));
@@ -424,11 +418,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             u32 fh = ws->ffn_hidden;
 
             /* Gate projection: hb = W_gate @ xb. */
-            mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd,
-                        t_gate->dim[0] == n_embd);
+            if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd, t_gate->dim[0] == n_embd)) return false;
             /* Up projection: hb2 = W_up @ xb. */
-            mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd,
-                        t_up->dim[0] == n_embd);
+            if (!mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd, t_up->dim[0] == n_embd)) return false;
 
             /* SiLU(gate) * up. */
             silu(ws->hb, fh);
@@ -436,8 +428,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
                 ws->hb[i] *= ws->hb2[i];
 
             /* Down projection: xb = W_down @ hb. */
-            mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh,
-                        t_down->dim[0] == fh);
+            if (!mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh, t_down->dim[0] == fh)) return false;
 
             /* Residual. */
             for (u32 i = 0; i < n_embd; i++)
@@ -459,8 +450,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
         float *dst = logits ? logits : s->logits;
-        mat_vec_mul(dst, t_out, base, ws->xb,
-                    c->n_vocab, n_embd, t_out->dim[0] == n_embd);
+        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd)) return false;
     }
 
     /* ---- 5. Update session state ---- */
