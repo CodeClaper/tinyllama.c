@@ -1,5 +1,14 @@
 #include <stdbool.h>
+#include <assert.h>
 #include "def.h"
+
+#ifdef DEBUG
+#define Assert(condition) assert(condition)
+#define AssertFalse(condition) assert(!(condition))
+#else
+#define Assert(condition) ((void)true)
+#define AssertFalse(condition) ((void)false)
+#endif
 
 /* Anti-warning marco. */
 #define UNUSED(v) ((void ) v)

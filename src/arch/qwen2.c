@@ -295,6 +295,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         if (is_ssm_layer && t_qkv && fused_total > q_dim + 2 * kv_dim) {
             u32 attn_ch = q_dim + 2 * kv_dim;
             ssm_d_inner = (fused_total - attn_ch) / 2;
+            Assert(ssm_d_inner == ws->d_inner);
             ssm_x = ws->qkv_fused + attn_ch;
             ssm_z = ws->qkv_fused + attn_ch + ssm_d_inner;
         }
