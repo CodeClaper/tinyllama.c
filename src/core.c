@@ -1162,8 +1162,8 @@ KV *kv_load(Model *m, Cursor *c) {
         if (!cursor_u32(c, &v->type)) slog(ERROR, c->error);
         v->value_pos = c->post;
 
-        if (key_streq(v->key, "general.alignment") && 
-            kv->type == GGUF_VALUE_UINT32
+        if (key_streq(v->key, "general.alignment") &&
+            v->type == GGUF_VALUE_UINT32
         ) {
             u32 alignment;
             Cursor tmp = cursor_at(m->map, m->size, kv->value_pos);
@@ -1656,6 +1656,16 @@ Model *model_load(const char *path) {
 
     m->kv = kv_load(m, &c);
     m->tensor = tensor_load(m, &c);
+
+    /* GGUF stores tensor offsets relative to the start of the tensor
+     * data section (not absolute file offsets).  The data section begins
+     * at the next alignment boundary after the tensor-info entries. */
+    u64 data_base = c.post;
+    if (data_base % m->alignment)
+        data_base += m->alignment - (data_base % m->alignment);
+    for (u64 i = 0; i < m->n_tensor; i++)
+        m->tensor[i].offset += data_base;
+
     m->arch = model_detect_arch(m);
 
     return m;
