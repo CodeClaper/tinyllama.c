@@ -581,6 +581,7 @@ int main(int argc, char *argv[]) {
         engine_close(engine);
         slog(ERROR, "Failed to create session.");
     }
+    session->max_tokens = (u32)so.default_tokens;
 
     Server server;
     server.engine = engine;
