@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -200,8 +201,7 @@ static void ssm_block(Qwen2Workspace *ws, const u8 *base, LayerWeights *lw,
 
     /* 2. Depthwise conv1d. */
     u32 ksize = ws->conv_kernel;
-    float *cstate = ws->conv_state
-                  + (u64)layer_idx * (u64)(ksize - 1) * (u64)d_inner;
+    float *cstate = ws->conv_state + (u64)layer_idx * (u64)(ksize - 1) * (u64)d_inner;
     for (u32 i = 0; i < d_inner; i++) {
         /* Current input * last weight (default 1.0). */
         float y = (t_conv1d
@@ -228,12 +228,15 @@ static void ssm_block(Qwen2Workspace *ws, const u8 *base, LayerWeights *lw,
     float *sm = ws->ssm_state + (u64)layer_idx * (u64)d_inner * (u64)d_state;
     for (u32 i = 0; i < d_inner; i++) {
         float dt_bias = (t_dt_bias && i < t_dt_bias->n_element) 
-                           ? tensor_get_f32(t_dt_bias, base, i) : 0.0f;
+                           ? tensor_get_f32(t_dt_bias, base, i) 
+                           : 0.0f;
         float dt = softplus(x_ssm[i] + dt_bias);
 
         float y = 0.0f;
         for (u32 j = 0; j < d_state; j++) {
-            float A_j = t_a ? tensor_get_f32(t_a, base, j) : -(float)(j + 1);
+            float A_j = (t_a && j < t_a->n_element) 
+                          ? tensor_get_f32(t_a, base, j) 
+                          : -(float)(j + 1);
             float A_bar = expf(dt * A_j);
             float h = sm[(u64)i * d_state + j];
             h = A_bar * h + dt * x_ssm[i];  /* B = 1 (simplified) */
