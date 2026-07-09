@@ -297,6 +297,8 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         /* ---- 2b. Q / K / V projections ---- */
         TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
         TensorInfo *t_q   = lw->tensors[TENSOR_ATTN_Q];
+        TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
+        TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
         u32 fused_total   = 0;  /* total output dim of fused QKV */
 
         if (t_qkv) {
@@ -307,10 +309,8 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             memcpy(ws->q, ws->qkv_fused, q_dim * sizeof(float));
             memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
             memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
-        } else if (t_q) {
+        } else if (t_q && t_k && t_v) {
             /* Separate Q / K / V tensors. */
-            TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
-            TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
             if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, t_q->dim[0] == n_embd)) return false;
             if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd)) return false;
             if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd)) return false;
