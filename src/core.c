@@ -730,7 +730,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             float sum = 0.0f;
             for (u64 c = 0; c < cols; c++) {
                 float s = tensor_get_f32(tw, base, c * tc + r);
-                AssertFalse(isnan(s));
+                AssertFalse(isnanf(s));
                 sum += s * x[c];
             }
             y[r] = sum;
@@ -770,7 +770,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
         float sum = 0.0f;
         for (u64 c = 0; c < cols; c++) {
             float s = tensor_get_f32(tw, base, r * cols + c);
-            AssertFalse(isnan(s));
+            AssertFalse(isnanf(s));
             sum += s * x[c];
         }
         y[r] = sum;

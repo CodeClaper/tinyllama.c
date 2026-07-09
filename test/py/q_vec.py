@@ -35,9 +35,9 @@ def get_all_head_q_vectors(gguf_path, layer_idx=0):
     head_dim = n_embd // n_heads
     head_q_vectors = torch.split(q_weight, head_dim, dim=-1)
     
-    return list(head_q_vectors), n_heads, head_dim
+    return list(head_q_vectors), n_heads, head_dim, n_embd
 
 # 使用示例
 gguf_path = "/home/zc/Work/model/Qwen3.5-0.8B-BF16.gguf"
-head_vectors, n_heads, head_dim = get_all_head_q_vectors(gguf_path, layer_idx=3)
-print(f"注意力头数量: {n_heads}")
+head_vectors, n_heads, head_dim, n_embd = get_all_head_q_vectors(gguf_path, layer_idx=3)
+print(f"n_heads: {n_heads}, head_dim: {head_dim}, n_embd: {n_embd}, head_vectors: {head_vectors}")
