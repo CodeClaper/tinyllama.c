@@ -70,6 +70,8 @@ typedef struct {
     int port;
     int ctx_size;
     int default_tokens;
+    float temperature;
+    float top_p;
     bool inspect;
 } ServerOptions;
 

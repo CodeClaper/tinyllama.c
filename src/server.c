@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
 #include "def.h"
@@ -264,6 +265,19 @@ static int build_chat_tokens(Vocab *v, const char *user_msg, const char *sys_msg
     return n;
 }
 
+typedef struct {
+    float prob;
+    u32   idx;
+} ProbIdx;
+
+static int probidx_cmp(const void *a, const void *b) {
+    float pa = ((const ProbIdx *)a)->prob;
+    float pb = ((const ProbIdx *)b)->prob;
+    if (pa > pb) return -1;
+    if (pa < pb) return 1;
+    return 0;
+}
+
 static u32 sample_greedy(float *logits, u32 n_vocab) {
     u32 best = 0;
     float best_val = logits[0];
@@ -274,6 +288,76 @@ static u32 sample_greedy(float *logits, u32 n_vocab) {
         }
     }
     return best;
+}
+
+/* Temperature + top-p (nucleus) sampling.
+ * Modifies logits in-place (caller re-fills before next use).
+ * Falls back to greedy when temperature <= 0 or top_p >= 1. */
+static u32 sample_token(float *logits, u32 n_vocab,
+                         float temperature, float top_p) {
+    if (temperature <= 1e-6f || top_p >= 1.0f)
+        return sample_greedy(logits, n_vocab);
+
+    /* Allocate sort buffer before mutating logits. */
+    ProbIdx *pi = malloc(n_vocab * sizeof(ProbIdx));
+    if (!pi) return sample_greedy(logits, n_vocab);
+
+    /* Temperature scaling. */
+    float inv_temp = 1.0f / temperature;
+    float max_l = logits[0] * inv_temp;
+    for (u32 i = 1; i < n_vocab; i++) {
+        float v = logits[i] * inv_temp;
+        if (v > max_l) max_l = v;
+    }
+
+    /* Softmax. */
+    float sum = 0.0f;
+    for (u32 i = 0; i < n_vocab; i++) {
+        float v = expf(logits[i] * inv_temp - max_l);
+        logits[i] = v;      /* reuse logits[] for probabilities */
+        sum += v;
+    }
+    float inv_sum = 1.0f / sum;
+
+    /* Fill (prob, idx) pairs. */
+    for (u32 i = 0; i < n_vocab; i++) {
+        pi[i].prob = logits[i] * inv_sum;
+        pi[i].idx  = i;
+    }
+
+    /* Sort descending by probability. */
+    qsort(pi, n_vocab, sizeof(ProbIdx), probidx_cmp);
+
+    /* Find top-p nucleus. */
+    float cum = 0.0f;
+    u32 cutoff = n_vocab;
+    for (u32 i = 0; i < n_vocab; i++) {
+        cum += pi[i].prob;
+        if (cum >= top_p) { cutoff = i + 1; break; }
+    }
+    if (cutoff < 1) cutoff = 1;
+
+    /* Renormalise truncated distribution. */
+    float renorm = 0.0f;
+    for (u32 i = 0; i < cutoff; i++) renorm += pi[i].prob;
+    float rn_inv = renorm > 0.0f ? 1.0f / renorm : 1.0f;
+
+    /* Sample. */
+    float r = (float)rand() / (float)RAND_MAX;
+    float cdf = 0.0f;
+    for (u32 i = 0; i < cutoff; i++) {
+        cdf += pi[i].prob * rn_inv;
+        if (r < cdf) {
+            u32 result = pi[i].idx;
+            free(pi);
+            return result;
+        }
+    }
+
+    /* Fallback (floating-point rounding). */
+    u32 result = pi[cutoff - 1].idx;
+    free(pi);
+    return result;
 }
 
 
@@ -396,19 +480,18 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
             close(fd);
             return;
         }
-        slog(INFO, "Forward (%d|%d)", i + 1, n_prompt);
     }
 
     /* 5. Generate. */
-    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 10;
+    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
     char resp_body[65536];
     int  resp_used = 0;
 
-    u32 next_token = sample_greedy(s->logits, s->cfg.n_vocab);
+    u32 next_token = sample_token(s->logits, s->cfg.n_vocab,
+                                   s->temperature, s->top_p);
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
-        slog(INFO, "Loop (%d|%d), Next token: %d", i + 1, max_tokens, next_token);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
@@ -420,7 +503,8 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         }
         n_gen++;
         if (!s->ops.forward(s, next_token, s->logits)) break;
-        next_token = sample_greedy(s->logits, s->cfg.n_vocab);
+        next_token = sample_token(s->logits, s->cfg.n_vocab,
+                                   s->temperature, s->top_p);
     }
     resp_body[resp_used] = '\0';
 
@@ -490,7 +574,9 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -p | --port    <int>     The Port to listening, default 9987\n");
     fprintf(file, "  -c | --ctx     <int>     The context size, defalt 4096\n");
     fprintf(file, "  -n | --tokens  <int>     The default token size, defalt 393216\n");
-    fprintf(file, "  -i | --inspect <none>    Inspect the engine/model\n");
+    fprintf(file, "  --temp          <float>   Temperature for sampling, default 1.0\n");
+    fprintf(file, "  --top-p         <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -i | --inspect   <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
 
@@ -507,7 +593,9 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .host = "127.0.0.1",
         .port = 8080,
         .ctx_size = 4096,
-        .default_tokens = 393216
+        .default_tokens = 393216,
+        .temperature = 1.0f,
+        .top_p = 0.9f
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -517,6 +605,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "--top-p")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
@@ -582,6 +672,8 @@ int main(int argc, char *argv[]) {
         slog(ERROR, "Failed to create session.");
     }
     session->max_tokens = (u32)so.default_tokens;
+    session->temperature = so.temperature;
+    session->top_p = so.top_p;
 
     Server server;
     server.engine = engine;
