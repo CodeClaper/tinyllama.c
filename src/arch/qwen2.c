@@ -287,6 +287,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
 
     /* ---- 2. Per-layer ---- */
     for (u32 l = 0; l < n_layer; l++) {
+        slog(INFO, "Layer ===> %d", l);
         LayerWeights *lw  = &w->layers[l];
         AttnKvCache  *akc = &s->cache.std[l];
         bool is_ssm_layer = (lw->tensors[TENSOR_SSM_CONV1D] != NULL);

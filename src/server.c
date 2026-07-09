@@ -505,7 +505,7 @@ static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
 static ServerOptions parse_options(int argc, char *argv[]) {
     ServerOptions so = {
         .host = "127.0.0.1",
-        .port = 7788,
+        .port = 8080,
         .ctx_size = 4096,
         .default_tokens = 393216
     };
