@@ -395,6 +395,15 @@ static inline i8 k_scale_6bit(const u8 *scales, u32 sb) {
     return (i8)((i32)((v >> (6 * p)) & 0x3F) - 32);
 }
 
+/* Same as k_scale_6bit but returns unsigned 0..63 (used by Q3_K, Q4_K, Q6_K). */
+static inline u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
+    u32 g  = sb / 4;
+    u32 p  = sb & 3;
+    const u8 *b = scales + g * 3;
+    u32 v = (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16);
+    return (u8)((v >> (6 * p)) & 0x3F);
+}
+
 /* Read a single f32/f16/bf16/quantised weight from a GGUF tensor at index i.
  * Supports all GGUF v3 types: F32, F16, BF16, F64; I8/I16/I32/I64;
  * Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1; Q2_K..Q8_K; IQ1_S, IQ1_M, IQ2_XXS,
@@ -538,16 +547,15 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
             const u8 *blk = base + ti->offset + bi * 144;
             float d    = f16_to_f32(*(const u16 *)blk);
             float mn   = f16_to_f32(*(const u16 *)(blk + 2));
-            i8 sc  = k_scale_6bit(blk + 4, o >> 4);
+            u8 sc  = k_scale_6bit_u(blk + 4, o >> 4);
             u32 nib = (blk[16 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-            i32 q  = (i32)nib - 8;
-            return d * (float)sc * (float)q - mn;
+            return d * (float)sc * (float)nib - mn;
         }
         case GGUF_TYPE_Q3_K: {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 110;
             float d = f16_to_f32(*(const u16 *)(blk + 96 + 12));
-            i8 sc = k_scale_6bit(blk + 96, o >> 4);
+            u8 sc = k_scale_6bit_u(blk + 96, o >> 4);
             u32 hi = (blk[(o >> 3)] >> (o & 7)) & 1;
             u32 lo_shift = (o & 3) << 1;
             u32 lo = (blk[32 + (o >> 2)] >> lo_shift) & 0x3;
@@ -1467,6 +1475,9 @@ static const LayerTensorMap llama_layer_map[] = {
     {TENSOR_ATTN_Q,     "attn_q",       true},
     {TENSOR_ATTN_K,     "attn_k",       true},
     {TENSOR_ATTN_V,     "attn_v",       true},
+    {TENSOR_ATTN_Q_BIAS,"attn_q.bias",   false},
+    {TENSOR_ATTN_K_BIAS,"attn_k.bias",   false},
+    {TENSOR_ATTN_V_BIAS,"attn_v.bias",   false},
     {TENSOR_ATTN_OUT,   "attn_output",  true},
     {TENSOR_FFN_GATE,   "ffn_gate",     true},
     {TENSOR_FFN_DOWN,   "ffn_down",     true},
@@ -1479,11 +1490,15 @@ static const LayerTensorMap qwen2_layer_map[] = {
     {TENSOR_ATTN_Q,           "attn_q",                false},
     {TENSOR_ATTN_K,           "attn_k",                false},
     {TENSOR_ATTN_V,           "attn_v",                false},
+    {TENSOR_ATTN_Q_BIAS,      "attn_q.bias",           false},
+    {TENSOR_ATTN_K_BIAS,      "attn_k.bias",           false},
+    {TENSOR_ATTN_V_BIAS,      "attn_v.bias",           false},
     {TENSOR_ATTN_Q_NORM,      "attn_q_norm",           false},
     {TENSOR_ATTN_K_NORM,      "attn_k_norm",           false},
     {TENSOR_ATTN_OUT,         "attn_output",           false},
     {TENSOR_ATTN_GATE,        "attn_gate",             false},
-    {TENSOR_POST_ATTN_NORM,   "post_attention_norm",   true},
+    {TENSOR_POST_ATTN_NORM,   "post_attention_norm",   false},
+    {TENSOR_POST_ATTN_NORM,   "ffn_norm",              false},
     {TENSOR_SSM_CONV1D,       "ssm_conv1d",            false},
     {TENSOR_SSM_ALPHA,        "ssm_alpha",             false},
     {TENSOR_SSM_BETA,         "ssm_beta",              false},
@@ -1501,6 +1516,9 @@ static const LayerTensorMap deepseek_layer_map[] = {
     {TENSOR_ATTN_Q,     "attn_q",       true},
     {TENSOR_ATTN_K,     "attn_k",       true},
     {TENSOR_ATTN_V,     "attn_v",       true},
+    {TENSOR_ATTN_Q_BIAS,"attn_q.bias",  false},
+    {TENSOR_ATTN_K_BIAS,"attn_k.bias",  false},
+    {TENSOR_ATTN_V_BIAS,"attn_v.bias",  false},
     {TENSOR_ATTN_OUT,   "attn_output",  true},
     {TENSOR_FFN_GATE,   "ffn_gate",     true},
     {TENSOR_FFN_DOWN,   "ffn_down",     true},

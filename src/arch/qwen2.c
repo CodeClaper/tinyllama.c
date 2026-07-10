@@ -311,12 +311,34 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
             memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
         } else if (t_q && t_k && t_v) {
             /* Separate Q / K / V tensors. */
-            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, t_q->dim[0] == n_embd)) return false;
+            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd)) return false;
             if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd)) return false;
             if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd)) return false;
         } else {
             slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
             return false;
+        }
+
+        /* Add biases when present (Qwen2.5 uses bias=True in attention). */
+        {
+            TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
+            TensorInfo *tb_k = lw->tensors[TENSOR_ATTN_K_BIAS];
+            TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
+            if (tb_q) {
+                u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
+                for (u32 i = 0; i < n; i++)
+                    ws->q[i] += tensor_get_f32(tb_q, base, i);
+            }
+            if (tb_k) {
+                u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
+                for (u32 i = 0; i < n; i++)
+                    ws->k[i] += tensor_get_f32(tb_k, base, i);
+            }
+            if (tb_v) {
+                u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
+                for (u32 i = 0; i < n; i++)
+                    ws->v[i] += tensor_get_f32(tb_v, base, i);
+            }
         }
 
         /* Extract SSM channels when present. */
@@ -348,7 +370,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
 
         /* ---- 2f. Attention ---- */
         u32 n_cached = akc->n;
-        float *attn_out = ws->q;  /* reuse Q buffer for per-head output */
+        float *attn_out = ws->hb;  /* use FFN buffer temporarily */
         memset(attn_out, 0, q_dim * sizeof(float));
 
         for (u32 h = 0; h < n_head; h++) {
@@ -381,7 +403,7 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, t_out->dim[0] == q_dim)) return false;
+                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim)) return false;
             }
         }
 
@@ -439,7 +461,8 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         /* ---- 2k. Post-attention norm (pre-FFN) ---- */
         {
             TensorInfo *ti_att = lw->tensors[TENSOR_POST_ATTN_NORM];
-            if (ti_att) rms_norm(ws->xb, ws->x, ti_att, base, n_embd, eps);
+            if (ti_att)
+                rms_norm(ws->xb, ws->x, ti_att, base, n_embd, eps);
         }
 
         /* ---- 2l. SwiGLU FFN ---- */
