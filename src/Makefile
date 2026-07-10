@@ -2,9 +2,9 @@ CC = gcc
 ifdef DEBUG
 	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG
 else
-	CFLAGS = -O3 -march=native -ffast-math
+	CFLAGS = -O3 -march=native -ffast-math -flto
 endif
-LDADDCFLAGS = -lm
+LDADDCFLAGS = -lm -flto
 
 OBJS = server.o core.o mm.o slog.o utils.o el.o anet.o http.o \
        arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o

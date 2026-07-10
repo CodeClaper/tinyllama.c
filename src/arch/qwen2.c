@@ -194,25 +194,33 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
         rope(ws->q, n_head, q_head_dim, pos, ws->rope_theta);
         rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
 
-        /* ---- 2d. KV cache write ---- */
-        memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
-        memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+        /* ---- 2d. KV cache write (head-major: [head][pos][dim]) ---- */
+        {
+            u32 hs = akc->cap * kv_head_dim; /* stride between heads in cache */
+            for (u32 h = 0; h < n_kv_head; h++) {
+                u64 dst_off = (u64)h * hs + (u64)pos * kv_head_dim;
+                u64 src_off = (u64)h * kv_head_dim;
+                memcpy(akc->k + dst_off, ws->k + src_off, kv_head_dim * sizeof(float));
+                memcpy(akc->v + dst_off, ws->v + src_off, kv_head_dim * sizeof(float));
+            }
+        }
         akc->n = pos + 1;
 
         /* ---- 2e. Attention ---- */
         u32 n_cached = akc->n;
+        u32 hs = akc->cap * kv_head_dim; /* head stride in cache */
         float *attn_out = ws->hb;
         memset(attn_out, 0, q_dim * sizeof(float));
 
         for (u32 h = 0; h < n_head; h++) {
             u32 kv_h   = h / gqa_ratio;
             float *qh  = ws->q + (u64)h * q_head_dim;
-            float *kh_base = akc->k + (u64)kv_h * kv_head_dim;
-            float *vh_base = akc->v + (u64)kv_h * kv_head_dim;
+            float *kh_base = akc->k + (u64)kv_h * hs;
+            float *vh_base = akc->v + (u64)kv_h * hs;
 
             /* Q·K^T scores. */
-            for (u32 t = 0; t < n_cached; t++) {
-                float *kt = kh_base + (u64)t * kv_dim;
+            float *kt = kh_base;
+            for (u32 t = 0; t < n_cached; t++, kt += kv_head_dim) {
                 float s = 0.0f;
                 for (u32 d = 0; d < kv_head_dim; d++)
                     s += qh[d] * kt[d];
@@ -222,9 +230,9 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
 
             /* Weighted V sum. */
             float *oh = attn_out + (u64)h * q_head_dim;
-            for (u32 t = 0; t < n_cached; t++) {
-                float *vt = vh_base + (u64)t * kv_dim;
-                float st  = ws->scores[t];
+            float *vt = vh_base;
+            for (u32 t = 0; t < n_cached; t++, vt += kv_head_dim) {
+                float st = ws->scores[t];
                 for (u32 d = 0; d < kv_head_dim; d++)
                     oh[d] += st * vt[d];
             }
@@ -440,8 +448,15 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
                     rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
 
-                    memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
-                    memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+                    {
+                        u32 hs = akc->cap * kv_head_dim;
+                        for (u32 h = 0; h < n_kv_head; h++) {
+                            u64 dst = (u64)h * hs + (u64)pos * kv_head_dim;
+                            u64 src = (u64)h * kv_head_dim;
+                            memcpy(akc->k + dst, ws->k + src, kv_head_dim * sizeof(float));
+                            memcpy(akc->v + dst, ws->v + src, kv_head_dim * sizeof(float));
+                        }
+                    }
                 }
             } else if (t_q && t_k && t_v) {
                 /* Separate Q/K/V: batch Q via mat_mat_mul, K/V via mat_mat_mul
@@ -490,8 +505,15 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
                     rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
 
-                    memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
-                    memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+                    {
+                        u32 hs = akc->cap * kv_head_dim;
+                        for (u32 h = 0; h < n_kv_head; h++) {
+                            u64 dst = (u64)h * hs + (u64)pos * kv_head_dim;
+                            u64 src = (u64)h * kv_head_dim;
+                            memcpy(akc->k + dst, ws->k + src, kv_head_dim * sizeof(float));
+                            memcpy(akc->v + dst, ws->v + src, kv_head_dim * sizeof(float));
+                        }
+                    }
                 }
             } else {
                 slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
@@ -502,29 +524,32 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
         /* ---- 2c. Batched causal attention ---- */
         memset(attn_buf, 0, row_q * sizeof(float));
-        for (u32 h = 0; h < n_head; h++) {
-            u32 kv_h = h / gqa_ratio;
-            for (u32 qi = 0; qi < n_tokens; qi++) {
-                float *qh = qbuf + (u64)qi * q_dim + (u64)h * q_head_dim;
-                u32 n_keys = cache_start + qi + 1;
+        {
+            u32 hs = s->cache.std->cap * kv_head_dim;
+            for (u32 h = 0; h < n_head; h++) {
+                u32 kv_h = h / gqa_ratio;
+                float *kh_base = akc->k + (u64)kv_h * hs;
+                float *vh_base = akc->v + (u64)kv_h * hs;
+                for (u32 qi = 0; qi < n_tokens; qi++) {
+                    float *qh = qbuf + (u64)qi * q_dim + (u64)h * q_head_dim;
+                    u32 n_keys = cache_start + qi + 1;
 
-                for (u32 kj = 0; kj < n_keys; kj++) {
-                    float *kt = akc->k + (u64)kj * kv_dim
-                                          + (u64)kv_h * kv_head_dim;
-                    float s = 0.0f;
-                    for (u32 d = 0; d < kv_head_dim; d++)
-                        s += qh[d] * kt[d];
-                    ws->scores[kj] = s * scale;
-                }
-                softmax(ws->scores, n_keys);
+                    float *kt = kh_base;
+                    for (u32 kj = 0; kj < n_keys; kj++, kt += kv_head_dim) {
+                        float s = 0.0f;
+                        for (u32 d = 0; d < kv_head_dim; d++)
+                            s += qh[d] * kt[d];
+                        ws->scores[kj] = s * scale;
+                    }
+                    softmax(ws->scores, n_keys);
 
-                float *oh = attn_buf + (u64)qi * q_dim + (u64)h * q_head_dim;
-                for (u32 kj = 0; kj < n_keys; kj++) {
-                    float *vt = akc->v + (u64)kj * kv_dim
-                                          + (u64)kv_h * kv_head_dim;
-                    float st = ws->scores[kj];
-                    for (u32 d = 0; d < kv_head_dim; d++)
-                        oh[d] += st * vt[d];
+                    float *oh = attn_buf + (u64)qi * q_dim + (u64)h * q_head_dim;
+                    float *vt = vh_base;
+                    for (u32 kj = 0; kj < n_keys; kj++, vt += kv_head_dim) {
+                        float st = ws->scores[kj];
+                        for (u32 d = 0; d < kv_head_dim; d++)
+                            oh[d] += st * vt[d];
+                    }
                 }
             }
         }
