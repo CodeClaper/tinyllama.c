@@ -574,9 +574,9 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -p | --port    <int>     The Port to listening, default 9987\n");
     fprintf(file, "  -c | --ctx     <int>     The context size, defalt 4096\n");
     fprintf(file, "  -n | --tokens  <int>     The default token size, defalt 393216\n");
-    fprintf(file, "  --temp          <float>   Temperature for sampling, default 1.0\n");
-    fprintf(file, "  --top-p         <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -i | --inspect   <none>    Inspect the engine/model\n");
+    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 1.0\n");
+    fprintf(file, "  -p | --top-p   <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -i | --inspect <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
 
@@ -605,8 +605,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "--top-p")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-p") || !strcmp(arg, "--top-p")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
