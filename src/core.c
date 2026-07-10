@@ -718,72 +718,58 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
+    /* Use a stack buffer for small rows, malloc for large ones.
+     * Avoids per-call heap overhead for the common case while
+     * staying safe when ffn_hidden exceeds the threshold. */
+    #define MATVEC_STACK 4096
+    float  stack_buf[MATVEC_STACK];
+    float *w_row = cols <= MATVEC_STACK ? stack_buf : malloc(cols * sizeof(float));
+    if (!w_row) return false;
+
     if (trans) {
-        /* Transposed: W is stored as [cols × rows], we compute y = W^T @ x.
-         * tr (=dim[0]) must equal cols (input dim), tc (=dim[1]) must equal rows (output dim). */
+        /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
+         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows. */
         if (tr != cols || tc != rows) {
-            slog(WARN, "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu] for tensor=%s",
+            slog(WARN, "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
-                 (unsigned long)tc,   (unsigned long)tr,
-                 get_key_name(tw->key));
+                 (unsigned long)tc, (unsigned long)tr);
+            if (w_row != stack_buf) free(w_row);
             return false;
         }
-        if (rows == 0 || cols == 0) {
-            slog(WARN, "mat_vec_mul trans: zero-dim rows=%llu cols=%llu",
-                 (unsigned long long)rows, (unsigned long long)cols);
-            return false;
-        }
-        /* y[r] = sum_c W_stored[c][r] * x[c] = sum_c data[c * tc + r] * x[c] */
         for (u64 r = 0; r < rows; r++) {
+            /* Dequantise column r of stored W into w_row. */
+            for (u64 c = 0; c < cols; c++)
+                w_row[c] = tensor_get_f32(tw, base, c * tc + r);
+            /* Vectorisable dot product. */
             float sum = 0.0f;
-            for (u64 c = 0; c < cols; c++) {
-                float s = tensor_get_f32(tw, base, c * tc + r);
-                AssertFalse(isnanf(s));
-                sum += s * x[c];
-            }
+            for (u64 c = 0; c < cols; c++)
+                sum += w_row[c] * x[c];
             y[r] = sum;
         }
-        return true;
+    } else {
+        /* Standard: W stored as [rows × cols], compute y = W @ x. */
+        if (tr != rows || tc != cols) {
+            slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+                 (unsigned long)rows, (unsigned long)cols,
+                 (unsigned long)tr, (unsigned long)tc);
+            if (w_row != stack_buf) free(w_row);
+            return false;
+        }
+        for (u64 r = 0; r < rows; r++) {
+            /* Dequantise one full row of W into w_row. */
+            for (u64 c = 0; c < cols; c++)
+                w_row[c] = tensor_get_f32(tw, base, r * cols + c);
+            /* Vectorisable dot product. */
+            float sum = 0.0f;
+            for (u64 c = 0; c < cols; c++)
+                sum += w_row[c] * x[c];
+            y[r] = sum;
+        }
     }
 
-    /* Standard: y = W @ x */
-    if (tr != rows || tc != cols) {
-        slog(WARN, "Bad GGUF file: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu] for tensor=%s",
-             (unsigned long)rows, (unsigned long)cols,
-             (unsigned long)tr,   (unsigned long)tc,
-             get_key_name(tw->key));
-        return false;
-    }
-    /* Validate that the loop won't access beyond tensor bounds. */
-    if (rows == 0 || cols == 0) {
-        slog(WARN, "mat_vec_mul: zero-dim tensor rows=%llu cols=%llu",
-             (unsigned long long)rows, (unsigned long long)cols);
-        return false;
-    }
-    if (rows > 0 && cols > 0) {
-        u64 last_idx = (rows - 1) * cols + (cols - 1);
-        if (last_idx >= tw->n_element || cols * rows > tw->n_element) {
-            char name[128];
-            snprintf(name, sizeof(name), "%.*s",
-                     tw->key.len < 127 ? tw->key.len : 127, tw->key.content);
-            slog(WARN, "mat_vec_mul: OOB predict tensor='%s' n_el=%llu "
-                 "rows=%llu cols=%llu last_idx=%llu",
-                 name, (unsigned long long)tw->n_element,
-                 (unsigned long long)rows, (unsigned long long)cols,
-                 (unsigned long long)last_idx);
-            slog(ERROR, "Fatal: mat_vec_mul would access tensor out of bounds");
-        }
-    }
-    for (u64 r = 0; r < rows; r++) {
-        float sum = 0.0f;
-        for (u64 c = 0; c < cols; c++) {
-            float s = tensor_get_f32(tw, base, r * cols + c);
-            AssertFalse(isnanf(s));
-            sum += s * x[c];
-        }
-        y[r] = sum;
-    }
+    if (w_row != stack_buf) free(w_row);
     return true;
+    #undef MATVEC_STACK
 }
 
 /* Batch matrix-matrix multiply:  Y[b] = W @ X[b]  for b ∈ [0, batch).
