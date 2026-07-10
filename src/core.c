@@ -786,6 +786,81 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     return true;
 }
 
+/* Batch matrix-matrix multiply:  Y[b] = W @ X[b]  for b ∈ [0, batch).
+ *
+ * Strategy: for each output row r, dequantise the entire weight
+ * row into a contiguous buffer, then compute a dot product against
+ * every batch element's input row.  The inner dot-product loop
+ * runs over two contiguous arrays (trivially auto-vectorisable by
+ * the compiler), and each weight is dequantised only once.          */
+bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
+                 u64 batch, u64 rows, u64 cols, bool trans) {
+    if (!tw || tw->ndim < 2) {
+        slog(WARN, "mat_mat_mul: tensor missing or ndim < 2");
+        return false;
+    }
+    u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
+    u64 tr = tw->dim[0];            /* slowest-varying = row count     */
+
+    /* Allocate a reusable buffer for one row of dequantised weights. */
+    float *w_row = malloc(cols * sizeof(float));
+    if (!w_row) {
+        slog(WARN, "mat_mat_mul: malloc failed for row buffer (%lu cols)",
+             (unsigned long)cols);
+        return false;
+    }
+
+    if (trans) {
+        /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
+         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows. */
+        if (tr != cols || tc != rows) {
+            slog(WARN, "mat_mat_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
+                 (unsigned long)rows, (unsigned long)cols,
+                 (unsigned long)tc, (unsigned long)tr);
+            free(w_row); return false;
+        }
+        for (u64 r = 0; r < rows; r++) {
+            /* Dequantise column r of stored W (row r of W^T). */
+            for (u64 c = 0; c < cols; c++)
+                w_row[c] = tensor_get_f32(tw, base, c * tc + r);
+
+            /* Dot product with each batch element's input row. */
+            for (u64 b = 0; b < batch; b++) {
+                const float *x_row = X + b * cols;
+                float sum = 0.0f;
+                for (u64 c = 0; c < cols; c++)
+                    sum += w_row[c] * x_row[c];
+                Y[b * rows + r] = sum;
+            }
+        }
+    } else {
+        /* Standard: W stored as [rows × cols], compute y = W @ x. */
+        if (tr != rows || tc != cols) {
+            slog(WARN, "mat_mat_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+                 (unsigned long)rows, (unsigned long)cols,
+                 (unsigned long)tr, (unsigned long)tc);
+            free(w_row); return false;
+        }
+        for (u64 r = 0; r < rows; r++) {
+            /* Dequantise one full row of W. */
+            for (u64 c = 0; c < cols; c++)
+                w_row[c] = tensor_get_f32(tw, base, r * cols + c);
+
+            /* Dot product with each batch element's input row. */
+            for (u64 b = 0; b < batch; b++) {
+                const float *x_row = X + b * cols;
+                float sum = 0.0f;
+                for (u64 c = 0; c < cols; c++)
+                    sum += w_row[c] * x_row[c];
+                Y[b * rows + r] = sum;
+            }
+        }
+    }
+
+    free(w_row);
+    return true;
+}
+
 /* RoPE: apply rotary position embedding in-place.
  * buf is [n_heads × head_dim], each head rotated independently. */
 void rope(float *buf, u32 n_heads, u32 head_dim,

@@ -64,5 +64,6 @@ const ArchOps falcon_ops = {
     .init    = falcon_init,
     .free    = falcon_free,
     .forward = falcon_forward,
+    .prefill = NULL,
     .reset   = falcon_reset,
 };

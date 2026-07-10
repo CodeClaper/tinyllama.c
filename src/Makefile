@@ -2,7 +2,7 @@ CC = gcc
 ifdef DEBUG
 	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG
 else
-	CFLAGS = -O3
+	CFLAGS = -O3 -march=native -ffast-math
 endif
 LDADDCFLAGS = -lm
 

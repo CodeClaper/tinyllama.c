@@ -66,5 +66,6 @@ const ArchOps llama_ops = {
     .init    = llama_init,
     .free    = llama_free,
     .forward = llama_forward,
+    .prefill = NULL,
     .reset   = llama_reset,
 };

@@ -7,6 +7,7 @@
 float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i);
 void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps);
 bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans);
+bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X, u64 batch, u64 rows, u64 cols, bool trans);
 void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
 void silu(float *x, int n);
 void softmax(float *x, u32 n);

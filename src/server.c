@@ -472,13 +472,23 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 4. Reset session & prefill. */
     s->ops.reset(s);
-    for (int i = 0; i < n_prompt; i++) {
-        if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
+    if (s->ops.prefill) {
+        if (!s->ops.prefill(s, prompt_tokens, n_prompt, s->logits)) {
             http_respond(fd, 500, "Internal Server Error",
-                         "{\"error\":\"Forward pass failed\"}");
+                         "{\"error\":\"Prefill pass failed\"}");
             delete_file_event(el, fd, ELOOP_READABLE);
             close(fd);
             return;
+        }
+    } else {
+        for (int i = 0; i < n_prompt; i++) {
+            if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
+                http_respond(fd, 500, "Internal Server Error",
+                             "{\"error\":\"Forward pass failed\"}");
+                delete_file_event(el, fd, ELOOP_READABLE);
+                close(fd);
+                return;
+            }
         }
     }
 

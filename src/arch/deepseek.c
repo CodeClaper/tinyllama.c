@@ -86,5 +86,6 @@ const ArchOps deepseek_ops = {
     .init    = deepseek_init,
     .free    = deepseek_free,
     .forward = deepseek_forward,
+    .prefill = NULL,
     .reset   = deepseek_reset,
 };

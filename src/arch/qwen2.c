@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "arch.h"
 #include "../core.h"
@@ -293,6 +294,336 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
     return true;
 }
 
+/* Batched prefill: processes n_tokens prompt tokens together.
+ * Uses mat_mat_mul (GEMM) for Q/K/V and FFN projections so each
+ * weight is read once and reused across all batch elements,
+ * converting memory-bandwidth-bound GEMV into compute-bound GEMM.
+ * Attention is also computed in one batched pass per layer.          */
+static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+    if (n_tokens == 0) return true;
+
+    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
+    ArchConfig     *c  = &s->cfg;
+    Weights        *w  = s->en->weights;
+    const u8       *base = s->en->model->map;
+
+    u32 n_head      = c->n_head;
+    u32 n_kv_head   = c->n_kv_head;
+    u32 q_head_dim  = c->head_dim;
+    u32 kv_head_dim = c->kv_head_dim;
+    u32 q_dim       = n_head * q_head_dim;
+    u32 kv_dim      = n_kv_head * kv_head_dim;
+    u32 n_embd      = c->n_embd;
+    u32 n_layer     = c->n_layer;
+    u32 cache_start = s->n_tokens;
+    u32 gqa_ratio   = n_head / n_kv_head;
+    float scale     = 1.0f / sqrtf((float)kv_head_dim);
+    float eps       = 1e-6f;
+
+    /* Determine max fused QKV output width across layers. */
+    u32 max_fused = q_dim + 2 * kv_dim;
+    for (u32 l = 0; l < n_layer; l++) {
+        TensorInfo *t_qkv = w->layers[l].tensors[TENSOR_ATTN_QKV];
+        if (t_qkv && t_qkv->ndim >= 2) {
+            u32 sz = (t_qkv->dim[0] > t_qkv->dim[1])
+                   ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
+            if (sz > max_fused) max_fused = sz;
+        }
+    }
+
+    u64 row_x  = (u64)n_tokens * n_embd;
+    u64 row_q  = (u64)n_tokens * q_dim;
+    u64 row_kv = (u64)n_tokens * max_fused;
+    u64 row_fh = (u64)n_tokens * ws->ffn_hidden;
+
+    /* ---- Temporary buffers ---- */
+    float *xs       = malloc(row_x * sizeof(float));   /* hidden states          */
+    float *norm_buf = malloc(row_x * sizeof(float));   /* RMS-norm scratch       */
+    float *qkv_buf  = malloc(row_kv * sizeof(float));  /* batched QKV output     */
+    float *qbuf     = malloc(row_q * sizeof(float));   /* Q buffer for attention */
+    float *attn_buf = malloc(row_q * sizeof(float));   /* attention output       */
+    float *gate_buf = malloc(row_fh * sizeof(float));  /* FFN gate / silu*up     */
+    float *up_buf   = malloc(row_fh * sizeof(float));  /* FFN up                 */
+    if (!xs || !norm_buf || !qkv_buf || !qbuf || !attn_buf || !gate_buf || !up_buf) {
+        free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
+        free(attn_buf); free(gate_buf); free(up_buf);
+        slog(WARN, "prefill: malloc failed for %u tokens", n_tokens);
+        return false;
+    }
+
+    /* ---- 1. Token embeddings (all positions) ---- */
+    {
+        TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+        bool te_trans = (te->dim[0] == c->n_vocab);
+        if (te_trans) {
+            for (u32 p = 0; p < n_tokens; p++) {
+                float *xp = xs + (u64)p * n_embd;
+                u64 off = (u64)tokens[p] * n_embd;
+                for (u32 i = 0; i < n_embd; i++)
+                    xp[i] = tensor_get_f32(te, base, off + i);
+            }
+        } else {
+            for (u32 p = 0; p < n_tokens; p++) {
+                float *xp = xs + (u64)p * n_embd;
+                u32 tok = tokens[p];
+                for (u32 i = 0; i < n_embd; i++)
+                    xp[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + tok);
+            }
+        }
+    }
+
+    /* ---- 2. Per-layer ---- */
+    for (u32 l = 0; l < n_layer; l++) {
+        LayerWeights *lw  = &w->layers[l];
+        AttnKvCache  *akc = &s->cache.std[l];
+
+        TensorInfo *t_qkv    = lw->tensors[TENSOR_ATTN_QKV];
+        TensorInfo *t_q      = lw->tensors[TENSOR_ATTN_Q];
+        TensorInfo *t_k      = lw->tensors[TENSOR_ATTN_K];
+        TensorInfo *t_v      = lw->tensors[TENSOR_ATTN_V];
+        TensorInfo *tb_q     = lw->tensors[TENSOR_ATTN_Q_BIAS];
+        TensorInfo *tb_k     = lw->tensors[TENSOR_ATTN_K_BIAS];
+        TensorInfo *tb_v     = lw->tensors[TENSOR_ATTN_V_BIAS];
+        TensorInfo *t_attn   = lw->tensors[TENSOR_ATTN_NORM];
+        TensorInfo *t_out    = lw->tensors[TENSOR_ATTN_OUT];
+        TensorInfo *t_post   = lw->tensors[TENSOR_POST_ATTN_NORM];
+        TensorInfo *t_gate   = lw->tensors[TENSOR_FFN_GATE];
+        TensorInfo *t_up     = lw->tensors[TENSOR_FFN_UP];
+        TensorInfo *t_down   = lw->tensors[TENSOR_FFN_DOWN];
+        u32 fh = ws->ffn_hidden;
+
+        /* ---- 2a. RMS norm on all xs → norm_buf ---- */
+        for (u32 p = 0; p < n_tokens; p++)
+            rms_norm(norm_buf + (u64)p * n_embd,
+                     xs + (u64)p * n_embd, t_attn, base, n_embd, eps);
+
+        /* ---- 2b. Batched Q/K/V projection ---- */
+        {
+            u32 fused_total;
+            bool qkv_trans;
+
+            if (t_qkv) {
+                /* Fused QKV: one mat_mat_mul, then split per token. */
+                qkv_trans   = (t_qkv->dim[0] == n_embd);
+                fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
+                if (!mat_mat_mul(qkv_buf, t_qkv, base, norm_buf,
+                                 n_tokens, fused_total, n_embd, qkv_trans))
+                    goto prefill_fail;
+
+                for (u32 p = 0; p < n_tokens; p++) {
+                    u32 pos = cache_start + p;
+                    float *row = qkv_buf + (u64)p * fused_total;
+
+                    /* Copy Q to qbuf (stride q_dim) for batched attention. */
+                    memcpy(qbuf + (u64)p * q_dim, row, q_dim * sizeof(float));
+                    /* Copy K/V to workspace for RoPE + cache write. */
+                    memcpy(ws->k, row + q_dim, kv_dim * sizeof(float));
+                    memcpy(ws->v, row + q_dim + kv_dim, kv_dim * sizeof(float));
+
+                    if (tb_q) {
+                        u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
+                        float *qp = qbuf + (u64)p * q_dim;
+                        for (u32 i = 0; i < n; i++)
+                            qp[i] += tensor_get_f32(tb_q, base, i);
+                    }
+                    if (tb_k) {
+                        u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
+                        for (u32 i = 0; i < n; i++)
+                            ws->k[i] += tensor_get_f32(tb_k, base, i);
+                    }
+                    if (tb_v) {
+                        u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
+                        for (u32 i = 0; i < n; i++)
+                            ws->v[i] += tensor_get_f32(tb_v, base, i);
+                    }
+
+                    rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
+                    rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+
+                    memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
+                    memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+                }
+            } else if (t_q && t_k && t_v) {
+                /* Separate Q/K/V: batch Q via mat_mat_mul, K/V via mat_mat_mul
+                 * into temporary buffers within qkv_buf's allocation. */
+                fused_total = q_dim + 2 * kv_dim;
+
+                /* Q → qbuf (stride q_dim, ready for attention + RoPE in-place). */
+                if (!mat_mat_mul(qbuf, t_q, base, norm_buf,
+                                 n_tokens, q_dim, n_embd,
+                                 (q_dim != n_embd) && t_q->dim[0] == n_embd))
+                    goto prefill_fail;
+
+                /* K → after Q in qkv_buf, V → after K. */
+                float *kbuf = qkv_buf;
+                float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
+                if (!mat_mat_mul(kbuf, t_k, base, norm_buf,
+                                 n_tokens, kv_dim, n_embd,
+                                 t_k->dim[0] == n_embd)) goto prefill_fail;
+                if (!mat_mat_mul(vbuf, t_v, base, norm_buf,
+                                 n_tokens, kv_dim, n_embd,
+                                 t_v->dim[0] == n_embd)) goto prefill_fail;
+
+                for (u32 p = 0; p < n_tokens; p++) {
+                    u32 pos = cache_start + p;
+
+                    memcpy(ws->k, kbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
+                    memcpy(ws->v, vbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
+
+                    if (tb_k) {
+                        u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
+                        for (u32 i = 0; i < n; i++)
+                            ws->k[i] += tensor_get_f32(tb_k, base, i);
+                    }
+                    if (tb_v) {
+                        u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
+                        for (u32 i = 0; i < n; i++)
+                            ws->v[i] += tensor_get_f32(tb_v, base, i);
+                    }
+                    if (tb_q) {
+                        u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
+                        float *qp = qbuf + (u64)p * q_dim;
+                        for (u32 i = 0; i < n; i++)
+                            qp[i] += tensor_get_f32(tb_q, base, i);
+                    }
+
+                    rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
+                    rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+
+                    memcpy(akc->k + (u64)pos * kv_dim, ws->k, kv_dim * sizeof(float));
+                    memcpy(akc->v + (u64)pos * kv_dim, ws->v, kv_dim * sizeof(float));
+                }
+            } else {
+                slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
+                goto prefill_fail;
+            }
+            akc->n = cache_start + n_tokens;
+        }
+
+        /* ---- 2c. Batched causal attention ---- */
+        memset(attn_buf, 0, row_q * sizeof(float));
+        for (u32 h = 0; h < n_head; h++) {
+            u32 kv_h = h / gqa_ratio;
+            for (u32 qi = 0; qi < n_tokens; qi++) {
+                float *qh = qbuf + (u64)qi * q_dim + (u64)h * q_head_dim;
+                u32 n_keys = cache_start + qi + 1;
+
+                for (u32 kj = 0; kj < n_keys; kj++) {
+                    float *kt = akc->k + (u64)kj * kv_dim
+                                          + (u64)kv_h * kv_head_dim;
+                    float s = 0.0f;
+                    for (u32 d = 0; d < kv_head_dim; d++)
+                        s += qh[d] * kt[d];
+                    ws->scores[kj] = s * scale;
+                }
+                softmax(ws->scores, n_keys);
+
+                float *oh = attn_buf + (u64)qi * q_dim + (u64)h * q_head_dim;
+                for (u32 kj = 0; kj < n_keys; kj++) {
+                    float *vt = akc->v + (u64)kj * kv_dim
+                                          + (u64)kv_h * kv_head_dim;
+                    float st = ws->scores[kj];
+                    for (u32 d = 0; d < kv_head_dim; d++)
+                        oh[d] += st * vt[d];
+                }
+            }
+        }
+
+        /* ---- 2d. Batched attention output projection ---- */
+        if (t_out) {
+            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf,
+                             n_tokens, n_embd, q_dim,
+                             (n_embd != q_dim) && t_out->dim[0] == q_dim)) {
+                goto prefill_fail;
+            }
+        } else {
+            /* No output projection: copy attn_buf → norm_buf (if dims match). */
+            memcpy(norm_buf, attn_buf, row_q * sizeof(float));
+        }
+
+        /* ---- 2e. Residual ---- */
+        for (u32 p = 0; p < n_tokens; p++) {
+            float *xp = xs + (u64)p * n_embd;
+            float *ap = norm_buf + (u64)p * n_embd;
+            for (u32 i = 0; i < n_embd; i++)
+                xp[i] += ap[i];
+        }
+
+        /* ---- 2f. Pre-FFN norm → norm_buf ---- */
+        if (t_post) {
+            for (u32 p = 0; p < n_tokens; p++)
+                rms_norm(norm_buf + (u64)p * n_embd,
+                         xs + (u64)p * n_embd, t_post, base, n_embd, eps);
+        }
+
+        /* ---- 2g. Batched FFN (SwiGLU) ---- */
+        {
+            /* Gate projection: norm_buf → gate_buf */
+            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf,
+                             n_tokens, fh, n_embd,
+                             t_gate->dim[0] == n_embd)) goto prefill_fail;
+
+            /* Up projection: norm_buf → up_buf */
+            if (!mat_mat_mul(up_buf, t_up, base, norm_buf,
+                             n_tokens, fh, n_embd,
+                             t_up->dim[0] == n_embd)) goto prefill_fail;
+
+            /* Element-wise: gate = silu(gate) * up  (per token, cheap) */
+            for (u32 p = 0; p < n_tokens; p++) {
+                float *gp = gate_buf + (u64)p * fh;
+                float *up = up_buf   + (u64)p * fh;
+                silu(gp, fh);
+                for (u32 i = 0; i < fh; i++)
+                    gp[i] *= up[i];
+            }
+
+            /* Down projection: gate_buf → norm_buf (reuse norm_buf for output) */
+            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf,
+                             n_tokens, n_embd, fh,
+                             t_down->dim[0] == fh)) goto prefill_fail;
+        }
+
+        /* ---- 2h. Residual ---- */
+        for (u32 p = 0; p < n_tokens; p++) {
+            float *xp = xs + (u64)p * n_embd;
+            float *dp = norm_buf + (u64)p * n_embd;
+            for (u32 i = 0; i < n_embd; i++)
+                xp[i] += dp[i];
+        }
+    }
+
+    /* ---- 3. Final RMS norm on the LAST position only ---- */
+    {
+        TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
+        if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+        float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
+        rms_norm(ws->xb, last_x, t_norm, base, n_embd, eps);
+    }
+
+    /* ---- 4. LM head ---- */
+    {
+        TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+        if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
+        float *dst = logits ? logits : s->logits;
+        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd,
+                         t_out->dim[0] == n_embd)) goto prefill_fail;
+    }
+
+    /* ---- 5. Update session state ---- */
+    for (u32 p = 0; p < n_tokens; p++)
+        s->tokens[cache_start + p] = tokens[p];
+    s->n_tokens = cache_start + n_tokens;
+
+    free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
+    free(attn_buf); free(gate_buf); free(up_buf);
+    return true;
+
+prefill_fail:
+    free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
+    free(attn_buf); free(gate_buf); free(up_buf);
+    return false;
+}
+
 static void qwen2_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++)
@@ -336,5 +667,6 @@ const ArchOps qwen2_ops = {
     .init    = qwen2_init,
     .free    = qwen2_free,
     .forward = qwen2_forward,
+    .prefill = qwen2_prefill,
     .reset   = qwen2_reset,
 };
