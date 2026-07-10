@@ -491,7 +491,8 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                                    s->temperature, s->top_p);
     u32 n_gen = 0;
 
-    for (u32 i = 0; i < max_tokens; i++) {
+    for (u32 i = 0; i < 10; i++) {
+        slog(INFO, "Gen next token: %d for (%d|%d)", next_token, i, max_tokens);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
