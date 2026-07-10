@@ -17,11 +17,9 @@ except Exception as e:
     print(f"Error: {e}")
 
 # Try tokenizing
-tokens = llm.tokenize(b"<|im_start|>user\nyes<|im_end|>\n<|im_start|>assistant\n",
-add_bos=True, special=True)
+tokens = llm.tokenize(b"<|im_start|>user\nyes<|im_end|>\n<|im_start|>assistant\n", add_bos=True, special=True)
 print(f"Prompt tokens: {tokens}")
 
 # Also try with the chat handler
-tokens2 = llm.tokenize(b"<|im_start|>user\nyes<|im_end|>\n<|im_start|>assistant\n",
-add_bos=True)
+tokens2 = llm.tokenize(b"<|im_start|>user\nyes<|im_end|>\n<|im_start|>assistant\n", add_bos=True)
 print(f"Prompt tokens (no special): {tokens2}")
