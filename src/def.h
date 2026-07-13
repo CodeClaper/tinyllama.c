@@ -282,8 +282,8 @@ typedef struct Session Session;
 typedef struct {
     bool (*init)    (Session *s);
     void (*free)    (Session *s);
-    bool (*forward) (Session *s, u32 token, float *logits);
     bool (*prefill) (Session *s, u32 *tokens, u32 n_tokens, float *logits);
+    bool (*forward) (Session *s, u32 token, float *logits);
     void (*reset)   (Session *s);
 } ArchOps;
 

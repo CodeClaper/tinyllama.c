@@ -718,12 +718,12 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
-    /* Use a stack buffer for small rows, malloc for large ones.
+    /* Use a stack buffer for small rows, smalloc for large ones.
      * Avoids per-call heap overhead for the common case while
      * staying safe when ffn_hidden exceeds the threshold. */
     #define MATVEC_STACK 4096
     float  stack_buf[MATVEC_STACK];
-    float *w_row = cols <= MATVEC_STACK ? stack_buf : malloc(cols * sizeof(float));
+    float *w_row = cols <= MATVEC_STACK ? stack_buf : smalloc(cols * sizeof(float));
     if (!w_row) return false;
 
     if (trans) {
@@ -733,7 +733,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             slog(WARN, "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tc, (unsigned long)tr);
-            if (w_row != stack_buf) free(w_row);
+            if (w_row != stack_buf) sfree(w_row);
             return false;
         }
         for (u64 r = 0; r < rows; r++) {
@@ -752,7 +752,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tr, (unsigned long)tc);
-            if (w_row != stack_buf) free(w_row);
+            if (w_row != stack_buf) sfree(w_row);
             return false;
         }
         for (u64 r = 0; r < rows; r++) {
@@ -767,7 +767,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
         }
     }
 
-    if (w_row != stack_buf) free(w_row);
+    if (w_row != stack_buf) sfree(w_row);
     return true;
     #undef MATVEC_STACK
 }
@@ -789,9 +789,9 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
     /* Allocate a reusable buffer for one row of dequantised weights. */
-    float *w_row = malloc(cols * sizeof(float));
+    float *w_row = smalloc(cols * sizeof(float));
     if (!w_row) {
-        slog(WARN, "mat_mat_mul: malloc failed for row buffer (%lu cols)",
+        slog(WARN, "mat_mat_mul: smalloc failed for row buffer (%lu cols)",
              (unsigned long)cols);
         return false;
     }
@@ -803,7 +803,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             slog(WARN, "mat_mat_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tc, (unsigned long)tr);
-            free(w_row); return false;
+            sfree(w_row); return false;
         }
         for (u64 r = 0; r < rows; r++) {
             /* Dequantise column r of stored W (row r of W^T). */
@@ -825,7 +825,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             slog(WARN, "mat_mat_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tr, (unsigned long)tc);
-            free(w_row); return false;
+            sfree(w_row); return false;
         }
         for (u64 r = 0; r < rows; r++) {
             /* Dequantise one full row of W. */
@@ -843,7 +843,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
         }
     }
 
-    free(w_row);
+    sfree(w_row);
     return true;
 }
 

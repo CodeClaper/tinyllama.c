@@ -345,17 +345,17 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     u64 row_fh = (u64)n_tokens * ws->ffn_hidden;
 
     /* ---- Temporary buffers ---- */
-    float *xs       = malloc(row_x * sizeof(float));   /* hidden states          */
-    float *norm_buf = malloc(row_x * sizeof(float));   /* RMS-norm scratch       */
-    float *qkv_buf  = malloc(row_kv * sizeof(float));  /* batched QKV output     */
-    float *qbuf     = malloc(row_q * sizeof(float));   /* Q buffer for attention */
-    float *attn_buf = malloc(row_q * sizeof(float));   /* attention output       */
-    float *gate_buf = malloc(row_fh * sizeof(float));  /* FFN gate / silu*up     */
-    float *up_buf   = malloc(row_fh * sizeof(float));  /* FFN up                 */
+    float *xs       = smalloc(row_x * sizeof(float));   /* hidden states          */
+    float *norm_buf = smalloc(row_x * sizeof(float));   /* RMS-norm scratch       */
+    float *qkv_buf  = smalloc(row_kv * sizeof(float));  /* batched QKV output     */
+    float *qbuf     = smalloc(row_q * sizeof(float));   /* Q buffer for attention */
+    float *attn_buf = smalloc(row_q * sizeof(float));   /* attention output       */
+    float *gate_buf = smalloc(row_fh * sizeof(float));  /* FFN gate / silu*up     */
+    float *up_buf   = smalloc(row_fh * sizeof(float));  /* FFN up                 */
     if (!xs || !norm_buf || !qkv_buf || !qbuf || !attn_buf || !gate_buf || !up_buf) {
-        free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
-        free(attn_buf); free(gate_buf); free(up_buf);
-        slog(WARN, "prefill: malloc failed for %u tokens", n_tokens);
+        sfree(xs); sfree(norm_buf); sfree(qkv_buf); sfree(qbuf);
+        sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
+        slog(WARN, "prefill: smalloc failed for %u tokens", n_tokens);
         return false;
     }
 
@@ -639,13 +639,13 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         s->tokens[cache_start + p] = tokens[p];
     s->n_tokens = cache_start + n_tokens;
 
-    free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
-    free(attn_buf); free(gate_buf); free(up_buf);
+    sfree(xs); sfree(norm_buf); sfree(qkv_buf); sfree(qbuf);
+    sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
     return true;
 
 prefill_fail:
-    free(xs); free(norm_buf); free(qkv_buf); free(qbuf);
-    free(attn_buf); free(gate_buf); free(up_buf);
+    sfree(xs); sfree(norm_buf); sfree(qkv_buf); sfree(qbuf);
+    sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
     return false;
 }
 
