@@ -26,9 +26,10 @@ static bool falcon_init(Session *s) {
     return true;
 }
 
-static bool falcon_forward(Session *s, u32 token, float *logits) {
+static bool falcon_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     UNUSED(s);
-    UNUSED(token);
+    UNUSED(tokens);
+    UNUSED(n_tokens);
     UNUSED(logits);
     /* TODO: implement Falcon forward pass (parallel attention
      *       + FFN with GELU). */
@@ -64,6 +65,5 @@ const ArchOps falcon_ops = {
     .init    = falcon_init,
     .free    = falcon_free,
     .forward = falcon_forward,
-    .prefill = NULL,
     .reset   = falcon_reset,
 };

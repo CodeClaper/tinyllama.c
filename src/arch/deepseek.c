@@ -41,9 +41,10 @@ static bool deepseek_init(Session *s) {
     return true;
 }
 
-static bool deepseek_forward(Session *s, u32 token, float *logits) {
+static bool deepseek_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     UNUSED(s);
-    UNUSED(token);
+    UNUSED(tokens);
+    UNUSED(n_tokens);
     UNUSED(logits);
     /* TODO: implement DeepSeek forward pass with MLA attention
      *       and output head-chain (hc_base / hc_fn / hc_scale). */
@@ -86,6 +87,5 @@ const ArchOps deepseek_ops = {
     .init    = deepseek_init,
     .free    = deepseek_free,
     .forward = deepseek_forward,
-    .prefill = NULL,
     .reset   = deepseek_reset,
 };

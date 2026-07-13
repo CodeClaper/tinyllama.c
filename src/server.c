@@ -472,24 +472,12 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 4. Reset session & prefill. */
     s->ops.reset(s);
-    if (s->ops.prefill) {
-        if (!s->ops.prefill(s, prompt_tokens, n_prompt, s->logits)) {
-            http_respond(fd, 500, "Internal Server Error",
-                         "{\"error\":\"Prefill pass failed\"}");
-            delete_file_event(el, fd, ELOOP_READABLE);
-            close(fd);
-            return;
-        }
-    } else {
-        for (int i = 0; i < n_prompt; i++) {
-            if (!s->ops.forward(s, prompt_tokens[i], s->logits)) {
-                http_respond(fd, 500, "Internal Server Error",
-                             "{\"error\":\"Forward pass failed\"}");
-                delete_file_event(el, fd, ELOOP_READABLE);
-                close(fd);
-                return;
-            }
-        }
+    if (!s->ops.forward(s, prompt_tokens, n_prompt, s->logits)) {
+        http_respond(fd, 500, "Internal Server Error",
+                     "{\"error\":\"Forward pass failed\"}");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
     }
 
     /* 5. Generate. */
@@ -513,7 +501,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
             }
         }
         n_gen++;
-        if (!s->ops.forward(s, next_token, s->logits)) break;
+        if (!s->ops.forward(s, &next_token, 1, s->logits)) break;
         next_token = sample_token(s->logits, s->cfg.n_vocab,
                                    s->temperature, s->top_p);
     }

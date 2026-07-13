@@ -104,7 +104,7 @@ static bool qwen2_init(Session *s) {
     return true;
 }
 
-static bool qwen2_forward(Session *s, u32 token, float *logits) {
+static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
     Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
@@ -302,13 +302,14 @@ static bool qwen2_forward(Session *s, u32 token, float *logits) {
     return true;
 }
 
-/* Batched prefill: processes n_tokens prompt tokens together.
- * Uses mat_mat_mul (GEMM) for Q/K/V and FFN projections so each
- * weight is read once and reused across all batch elements,
- * converting memory-bandwidth-bound GEMV into compute-bound GEMM.
- * Attention is also computed in one batched pass per layer.          */
-static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+/* Unified forward: handles single token (n_tokens==1) via GEMV and
+ * batched prefill (n_tokens>1) via GEMM for Q/K/V and FFN projections.
+ * For batched paths, weight matrices are read once and reused across
+ * all batch elements, converting memory-bandwidth-bound GEMV into
+ * compute-bound GEMM.                                                */
+static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
+    if (n_tokens == 1) return qwen2_forward_one(s, tokens[0], logits);
 
     Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
@@ -355,7 +356,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     if (!xs || !norm_buf || !qkv_buf || !qbuf || !attn_buf || !gate_buf || !up_buf) {
         sfree(xs); sfree(norm_buf); sfree(qkv_buf); sfree(qbuf);
         sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
-        slog(WARN, "prefill: smalloc failed for %u tokens", n_tokens);
+        slog(WARN, "forward: smalloc failed for %u tokens", n_tokens);
         return false;
     }
 
@@ -416,7 +417,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
                 if (!mat_mat_mul(qkv_buf, t_qkv, base, norm_buf,
                                  n_tokens, fused_total, n_embd, qkv_trans))
-                    goto prefill_fail;
+                    goto fail;
 
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
@@ -467,17 +468,17 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 if (!mat_mat_mul(qbuf, t_q, base, norm_buf,
                                  n_tokens, q_dim, n_embd,
                                  (q_dim != n_embd) && t_q->dim[0] == n_embd))
-                    goto prefill_fail;
+                    goto fail;
 
                 /* K → after Q in qkv_buf, V → after K. */
                 float *kbuf = qkv_buf;
                 float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
                 if (!mat_mat_mul(kbuf, t_k, base, norm_buf,
                                  n_tokens, kv_dim, n_embd,
-                                 t_k->dim[0] == n_embd)) goto prefill_fail;
+                                 t_k->dim[0] == n_embd)) goto fail;
                 if (!mat_mat_mul(vbuf, t_v, base, norm_buf,
                                  n_tokens, kv_dim, n_embd,
-                                 t_v->dim[0] == n_embd)) goto prefill_fail;
+                                 t_v->dim[0] == n_embd)) goto fail;
 
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
@@ -517,7 +518,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 }
             } else {
                 slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
-                goto prefill_fail;
+                goto fail;
             }
             akc->n = cache_start + n_tokens;
         }
@@ -559,7 +560,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             if (!mat_mat_mul(norm_buf, t_out, base, attn_buf,
                              n_tokens, n_embd, q_dim,
                              (n_embd != q_dim) && t_out->dim[0] == q_dim)) {
-                goto prefill_fail;
+                goto fail;
             }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
@@ -586,12 +587,12 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             /* Gate projection: norm_buf → gate_buf */
             if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf,
                              n_tokens, fh, n_embd,
-                             t_gate->dim[0] == n_embd)) goto prefill_fail;
+                             t_gate->dim[0] == n_embd)) goto fail;
 
             /* Up projection: norm_buf → up_buf */
             if (!mat_mat_mul(up_buf, t_up, base, norm_buf,
                              n_tokens, fh, n_embd,
-                             t_up->dim[0] == n_embd)) goto prefill_fail;
+                             t_up->dim[0] == n_embd)) goto fail;
 
             /* Element-wise: gate = silu(gate) * up  (per token, cheap) */
             for (u32 p = 0; p < n_tokens; p++) {
@@ -605,7 +606,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             /* Down projection: gate_buf → norm_buf (reuse norm_buf for output) */
             if (!mat_mat_mul(norm_buf, t_down, base, gate_buf,
                              n_tokens, n_embd, fh,
-                             t_down->dim[0] == fh)) goto prefill_fail;
+                             t_down->dim[0] == fh)) goto fail;
         }
 
         /* ---- 2h. Residual ---- */
@@ -631,7 +632,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd,
-                         t_out->dim[0] == n_embd)) goto prefill_fail;
+                         t_out->dim[0] == n_embd)) goto fail;
     }
 
     /* ---- 5. Update session state ---- */
@@ -643,7 +644,7 @@ static bool qwen2_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
     return true;
 
-prefill_fail:
+fail:
     sfree(xs); sfree(norm_buf); sfree(qkv_buf); sfree(qbuf);
     sfree(attn_buf); sfree(gate_buf); sfree(up_buf);
     return false;
@@ -692,6 +693,5 @@ const ArchOps qwen2_ops = {
     .init    = qwen2_init,
     .free    = qwen2_free,
     .forward = qwen2_forward,
-    .prefill = qwen2_prefill,
     .reset   = qwen2_reset,
 };

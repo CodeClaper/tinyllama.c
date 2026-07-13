@@ -26,9 +26,10 @@ static bool llama_init(Session *s) {
     return true;
 }
 
-static bool llama_forward(Session *s, u32 token, float *logits) {
+static bool llama_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     (void)s;
-    (void)token;
+    (void)tokens;
+    (void)n_tokens;
     (void)logits;
     /* TODO: implement Llama forward pass */
     slog(WARN, "llama_forward is not yet implemented");
@@ -66,6 +67,5 @@ const ArchOps llama_ops = {
     .init    = llama_init,
     .free    = llama_free,
     .forward = llama_forward,
-    .prefill = NULL,
     .reset   = llama_reset,
 };
