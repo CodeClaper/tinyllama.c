@@ -404,6 +404,44 @@ static inline u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
     return (u8)((v >> (6 * p)) & 0x3F);
 }
 
+/* Q4_K / Q5_K scale-min unpacking: 12 bytes → 8 × 6-bit scales + 8 × 6-bit mins.
+ * Layout (each letter is a 6-bit field, uppercase=scale, lowercase=min):
+ *   0:  EE AAAAAA    1:  FF BBBBBB    2:  GG CCCCCC    3:  HH DDDDDD
+ *   4:  ee aaaaaa    5:  ff bbbbbb    6:  gg cccccc    7:  hh dddddd
+ *   8:  eeee EEEE    9:  ffff FFFF   10:  gggg GGGG   11:  hhhh HHHH   */
+static inline void q4k_scale_min(const u8 *s, u32 sb,
+                                  u8 *scale, u8 *min) {
+    /* sb ∈ [0, 7] — super-block index                                       */
+    u32 d_byte  = sb & 3;         /* byte 0-3  in the first 4-byte group   */
+    u32 m_byte  = sb & 3;         /* byte 4-7  in the second group         */
+    u32 md_byte = sb & 3;         /* byte 8-11 in the third group          */
+    u32 md_nib  = sb >> 2;        /* which nibble / bit-field in md_byte   */
+    u8  d  = s[d_byte];
+    u8  m  = s[4 + m_byte];
+    u8  md = s[8 + md_byte];
+    *scale = (d & 0x3F) | (md_nib ? (u8)((md & 0x0F) << 4) : (u8)(((d >> 2) & 0x30)));
+    /* Actually let me simplify: d has 6 bits (AAAAAA) + 2 bits (EE),
+     * md has 4 bits (eeee) + 4 bits (EEEE).
+     * scale = lower 6 bits of d  +  upper 2 bits (EE) from md or d depending on sb.
+     * Let's re-read the Python reference more carefully.
+     */
+    /* Python: sc = concat([d & 0x3F, (md & 0x0F) | ((d >> 2) & 0x30)], axis=-1)
+     * First 4 elements (sb & 3): d & 0x3F
+     * Last 4 elements (sb>=4): (md & 0x0F) | ((d >> 2) & 0x30)
+     *
+     * min = concat([m & 0x3F, (md >> 4) | ((m >> 2) & 0x30)], axis=-1)
+     * First 4: m & 0x3F
+     * Last 4: (md >> 4) | ((m >> 2) & 0x30)
+     */
+    if (sb < 4) {
+        *scale = d & 0x3F;
+        *min   = m & 0x3F;
+    } else {
+        *scale = (md & 0x0F) | ((d >> 2) & 0x30);
+        *min   = (md >> 4) | ((m >> 2) & 0x30);
+    }
+}
+
 /* Read a single f32/f16/bf16/quantised weight from a GGUF tensor at index i.
  * Supports all GGUF v3 types: F32, F16, BF16, F64; I8/I16/I32/I64;
  * Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1; Q2_K..Q8_K; IQ1_S, IQ1_M, IQ2_XXS,
@@ -524,56 +562,75 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
         case GGUF_TYPE_Q6_K: {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 210;
+            /* ql: bytes 0-127, qh: bytes 128-191, scales: bytes 192-207, d: bytes 208-209 */
             float d = f16_to_f32(*(const u16 *)(blk + 208));
-            i8 sc = (i8)blk[192 + (o >> 4)];
-            u32 lo = (blk[(o >> 1)] >> ((o & 1) << 2)) & 0xF;
-            u32 hi = (blk[128 + (o >> 2)] >> ((o & 3) << 1)) & 0x3;
+            i32 sc = (i8)blk[192 + (o >> 4)];
+            /* ql: 4 groups of 32 bytes, 2 nibbles per byte */
+            u32 g  = o >> 6;        /* group 0-3 */
+            u32 nb = (o >> 5) & 1;  /* nibble within byte */
+            u32 bc = o & 31;        /* byte within group */
+            u32 lo = (blk[g * 32 + bc] >> (nb * 4)) & 0xF;
+            /* qh: 2 groups of 32 bytes, 4 2-bit pairs per byte */
+            u32 hg = o >> 7;         /* group 0-1 */
+            u32 pr = (o >> 5) & 3;   /* pair within byte */
+            u32 hc = o & 31;         /* byte within group */
+            u32 hi = (blk[128 + hg * 32 + hc] >> (pr * 2)) & 0x3;
             i32 q  = (i32)(lo | (hi << 4)) - 32;
             return d * (float)sc * (float)q;
         }
         case GGUF_TYPE_Q5_K: {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 176;
+            /* d: 0-1, dmin: 2-3, scales+mins: 4-15, qh: 16-47, qs: 48-175 */
             float d    = f16_to_f32(*(const u16 *)blk);
-            float mn   = f16_to_f32(*(const u16 *)(blk + 2));
-            i8 sc  = k_scale_6bit(blk + 4, o >> 4);
-            u32 hi = (blk[16 + (o >> 3)] >> (o & 7)) & 1;
-            u32 lo = (blk[48 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-            i32 q  = (i32)((hi << 4) | lo) - 16;
-            return d * (float)sc * (float)q - mn;
+            float dmin = f16_to_f32(*(const u16 *)(blk + 2));
+            u32 sb = o >> 5;  /* 8 super-blocks of 32 elements */
+            u8 sc, mn;
+            q4k_scale_min(blk + 4, sb, &sc, &mn);
+            /* qs: 4 groups of 32 bytes, 2 nibbles per byte */
+            u32 g  = o >> 6;
+            u32 nb = (o >> 5) & 1;
+            u32 bc = o & 31;
+            u32 lo = (blk[48 + g * 32 + bc] >> (nb * 4)) & 0xF;
+            /* qh: 32 bytes, 8 bits per byte: byte=o%32, bit=o/32 */
+            u32 hi = (blk[16 + (o & 31)] >> (o >> 5)) & 1;
+            i32 q  = (i32)(lo | (hi << 4)) - 16;
+            return d * (float)sc * (float)q - dmin * (float)mn;
         }
         case GGUF_TYPE_Q4_K: {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 144;
+            /* d: 0-1, dmin: 2-3, scales+mins: 4-15, qs: 16-143 */
             float d    = f16_to_f32(*(const u16 *)blk);
-            float mn   = f16_to_f32(*(const u16 *)(blk + 2));
-            u8 sc  = k_scale_6bit_u(blk + 4, o >> 4);
-            u32 nib = (blk[16 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-            return d * (float)sc * (float)nib - mn;
+            float dmin = f16_to_f32(*(const u16 *)(blk + 2));
+            u32 sb = o >> 5;  /* 8 super-blocks of 32 elements */
+            u8 sc, mn;
+            q4k_scale_min(blk + 4, sb, &sc, &mn);
+            /* qs: 4 groups of 32 bytes, 2 nibbles per byte */
+            u32 g  = o >> 6;
+            u32 nb = (o >> 5) & 1;
+            u32 bc = o & 31;
+            u32 nib = (blk[16 + g * 32 + bc] >> (nb * 4)) & 0xF;
+            return d * (float)sc * (float)nib - dmin * (float)mn;
         }
         case GGUF_TYPE_Q3_K: {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 110;
-            float d = f16_to_f32(*(const u16 *)(blk + 96 + 12));
-            /* Q3_K uses interleaved storage: the raw bytes for qs/hmask and
-             * the nibble-based scale packing differ from the natural
-             * element order.  The access pattern below exactly matches
-             * the gguf library (llama.cpp reference). */
-            const u8 *scales = blk + 96;
-            u32 s = o >> 4;
-            /* low 2 bits from qs (bytes 32..95 of block) */
-            u32 ql_byte  = 32 * (o >> 7) + (o & 31);
-            u32 ql_shift = ((o & 127) >> 5) * 2;
-            u32 lo = (blk[32 + ql_byte] >> ql_shift) & 3;
-            /* high 1 bit from hmask (bytes 0..31 of block) */
-            u32 qh_byte  = o & 31;
-            u32 qh_shift = o >> 5;
-            u32 hi = (blk[qh_byte] >> qh_shift) & 1;
-            /* 6-bit nibble-packed scale (signed, -32..31) */
-            u32 low  = (scales[s & 7] >> ((s >> 3) * 4)) & 0xF;
-            u32 high = (scales[8 + (s & 3)] >> ((s >> 2) * 2)) & 0x3;
-            i32 sc = (i32)(low | (high << 4)) - 32;
-            i32 q  = (i32)((hi << 2) | lo) - 4;
+            /* hmask: 0-31, qs: 32-95, scales: 96-107, d: 108-109 */
+            float d = f16_to_f32(*(const u16 *)(blk + 108));
+            u32 s = o >> 4;  /* sub-block 0-15 */
+            /* low 2 bits from qs: 2 groups of 32 bytes, 4 2-bit pairs per byte */
+            u32 g  = o >> 7;        /* group 0-1 */
+            u32 pr = (o >> 5) & 3;  /* pair within byte */
+            u32 bc = o & 31;        /* byte within group */
+            u32 lo = (blk[32 + g * 32 + bc] >> (pr * 2)) & 3;
+            /* high bit from hmask (bytes 0..31 of block): byte=o%32, bit=o/32 */
+            u32 hi = (blk[o & 31] >> (o >> 5)) & 1;
+            /* 6-bit scale: 8 low-nibble bytes + 4 high-2bit bytes */
+            u32 sc_low  = (blk[96 + (s & 7)]  >> (s >= 8 ? 4 : 0)) & 0xF;
+            u32 sc_high = (blk[104 + (s & 3)] >> ((s >> 2) * 2)) & 0x3;
+            i32 sc = (i32)(sc_low | (sc_high << 4)) - 32;
+            i32 q  = (i32)(lo | (hi << 2)) - 4;
             return d * (float)sc * (float)q;
         }
         case GGUF_TYPE_Q2_K: {
@@ -1277,9 +1334,33 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
             t->n_element *= t->dim[d];
         }
 
+        /* GGUF stores all quantised 2-D tensors in column-major order,
+         * i.e. the innermost (fastest-varying) dimension is the one that
+         * was declared as dim[0].  Swapping dim[0]↔dim[1] makes the
+         * standard row-major indexing in the inference code match the
+         * physical file layout. */
+        if (t->ndim == 2) {
+            u64 tmp = t->dim[0];
+            t->dim[0] = t->dim[1];
+            t->dim[1] = tmp;
+        }
+
         if (!cursor_u32(c, &t->type)) slog(ERROR, c->error);
-        if (!cursor_u64(c, &t->offset)) slog(ERROR, c->error); 
+        if (!cursor_u64(c, &t->offset)) slog(ERROR, c->error);
         if (!tensor_bytes(t->type, t->n_element, &t->bytes)) slog(WARN, "Tensor %s has unsupported GGUF type %u", get_key_name(t->key), t->type);
+
+        /* Compute padded last-dimension stride for quantised multi-dim tensors.
+         * K-quant types (Q2_K..Q6_K, etc.) have block_size=256; when the
+         * innermost dimension is not a multiple of 256, GGUF pads it. */
+        t->padded_dim = 0;
+        if (t->ndim >= 2) {
+            const GGUFTypeInfo *ti = tensor_type(t->type);
+            if (ti && ti->block_elems > 1) {
+                u64 last = t->dim[t->ndim - 1];
+                u64 pad  = (last + ti->block_elems - 1) / ti->block_elems * ti->block_elems;
+                if (pad != last) t->padded_dim = pad;
+            }
+        }
     }
 
     return tensor;

@@ -100,6 +100,7 @@ typedef struct {
     u64 offset;
     u64 n_element;
     u64 bytes;
+    u64 padded_dim; /* padded last-dimension stride for quantised types */
 } TensorInfo;
 
 typedef struct {

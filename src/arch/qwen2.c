@@ -9,6 +9,13 @@
 #include "../slog.h"
 #include "../utils.h"
 
+#define DBG_VEC(label, vec, n) do { \
+    printf("  [C] %-30s: ", label); \
+    for (u32 _i = 0; _i < (n) && _i < 10; _i++) \
+        printf("%.6f ", (vec)[_i]); \
+    printf("\n"); \
+} while(0)
+
 
 typedef struct {
     float *x;               /* [n_embd] hidden state                        */
@@ -97,8 +104,52 @@ static bool qwen2_init(Session *s) {
          "n_layer=%u n_vocab=%u ctx_size=%u",
          c->n_embd, c->n_head, c->n_kv_head, q_head_dim, kv_head_dim,
          c->n_layer, c->n_vocab, s->ctx_size);
-    slog(INFO, "Qwen2 init: q_dim=%u kv_dim=%u ffn_hidden=%u max_fused=%u",
-         q_dim, kv_dim, ws->ffn_hidden, max_fused);
+    slog(INFO, "Qwen2 init: rope_theta=%.6f", ws->rope_theta);
+
+    /* Check output norm tensor existence. */
+    {
+        TensorInfo *tn = w->tensors[TENSOR_OUTPUT_NORM];
+        slog(INFO, "Qwen2 init: TENSOR_OUTPUT_NORM %s",
+             tn ? "found" : "missing, will use last layer post_attn_norm");
+        if (!tn) tn = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+        if (tn) {
+            const u8 *b = s->en->model->map;
+            printf("  [C] final_norm weight first 10: ");
+            for (u32 i = 0; i < 10 && i < (u32)tn->n_element; i++)
+                printf("%.6f ", tensor_get_f32(tn, b, i));
+            printf("\n");
+        }
+    }
+
+    /* Print output.weight (LM head) first few values + padding info. */
+    {
+        TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+        if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
+        const u8 *b = s->en->model->map;
+        printf("  [C] output.weight: padded_dim=%llu ndim=%u dim=[%llu,%llu]\n",
+               (unsigned long long)t_out->padded_dim, t_out->ndim,
+               (unsigned long long)t_out->dim[0],
+               t_out->ndim >= 2 ? (unsigned long long)t_out->dim[1] : 0ULL);
+        printf("  [C] output.weight[0..4]: ");
+        for (u32 i = 0; i < 5; i++)
+            printf("%.6f ", tensor_get_f32(t_out, b, i));
+        printf("\n");
+        u64 nv = t_out->dim[t_out->ndim - 1];
+        printf("  [C] output.weight row1[0] (i=%llu): %.6f\n",
+               (unsigned long long)nv, tensor_get_f32(t_out, b, nv));
+        /* Check high indices for extreme values */
+        for (u32 c = 0; c <= 10; c++) {
+            u64 idx = (u64)c * nv;
+            printf("  [C] output.weight[c=%u,r=0] (i=%llu): %.6f\n",
+                   c, (unsigned long long)idx, tensor_get_f32(t_out, b, idx));
+        }
+        /* Check near padding boundary */
+        for (u32 c = 1530; c <= 1535; c++) {
+            printf("  [C] output.weight[c=%u,r=0] (i=%llu): %.6f\n",
+                   c, (unsigned long long)((u64)c * nv),
+                   tensor_get_f32(t_out, b, (u64)c * nv));
+        }
+    }
 
     s->arch_data = ws;
     return true;
@@ -123,6 +174,8 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
     float scale     = 1.0f / sqrtf((float)kv_head_dim);
     float eps       = 1e-6f;
 
+    printf("[C] forward_one: token=%u pos=%u s->n_tokens=%u\n", token, pos, s->n_tokens);
+
     /* ---- 1. Token embedding ---- */
     {
         TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
@@ -135,6 +188,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
             for (u32 i = 0; i < n_embd; i++)
                 ws->x[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + token);
         }
+        DBG_VEC("embd(x)", ws->x, n_embd);
     }
 
     /* ---- 2. Per-layer ---- */
@@ -144,6 +198,24 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
 
         /* ---- 2a. Attention norm ---- */
         rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_ATTN_NORM], base, n_embd, eps);
+        if (l == 0) {
+            DBG_VEC("attn_norm(xb)", ws->xb, n_embd);
+            /* Print first few weights of key tensors for debugging */
+            TensorInfo *tq = lw->tensors[TENSOR_ATTN_Q];
+            TensorInfo *to = lw->tensors[TENSOR_ATTN_OUT];
+            if (tq) {
+                printf("  [C] attn_q.weight[0..4]: ");
+                for (u32 i = 0; i < 5; i++)
+                    printf("%.6f ", tensor_get_f32(tq, base, i));
+                printf("\n");
+            }
+            if (to) {
+                printf("  [C] attn_output.weight[0..4]: ");
+                for (u32 i = 0; i < 5; i++)
+                    printf("%.6f ", tensor_get_f32(to, base, i));
+                printf("\n");
+            }
+        }
 
         /* ---- 2b. Q / K / V projections ---- */
         TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
@@ -190,9 +262,20 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
             }
         }
 
+        if (l == 0) {
+            DBG_VEC("q (after proj+bias)", ws->q, q_head_dim);
+            DBG_VEC("k (after proj+bias)", ws->k, kv_head_dim);
+            DBG_VEC("v (after proj+bias)", ws->v, kv_head_dim);
+        }
+
         /* ---- 2c. RoPE ---- */
         rope(ws->q, n_head, q_head_dim, pos, ws->rope_theta);
         rope(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+        if (l == 0) {
+            printf("  [C] rope_theta=%.6f pos=%u\n", ws->rope_theta, pos);
+            DBG_VEC("q_rope", ws->q, q_head_dim);
+            DBG_VEC("k_rope", ws->k, kv_head_dim);
+        }
 
         /* ---- 2d. KV cache write (head-major: [head][pos][dim]) ---- */
         {
@@ -249,6 +332,10 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         /* ---- 2g. Attention residual ---- */
         for (u32 i = 0; i < n_embd; i++)
             ws->x[i] += ws->xb2[i];
+        if (l == 0) {
+            DBG_VEC("attn_out_proj(xb2)", ws->xb2, n_embd);
+            DBG_VEC("x_after_attn_residual", ws->x, n_embd);
+        }
 
         /* ---- 2h. Pre-FFN norm ---- */
         {
@@ -277,6 +364,8 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
             for (u32 i = 0; i < n_embd; i++)
                 ws->x[i] += ws->xb[i];
         }
+
+        if (l == 0) DBG_VEC("x_after_ffn_residual", ws->x, n_embd);
     }
 
     /* ---- 3. Final RMS norm ---- */
@@ -286,6 +375,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
          * as the final norm; try output_norm first, then fall back. */
         if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         rms_norm(ws->xb, ws->x, t_norm, base, n_embd, eps);
+        DBG_VEC("final_norm(xb)", ws->xb, n_embd);
     }
 
     /* ---- 4. LM head ---- */
@@ -294,6 +384,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd)) return false;
+        DBG_VEC("logits", dst, c->n_vocab);
     }
 
     /* ---- 5. Update session state ---- */
@@ -310,6 +401,11 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
 static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen2_forward_one(s, tokens[0], logits);
+
+    slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
+    for (u32 p = 0; p < n_tokens; p++)
+        printf("%u ", tokens[p]);
+    printf("\n");
 
     Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
@@ -379,6 +475,12 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     xp[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + tok);
             }
         }
+    }
+
+    DBG_VEC("prefill_embd[0]", xs, n_embd);
+    if (n_tokens > 1) {
+        float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
+        DBG_VEC("prefill_embd[last]", last_x, n_embd);
     }
 
     /* ---- 2. Per-layer ---- */
@@ -621,9 +723,19 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     /* ---- 3. Final RMS norm on the LAST position only ---- */
     {
         TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
-        if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+        if (!t_norm) {
+            t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+            slog(INFO, "FALLBACK final_norm: using TENSOR_POST_ATTN_NORM from layer %u", n_layer - 1);
+        } else {
+            slog(INFO, "final_norm: using TENSOR_OUTPUT_NORM");
+        }
+        printf("  [C] final_norm weight [0..9]: ");
+        for (u32 i = 0; i < 10; i++)
+            printf("%.6f ", tensor_get_f32(t_norm, base, i));
+        printf("\n");
         float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
         rms_norm(ws->xb, last_x, t_norm, base, n_embd, eps);
+        DBG_VEC("final_norm(xb)", ws->xb, n_embd);
     }
 
     /* ---- 4. LM head ---- */
@@ -633,6 +745,11 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd,
                          t_out->dim[0] == n_embd)) goto fail;
+
+        slog(INFO, "logits (first 10): ");
+        for (u32 i = 0; i < 10 && i < c->n_vocab; i++)
+            printf("%.4f ", dst[i]);
+        printf("\n");
     }
 
     /* ---- 5. Update session state ---- */
