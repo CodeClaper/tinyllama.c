@@ -555,10 +555,24 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
             u64 bi = i >> 8; u32 o = i & 255;
             const u8 *blk = base + ti->offset + bi * 110;
             float d = f16_to_f32(*(const u16 *)(blk + 96 + 12));
-            u8 sc = k_scale_6bit_u(blk + 96, o >> 4);
-            u32 hi = (blk[(o >> 3)] >> (o & 7)) & 1;
-            u32 lo_shift = (o & 3) << 1;
-            u32 lo = (blk[32 + (o >> 2)] >> lo_shift) & 0x3;
+            /* Q3_K uses interleaved storage: the raw bytes for qs/hmask and
+             * the nibble-based scale packing differ from the natural
+             * element order.  The access pattern below exactly matches
+             * the gguf library (llama.cpp reference). */
+            const u8 *scales = blk + 96;
+            u32 s = o >> 4;
+            /* low 2 bits from qs (bytes 32..95 of block) */
+            u32 ql_byte  = 32 * (o >> 7) + (o & 31);
+            u32 ql_shift = ((o & 127) >> 5) * 2;
+            u32 lo = (blk[32 + ql_byte] >> ql_shift) & 3;
+            /* high 1 bit from hmask (bytes 0..31 of block) */
+            u32 qh_byte  = o & 31;
+            u32 qh_shift = o >> 5;
+            u32 hi = (blk[qh_byte] >> qh_shift) & 1;
+            /* 6-bit nibble-packed scale (signed, -32..31) */
+            u32 low  = (scales[s & 7] >> ((s >> 3) * 4)) & 0xF;
+            u32 high = (scales[8 + (s & 3)] >> ((s >> 2) * 2)) & 0x3;
+            i32 sc = (i32)(low | (high << 4)) - 32;
             i32 q  = (i32)((hi << 2) | lo) - 4;
             return d * (float)sc * (float)q;
         }
