@@ -2,12 +2,12 @@ CC = gcc
 ifdef DEBUG
 	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG
 else
-	CFLAGS = -O3 -march=native -ffast-math -flto
+	CFLAGS = -O3 -mmodel=native -ffast-math -flto
 endif
 LDADDCFLAGS = -lm -flto
 
 OBJS = server.o core.o mm.o slog.o utils.o el.o anet.o http.o \
-       arch/llama.o arch/qwen2.o arch/deepseek.o arch/falcon.o
+       model/llama.o model/qwen2.o model/deepseek.o model/falcon.o
 
 all: server
 
@@ -20,7 +20,7 @@ server.o: server.c def.h el.h http.h
 http.o: http.c http.h
 	$(CC) $(CFLAGS) -c http.c -o $@
 
-core.o: core.c core.h def.h arch/arch.h
+core.o: core.c core.h def.h model/model.h
 	$(CC) $(CFLAGS) -c core.c -o $@
 
 mm.o: mm.c def.h mm.h
@@ -38,19 +38,19 @@ el.o: el.c el.h
 anet.o: anet.c anet.h
 	$(CC) $(CFLAGS) -c anet.c -o $@
 
-arch/llama.o: arch/llama.c arch/arch.h def.h
-	$(CC) $(CFLAGS) -c arch/llama.c -o $@
+model/llama.o: model/llama.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/llama.c -o $@
 
-arch/qwen2.o: arch/qwen2.c arch/arch.h def.h
-	$(CC) $(CFLAGS) -c arch/qwen2.c -o $@
+model/qwen2.o: model/qwen2.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/qwen2.c -o $@
 
-arch/deepseek.o: arch/deepseek.c arch/arch.h def.h
-	$(CC) $(CFLAGS) -c arch/deepseek.c -o $@
+model/deepseek.o: model/deepseek.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/deepseek.c -o $@
 
-arch/falcon.o: arch/falcon.c arch/arch.h def.h
-	$(CC) $(CFLAGS) -c arch/falcon.c -o $@
+model/falcon.o: model/falcon.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/falcon.c -o $@
 
 .PHONY: clean all
 
 clean:
-	rm -f *.o arch/*.o server
+	rm -f *.o model/*.o server

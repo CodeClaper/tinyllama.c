@@ -1,12 +1,12 @@
-#include "arch.h"
+#include "model.h"
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
+#include "../utils.h"
 
-static bool llama_init(Session *s) {
+static bool falcon_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
-    /* Allocate standard KV cache. */
     KvCache *kc   = &s->cache;
     kc->n_layer   = c->n_layer;
     kc->head_dim  = c->head_dim;
@@ -26,18 +26,18 @@ static bool llama_init(Session *s) {
     return true;
 }
 
-static bool llama_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
-    (void)s;
-    (void)tokens;
-    (void)n_tokens;
-    (void)logits;
-    /* TODO: implement Llama forward pass */
-    slog(WARN, "llama_forward is not yet implemented");
+static bool falcon_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+    UNUSED(s);
+    UNUSED(tokens);
+    UNUSED(n_tokens);
+    UNUSED(logits);
+    /* TODO: implement Falcon forward pass (parallel attention
+     *       + FFN with GELU). */
+    slog(WARN, "falcon_forward is not yet implemented");
     return false;
 }
 
-
-static void llama_reset(Session *s) {
+static void falcon_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++) {
         kc->std[i].n = 0;
@@ -45,7 +45,7 @@ static void llama_reset(Session *s) {
     s->n_tokens = 0;
 }
 
-static void llama_free(Session *s) {
+static void falcon_free(Session *s) {
     KvCache *kc = &s->cache;
     if (kc->std) {
         for (u32 i = 0; i < kc->n_layer; i++) {
@@ -61,11 +61,9 @@ static void llama_free(Session *s) {
     s->logits = NULL;
 }
 
-/* ---- Ops table ------------------------------------------------ */
-
-const ArchOps llama_ops = {
-    .init    = llama_init,
-    .free    = llama_free,
-    .forward = llama_forward,
-    .reset   = llama_reset,
+const ArchOps falcon_ops = {
+    .init    = falcon_init,
+    .free    = falcon_free,
+    .forward = falcon_forward,
+    .reset   = falcon_reset,
 };

@@ -17,7 +17,7 @@
 #include "slog.h"
 #include <math.h>
 #include "utils.h"
-#include "arch/arch.h"
+#include "model/model.h"
 
 #define GGUF_MAGIC              0x46554747u /* "GGUF", little endian. */
 #define GGUF_VALID_VERSION      3           /* GGUF valid version, only support 3. */
