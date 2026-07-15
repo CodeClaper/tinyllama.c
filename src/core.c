@@ -594,7 +594,7 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
             u32 lo = (blk[48 + g * 32 + bc] >> (nb * 4)) & 0xF;
             /* qh: 32 bytes, 8 bits per byte: byte=o%32, bit=o/32 */
             u32 hi = (blk[16 + (o & 31)] >> (o >> 5)) & 1;
-            i32 q  = (i32)(lo | (hi << 4)) - 16;
+            i32 q  = (i32)(lo | (hi << 4));  /* 0..31, no centering */
             return d * (float)sc * (float)q - dmin * (float)mn;
         }
         case GGUF_TYPE_Q4_K: {
