@@ -806,9 +806,43 @@ static void qwen2_free(Session *s) {
     }
 }
 
+static int qwen2_decode(const u8 *raw, int raw_len, char *out, int max_len) {
+    int w = 0;
+    for (int b = 0; b < raw_len && w < max_len; b++) {
+        unsigned char c = raw[b];
+        /* GPT-2 byte-level encoding:
+         *   printable ASCII 0x21-0x7E → itself
+         *   0xC2 0x80-0xBF → bytes 0x80-0xBF
+         *   0xC3 0x80-0xBF → bytes 0xC0-0xFF
+         *   0xC4 0x80-0xBF → bytes 0x00-0x3F (space 0x20 = 0xC4 0xA0)
+         *   0xC5 0x80-0xBF → bytes 0x40-0x7F                       */
+        if (c >= 0x21 && c <= 0x7E) {
+            out[w++] = (char)c;
+        } else if (c >= 0xC2 && c <= 0xC5 && b + 1 < raw_len) {
+            unsigned char nc = raw[b + 1];
+            int byte = -1;
+            if      (c == 0xC2) byte = (int)nc;            /* 0x80..0xBF */
+            else if (c == 0xC3) byte = (int)nc + 0x40;     /* 0xC0..0xFF */
+            else if (c == 0xC4) byte = (int)nc - 0x80;     /* 0x00..0x3F */
+            else if (c == 0xC5) byte = (int)nc - 0x40;     /* 0x40..0x7F */
+            if (byte >= 0 && byte <= 255) {
+                out[w++] = (char)(unsigned char)byte;
+                b++;
+            } else {
+                out[w++] = (char)c;
+            }
+        } else {
+            out[w++] = (char)c;
+        }
+    }
+    if (w < max_len) out[w] = '\0';
+    return w;
+}
+
 const ArchOps qwen2_ops = {
     .init    = qwen2_init,
     .free    = qwen2_free,
     .forward = qwen2_forward,
     .reset   = qwen2_reset,
+    .decode  = qwen2_decode,
 };

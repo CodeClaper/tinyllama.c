@@ -495,34 +495,11 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
             int remaining = (int)sizeof(resp_body) - resp_used - 1;
-            for (int b = 0; b < (int)tk->len && resp_used < remaining; b++) {
-                unsigned char c = (unsigned char)tk->content[b];
-                /* Decode GPT-2 byte-level encoding.
-                 * Printable ASCII (0x21-0x7E) → itself.
-                 * Other bytes → UTF-8 2-byte sequence with reverse mapping:
-                 *   0xC2 0x80-0xBF → bytes 0x80-0xBF
-                 *   0xC3 0x80-0xBF → bytes 0xC0-0xFF
-                 *   0xC4 0x80-0xBF → bytes 0x00-0x3F (space 0x20 is 0xC4 0xA0)
-                 *   0xC5 0x80-0xBF → bytes 0x40-0x7F              */
-                if (c >= 0x21 && c <= 0x7E) {
-                    resp_body[resp_used++] = (char)c;
-                } else if (c >= 0xC2 && c <= 0xC5 && b + 1 < (int)tk->len) {
-                    unsigned char n = (unsigned char)tk->content[b + 1];
-                    int byte = -1;
-                    if (c == 0xC2)      byte = (int)n;                /* 0x80..0xBF */
-                    else if (c == 0xC3) byte = (int)n + 0x40;         /* 0xC0..0xFF */
-                    else if (c == 0xC4) byte = (int)n - 0x80;         /* 0x00..0x3F */
-                    else if (c == 0xC5) byte = (int)n - 0x40;         /* 0x40..0x7F */
-                    if (byte >= 0 && byte <= 255) {
-                        resp_body[resp_used++] = (char)(unsigned char)byte;
-                        b++;
-                    } else {
-                        resp_body[resp_used++] = (char)c;
-                    }
-                } else {
-                    resp_body[resp_used++] = (char)c;
-                }
-            }
+            int added = s->ops.decode
+                ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
+                                resp_body + resp_used, remaining)
+                : 0;
+            if (added > 0) resp_used += added;
         }
         n_gen++;
         if (!s->ops.forward(s, &next_token, 1, s->logits)) break;
