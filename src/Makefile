@@ -6,7 +6,7 @@ else
 endif
 LDADDCFLAGS = -lm -flto
 
-OBJS = server.o core.o mm.o slog.o utils.o el.o anet.o http.o \
+OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o
 
 all: server
@@ -22,6 +22,9 @@ http.o: http.c http.h
 
 core.o: core.c core.h def.h model/model.h
 	$(CC) $(CFLAGS) -c core.c -o $@
+
+quants.o: quants.c quants.h def.h
+	$(CC) $(CFLAGS) -c quants.c -o $@
 
 mm.o: mm.c def.h mm.h
 	$(CC) $(CFLAGS) -c mm.c -o $@
