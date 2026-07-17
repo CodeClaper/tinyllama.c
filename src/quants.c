@@ -482,14 +482,28 @@ static inline float dequant_q6_k(const u8 *data, u64 i) {
     const u8 *blk = data + bi * 210;
     float d = f16_to_f32(*(const u16 *)(blk + 208));
     i32 sc = (i8)blk[192 + (o >> 4)];
-    u32 g  = o >> 6;
-    u32 nb = (o >> 5) & 1;
-    u32 bc = o & 31;
-    u32 lo = (blk[g * 32 + bc] >> (nb * 4)) & 0xF;
-    u32 hg = o >> 7;
-    u32 pr = (o >> 5) & 3;
-    u32 hc = o & 31;
-    u32 hi = (blk[128 + hg * 32 + hc] >> (pr * 2)) & 0x3;
+
+    /* Q6_K nibble layout (llama.cpp / ggml):
+     * Each 128-element half uses 64 bytes of ql:
+     *   group-0 (elts  0.. 31): low  nibble of ql[ 0..31]
+     *   group-1 (elts 32.. 63): low  nibble of ql[32..63]
+     *   group-2 (elts 64.. 95): high nibble of ql[ 0..31]
+     *   group-3 (elts 96..127): high nibble of ql[32..63]
+     * High 2 bits per element live in qh[0..31] (4×2-bit per byte). */
+    u32 hl      = o & 127;          /* position within 128-element half   */
+    u32 which   = hl >> 5;          /* 0..3: which 32-element sub-group   */
+    u32 l       = hl & 31;          /* 0..31: position inside sub-group   */
+    u32 half    = o >> 7;           /* 0 or 1: which 128-element half     */
+
+    /* Low 4 bits from ql. */
+    u32 ql_off  = (half << 6) + ((which & 1) << 5) + l;
+    u32 lo      = (which >= 2) ? ((blk[ql_off] >> 4) & 0xF)
+                               :  (blk[ql_off] & 0xF);
+
+    /* High 2 bits from qh. */
+    u32 qh_off  = 128 + (half << 5) + l;
+    u32 hi      = (blk[qh_off] >> (which * 2)) & 0x3;
+
     i32 q  = (i32)(lo | (hi << 4)) - 32;
     return d * (float)sc * (float)q;
 }
