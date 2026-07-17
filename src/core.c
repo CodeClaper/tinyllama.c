@@ -171,57 +171,60 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
-    /* Use a stack buffer for small rows, smalloc for large ones.
-     * Avoids per-call heap overhead for the common case while
-     * staying safe when ffn_hidden exceeds the threshold. */
-    #define MATVEC_STACK 4096
-    float  stack_buf[MATVEC_STACK];
-    float *w_row = cols <= MATVEC_STACK ? stack_buf : smalloc(cols * sizeof(float));
-    if (!w_row) return false;
-
     if (trans) {
         /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
-         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows. */
+         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows.
+         * Strided access — need a gather buffer. */
         if (tr != cols || tc != rows) {
             slog(WARN, "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tc, (unsigned long)tr);
-            if (w_row != stack_buf) sfree(w_row);
             return false;
         }
+        #define MATVEC_STACK 4096
+        float  stack_buf[MATVEC_STACK];
+        float *w_row = cols <= MATVEC_STACK ? stack_buf : smalloc(cols * sizeof(float));
+        if (!w_row) return false;
+
         for (u64 r = 0; r < rows; r++) {
-            /* Dequantise column r of stored W into w_row. */
             for (u64 c = 0; c < cols; c++)
                 w_row[c] = tensor_get_f32(tw, base, c * tc + r);
-            /* Vectorisable dot product. */
             float sum = 0.0f;
             for (u64 c = 0; c < cols; c++)
                 sum += w_row[c] * x[c];
             y[r] = sum;
         }
+        if (w_row != stack_buf) sfree(w_row);
+        #undef MATVEC_STACK
     } else {
-        /* Standard: W stored as [rows × cols], compute y = W @ x. */
+        /* Standard: W stored as [rows × cols], compute y = W @ x.
+         * Contiguous rows — fused dequant + dot. */
         if (tr != rows || tc != cols) {
             slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
                  (unsigned long)rows, (unsigned long)cols,
                  (unsigned long)tr, (unsigned long)tc);
-            if (w_row != stack_buf) sfree(w_row);
             return false;
         }
-        for (u64 r = 0; r < rows; r++) {
-            /* Batch-dequantise one full row of W (contiguous). */
-            tensor_get_f32_batch(tw, base, r * cols, cols, w_row);
-            /* Vectorisable dot product. */
-            float sum = 0.0f;
-            for (u64 c = 0; c < cols; c++)
-                sum += w_row[c] * x[c];
-            y[r] = sum;
+
+        /* For Q8_0 / Q8_K: if dotprod available, quantise x to i8
+         * once, then use vdotq_s32 (1 insn / 4 MACs). */
+#if defined(__ARM_FEATURE_DOTPROD)
+        if (tw->type == GGUF_TYPE_Q8_0 || tw->type == GGUF_TYPE_Q8_K) {
+            i8 *x_i8 = smalloc(cols * sizeof(i8));
+            if (!x_i8) return false;
+            float x_scale = quantize_f32_to_i8(x, x_i8, cols);
+            for (u64 r = 0; r < rows; r++)
+                y[r] = gguf_dot_i8_batch(tw, base, r * cols, cols,
+                                         x_i8, x_scale);
+            sfree(x_i8);
+        } else
+#endif
+        {
+            for (u64 r = 0; r < rows; r++)
+                y[r] = gguf_dot_batch(tw, base, r * cols, cols, x);
         }
     }
-
-    if (w_row != stack_buf) sfree(w_row);
     return true;
-    #undef MATVEC_STACK
 }
 
 /* Batch matrix-matrix multiply:  Y[b] = W @ X[b]  for b ∈ [0, batch).

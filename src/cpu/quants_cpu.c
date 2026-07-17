@@ -6,6 +6,7 @@
  * these kernels and handles edge elements via the scalar gguf_dequant().
  */
 #include <arm_neon.h>
+#include <math.h>
 #include <string.h>
 
 #include "../def.h"
@@ -861,3 +862,798 @@ fallback:
     for (u64 j = i0; j < i0 + nb; j++)
         out[j - i0] = gguf_dequant(ti, base, j);
 }
+
+/* ================================================================
+ * Fused dequant + dot product  (NEON SIMD)
+ *
+ * Each function computes  sum(w[j] * x[j])  for one complete
+ * block of quantised weights, dequantising and multiplying in
+ * NEON registers — no intermediate float buffer.
+ * ================================================================ */
+
+/* Horizontal sum of a float32x4 into a scalar. */
+static inline float neon_hsum_f32x4(float32x4_t v) {
+    float32x2_t s2 = vadd_f32(vget_low_f32(v), vget_high_f32(v));
+    s2 = vpadd_f32(s2, s2);
+    return vget_lane_f32(s2, 0);
+}
+
+/* ---- Non-block types ------------------------------------------- */
+
+static float dot_f32(const u8 *data, const float *x, u64 n) {
+    const float *w = (const float *)data;
+    float32x4_t s0 = vdupq_n_f32(0), s1 = vdupq_n_f32(0);
+    float32x4_t s2 = vdupq_n_f32(0), s3 = vdupq_n_f32(0);
+    u64 i = 0;
+    for (; i + 16 <= n; i += 16) {
+        s0 = vmlaq_f32(s0, vld1q_f32(w + i +  0), vld1q_f32(x + i +  0));
+        s1 = vmlaq_f32(s1, vld1q_f32(w + i +  4), vld1q_f32(x + i +  4));
+        s2 = vmlaq_f32(s2, vld1q_f32(w + i +  8), vld1q_f32(x + i +  8));
+        s3 = vmlaq_f32(s3, vld1q_f32(w + i + 12), vld1q_f32(x + i + 12));
+    }
+    float sum = neon_hsum_f32x4(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+    for (; i < n; i++) sum += w[i] * x[i];
+    return sum;
+}
+
+static float dot_f16(const u8 *data, const float *x, u64 n) {
+    float sum = 0.0f;
+    const u16 *h = (const u16 *)data;
+    for (u64 i = 0; i < n; i++)
+        sum += f16_to_f32(h[i]) * x[i];
+    return sum;
+}
+
+/* ---- Simple block types (block_size = 32) ---------------------- */
+
+/* Q8_0: sum = d * Σ(qs[j] * x[j])  */
+static float neon_dot_q8_0_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)data);
+    const i8 *qs = (const i8 *)(data + 2);
+
+    float32x4_t s0 = vdupq_n_f32(0), s1 = vdupq_n_f32(0);
+    float32x4_t s2 = vdupq_n_f32(0), s3 = vdupq_n_f32(0);
+
+    for (int j = 0; j < 32; j += 16) {
+        int8x16_t vq = vld1q_s8(qs + j);
+        int16x8_t v16_0 = vmovl_s8(vget_low_s8(vq));
+        int16x8_t v16_1 = vmovl_s8(vget_high_s8(vq));
+        float32x4_t qf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t qf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t qf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t qf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+        s0 = vmlaq_f32(s0, qf0, vld1q_f32(x + j +  0));
+        s1 = vmlaq_f32(s1, qf1, vld1q_f32(x + j +  4));
+        s2 = vmlaq_f32(s2, qf2, vld1q_f32(x + j +  8));
+        s3 = vmlaq_f32(s3, qf3, vld1q_f32(x + j + 12));
+    }
+    return d * neon_hsum_f32x4(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+}
+
+/* Q4_0: sum = d * Σ((nib - 8) * x) = d * (Σ(nib*x) - 8*Σ(x)) */
+static float neon_dot_q4_0_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)data);
+    const u8 *qs = data + 2;
+
+    float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+    float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+    float32x4_t sum0 = vdupq_n_f32(0), sum1 = vdupq_n_f32(0);
+
+    for (int j = 0; j < 32; j += 16) {
+        /* For Q4_0, nibbles within a block alternate low/high per byte.
+         * Extract low nibbles (even elements 0,2,4,...) and high nibbles
+         * (odd elements 1,3,5,...), then interleave for natural order. */
+        uint8x16_t vq  = vld1q_u8(qs + j / 2);
+        uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+        uint8x16_t vhi = vshrq_n_u8(vq, 4);
+        uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+
+        /* Process first 8 elements of each half (vz.val[0]) then last 8 (vz.val[1]).
+         * Actually vzip gives: val[0] = [l0,h0,l1,h1,...,l7,h7], val[1]=[l8,h8,...,l15,h15].
+         * So each val[h] has 16 consecutively ordered elements. */
+        for (int h = 0; h < 2; h++) {
+            uint8x16_t vn = (h == 0) ? vz.val[0] : vz.val[1];
+            int off = j + h * 8;
+            (void)off; /* j/2 bytes → j elements; use separate offsets */
+
+            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
+            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
+            float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+            float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+            float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+            float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+            int jj = j + h * 16;
+            float32x4_t xv0 = vld1q_f32(x + jj +  0);
+            float32x4_t xv1 = vld1q_f32(x + jj +  4);
+            float32x4_t xv2 = vld1q_f32(x + jj +  8);
+            float32x4_t xv3 = vld1q_f32(x + jj + 12);
+
+            dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
+            dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
+            sum0 = vaddq_f32(sum0, xv0);  sum1 = vaddq_f32(sum1, xv1);
+            /* sum2, sum3 — reuse dot accumulators; just add x to separate regs */
+            /* Actually let me just accumulate all x values into sum0/sum1 */
+        }
+    }
+
+    /* Recompute: we need sum_x for all 32 elements. Let me re-accumulate. */
+    float32x4_t sx0 = vdupq_n_f32(0), sx1 = vdupq_n_f32(0);
+    float32x4_t sx2 = vdupq_n_f32(0), sx3 = vdupq_n_f32(0);
+    for (int j = 0; j < 32; j += 16) {
+        sx0 = vaddq_f32(sx0, vld1q_f32(x + j +  0));
+        sx1 = vaddq_f32(sx1, vld1q_f32(x + j +  4));
+        sx2 = vaddq_f32(sx2, vld1q_f32(x + j +  8));
+        sx3 = vaddq_f32(sx3, vld1q_f32(x + j + 12));
+    }
+    float sum_x = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));
+
+    float dot_all = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+    return d * (dot_all - 8.0f * sum_x);
+}
+
+/* Q4_1: sum = Σ((nib * d + m) * x) = d * Σ(nib*x) + m * Σ(x) */
+static float neon_dot_q4_1_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)data);
+    float m = f16_to_f32(*(const u16 *)(data + 2));
+    const u8 *qs = data + 4;
+
+    float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+    float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+    float32x4_t sx0 = vdupq_n_f32(0), sx1 = vdupq_n_f32(0);
+    float32x4_t sx2 = vdupq_n_f32(0), sx3 = vdupq_n_f32(0);
+
+    for (int j = 0; j < 32; j += 16) {
+        uint8x16_t vq  = vld1q_u8(qs + j / 2);
+        uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+        uint8x16_t vhi = vshrq_n_u8(vq, 4);
+        uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+
+        for (int h = 0; h < 2; h++) {
+            uint8x16_t vn = (h == 0) ? vz.val[0] : vz.val[1];
+            int jj = j + h * 16;
+
+            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
+            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
+            float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+            float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+            float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+            float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+            float32x4_t xv0 = vld1q_f32(x + jj +  0);
+            float32x4_t xv1 = vld1q_f32(x + jj +  4);
+            float32x4_t xv2 = vld1q_f32(x + jj +  8);
+            float32x4_t xv3 = vld1q_f32(x + jj + 12);
+
+            dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
+            dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
+            sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+            sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
+        }
+    }
+    float dot_nib = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+    float sum_x   = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));
+    return d * dot_nib + m * sum_x;
+}
+
+/* ---- K-quant types  (block_size = 256) ------------------------- */
+
+/*
+ * Q8_K: sum = d * Σ(bs[sb] * Σ(qs[j] * x[j]))
+ *
+ * Process 16 sub-blocks × 16 elements.  Each sub-block has its own
+ * f16 scale bs[sb]; the overall scale d is f32.
+ */
+static float neon_dot_q8_k_block(const u8 *data, const float *x) {
+    float d; memcpy(&d, data, 4);
+    const u16 *bs = (const u16 *)(data + 4);
+    const i8  *qs = (const i8 *)(data + 36);
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < 16; sb++) {
+        float32x4_t s0 = vdupq_n_f32(0), s1 = vdupq_n_f32(0);
+        float32x4_t s2 = vdupq_n_f32(0), s3 = vdupq_n_f32(0);
+        int off = sb * 16;
+
+        int8x16_t vq = vld1q_s8(qs + off);
+        int16x8_t v16_0 = vmovl_s8(vget_low_s8(vq));
+        int16x8_t v16_1 = vmovl_s8(vget_high_s8(vq));
+        float32x4_t qf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t qf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t qf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t qf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+        s0 = vmlaq_f32(s0, qf0, vld1q_f32(x + off +  0));
+        s1 = vmlaq_f32(s1, qf1, vld1q_f32(x + off +  4));
+        s2 = vmlaq_f32(s2, qf2, vld1q_f32(x + off +  8));
+        s3 = vmlaq_f32(s3, qf3, vld1q_f32(x + off + 12));
+
+        float dot_qs = neon_hsum_f32x4(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+        acc += dot_qs * f16_to_f32(bs[sb]);
+    }
+    return d * acc;
+}
+
+/*
+ * Q6_K: sum = d * Σ(sc[sb] * Σ((q - 32) * x))
+ *          = d * Σ(sc[sb] * (Σ(q * x) - 32 * Σ(x)))
+ *
+ * 16 sub-blocks of 16 elements each.  Scale is i8 per sub-block.
+ * q = lo | (hi<<4), in range 0..63 → q - 32 in [-32, 31].
+ */
+static float neon_dot_q6_k_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)(data + 208));
+    const u8 *scales = data + 192;
+    const u8 *ql     = data;          /* 128 bytes */
+    const u8 *qh     = data + 128;    /* 64 bytes  */
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < 16; sb++) {
+        i32 sc = (i8)scales[sb];
+        u32 start = (u32)sb * 16;
+
+        /* Build 16 combined q values, then NEON-dot with x. */
+        u8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o     = start + (u32)j;
+            u32 half  = o >> 7;
+            u32 hl    = o & 127;
+            u32 which = hl >> 5;
+            u32 l     = hl & 31;
+            u32 ql_off = (half << 6) + ((which & 1) << 5) + l;
+            u32 lo = (which >= 2) ? ((ql[ql_off] >> 4) & 0xF) : (ql[ql_off] & 0xF);
+            u32 qh_off = (half << 5) + l;
+            u32 hi = (qh[qh_off] >> (which * 2)) & 0x3;
+            vals[j] = (u8)(lo | (hi << 4));
+        }
+
+        /* NEON dot: Σ(vals[j] * x[j]) and Σ(x[j]). */
+        float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+        float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+        float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
+
+        uint8x16_t vu8 = vld1q_u8(vals);
+        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
+        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
+        float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t vf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t vf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t vf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+        float32x4_t xv0 = vld1q_f32(x + start +  0);
+        float32x4_t xv1 = vld1q_f32(x + start +  4);
+        float32x4_t xv2 = vld1q_f32(x + start +  8);
+        float32x4_t xv3 = vld1q_f32(x + start + 12);
+
+        dot0 = vmlaq_f32(dot0, vf0, xv0); dot1 = vmlaq_f32(dot1, vf1, xv1);
+        dot2 = vmlaq_f32(dot2, vf2, xv2); dot3 = vmlaq_f32(dot3, vf3, xv3);
+        sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+        /* accumulate remaining x sums */
+        float32x4_t sx_all = vaddq_f32(vaddq_f32(vaddq_f32(sx0, sx1), xv2), xv3);
+
+        float dot_q = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+        float sum_x = neon_hsum_f32x4(sx_all);
+
+        acc += (float)sc * (dot_q - 32.0f * sum_x);
+    }
+    return d * acc;
+}
+
+/*
+ * Q4_K: result = d * Σ(sc[sb] * Σ(nib * x)) - dmin * Σ(mn[sb] * Σ(x))
+ *
+ * 8 sub-blocks of 32 elements.  Scales/mins are 6-bit packed.
+ * Nibble extraction: sub-blocks within a 32-byte group share bytes;
+ * even sb use low nibbles, odd sb use high nibbles.
+ */
+static float neon_dot_q4_k_block(const u8 *data, const float *x) {
+    float d    = f16_to_f32(*(const u16 *)data);
+    float dmin = f16_to_f32(*(const u16 *)(data + 2));
+    const u8 *sm  = data + 4;
+    const u8 *qs  = data + 16;
+
+    float dot_acc = 0.0f, sum_acc = 0.0f;
+
+    for (int sb = 0; sb < 8; sb++) {
+        u8 sc, mn;
+        q4k_scale_min(sm, (u32)sb, &sc, &mn);
+
+        u32 g  = (u32)sb >> 1;
+        u32 nb = (u32)sb & 1;
+        const u8 *src = qs + g * 32;   /* 32 bytes for this group-pair */
+        u32 off = (u32)sb * 32;
+
+        /* Extract 32 nibbles (all low or all high), compute dot + sum_x. */
+        float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+        float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+        float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
+        float32x4_t sx2  = vdupq_n_f32(0), sx3  = vdupq_n_f32(0);
+
+        for (int j = 0; j < 32; j += 16) {
+            uint8x16_t vbytes = vld1q_u8(src + j);
+            uint8x16_t vnibs;
+            if (nb == 0) vnibs = vandq_u8(vbytes, vdupq_n_u8(0x0F));
+            else         vnibs = vshrq_n_u8(vbytes, 4);
+
+            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vnibs));
+            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vnibs));
+            float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+            float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+            float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+            float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+            float32x4_t xv0 = vld1q_f32(x + off + j +  0);
+            float32x4_t xv1 = vld1q_f32(x + off + j +  4);
+            float32x4_t xv2 = vld1q_f32(x + off + j +  8);
+            float32x4_t xv3 = vld1q_f32(x + off + j + 12);
+
+            dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
+            dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
+            sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+            sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
+        }
+
+        float dot_nib = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1),
+                                                    vaddq_f32(dot2, dot3)));
+        float sum_x   = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1),
+                                                    vaddq_f32(sx2, sx3)));
+
+        dot_acc += (float)sc * dot_nib;
+        sum_acc += (float)mn * sum_x;
+    }
+    return d * dot_acc - dmin * sum_acc;
+}
+
+/*
+ * Q5_K: result = d * Σ(sc[sb] * Σ(q * x)) - dmin * Σ(mn[sb] * Σ(x))
+ *
+ * Same structure as Q4_K but with 1 extra hi bit per element.
+ */
+static float neon_dot_q5_k_block(const u8 *data, const float *x) {
+    float d    = f16_to_f32(*(const u16 *)data);
+    float dmin = f16_to_f32(*(const u16 *)(data + 2));
+    const u8 *sm  = data + 4;
+    const u8 *qh  = data + 16;
+    const u8 *qs  = data + 48;
+
+    float dot_acc = 0.0f, sum_acc = 0.0f;
+
+    for (int sb = 0; sb < 8; sb++) {
+        u8 sc, mn;
+        q4k_scale_min(sm, (u32)sb, &sc, &mn);
+
+        u32 g  = (u32)sb >> 1;
+        u32 nb = (u32)sb & 1;
+        const u8 *src_lo = qs + g * 32;
+        u32 start = (u32)sb * 32;
+
+        /* Build combined values (lo nibble | hi<<4) for this sub-block. */
+        u8 vals[32];
+        for (int j = 0; j < 32; j++) {
+            u32 o  = start + (u32)j;
+            u32 hi = (qh[o & 31] >> (o >> 5)) & 1;
+            u32 lo = nb ? (src_lo[j] >> 4) : (src_lo[j] & 0xF);
+            vals[j] = (u8)(lo | (hi << 4));
+        }
+
+        float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+        float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+        float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
+        float32x4_t sx2  = vdupq_n_f32(0), sx3  = vdupq_n_f32(0);
+
+        for (int j = 0; j < 32; j += 16) {
+            uint8x16_t vu8 = vld1q_u8(vals + j);
+            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
+            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
+            float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+            float32x4_t vf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+            float32x4_t vf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+            float32x4_t vf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+            float32x4_t xv0 = vld1q_f32(x + start + j +  0);
+            float32x4_t xv1 = vld1q_f32(x + start + j +  4);
+            float32x4_t xv2 = vld1q_f32(x + start + j +  8);
+            float32x4_t xv3 = vld1q_f32(x + start + j + 12);
+
+            dot0 = vmlaq_f32(dot0, vf0, xv0); dot1 = vmlaq_f32(dot1, vf1, xv1);
+            dot2 = vmlaq_f32(dot2, vf2, xv2); dot3 = vmlaq_f32(dot3, vf3, xv3);
+            sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+            sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
+        }
+
+        float dot_q = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1),
+                                                  vaddq_f32(dot2, dot3)));
+        float sum_x = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1),
+                                                  vaddq_f32(sx2, sx3)));
+
+        dot_acc += (float)sc * dot_q;
+        sum_acc += (float)mn * sum_x;
+    }
+    return d * dot_acc - dmin * sum_acc;
+}
+
+/*
+ * Q3_K: sum = d * Σ(sc[sb] * Σ((q - 4) * x))
+ *          = d * Σ(sc[sb] * (Σ(q*x) - 4*Σ(x)))
+ */
+static float neon_dot_q3_k_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)(data + 108));
+    const u8 *qh     = data;
+    const u8 *qs     = data + 32;
+    const u8 *scales = data + 96;
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < 16; sb++) {
+        u32 s = (u32)sb;
+        u32 sc_low  = (scales[(s & 7)] >> ((s >= 8) ? 4 : 0)) & 0xF;
+        u32 sc_high = (scales[8 + (s & 3)] >> (((s >> 2) & 3) * 2)) & 0x3;
+        i32 sc = (i32)(sc_low | (sc_high << 4)) - 32;
+
+        u32 start = (u32)sb * 16;
+        u8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o   = start + (u32)j;
+            u32 g   = o >> 7;
+            u32 pr  = (o >> 5) & 3;
+            u32 bc  = o & 31;
+            u32 lo  = (qs[g * 32 + bc] >> (pr * 2)) & 0x3;
+            u32 hi  = (qh[o & 31] >> (o >> 5)) & 1;
+            vals[j]  = (u8)(lo | (hi << 2));
+        }
+
+        uint8x16_t vu8 = vld1q_u8(vals);
+        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
+        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
+        float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t vf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t vf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t vf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+        float32x4_t xv0 = vld1q_f32(x + start +  0);
+        float32x4_t xv1 = vld1q_f32(x + start +  4);
+        float32x4_t xv2 = vld1q_f32(x + start +  8);
+        float32x4_t xv3 = vld1q_f32(x + start + 12);
+
+        float32x4_t dot0 = vmulq_f32(vf0, xv0), dot1 = vmulq_f32(vf1, xv1);
+        float32x4_t dot2 = vmulq_f32(vf2, xv2), dot3 = vmulq_f32(vf3, xv3);
+        float dot_q = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1),
+                                                  vaddq_f32(dot2, dot3)));
+        float sum_x = neon_hsum_f32x4(vaddq_f32(vaddq_f32(xv0, xv1),
+                                                  vaddq_f32(xv2, xv3)));
+
+        acc += (float)sc * (dot_q - 4.0f * sum_x);
+    }
+    return d * acc;
+}
+
+/*
+ * Q2_K: sum = d * Σ(sc[sb] * Σ(q * x)) - mn * Σ(x)
+ *        = d * Σ(sc[sb] * dot_q[sb]) - mn * total_sum_x
+ */
+static float neon_dot_q2_k_block(const u8 *data, const float *x) {
+    float d  = f16_to_f32(*(const u16 *)(data + 80));
+    float mn = f16_to_f32(*(const u16 *)(data + 82));
+    const u8 *scales = data + 64;
+
+    float dot_acc = 0.0f;
+    float32x4_t total_sx0 = vdupq_n_f32(0), total_sx1 = vdupq_n_f32(0);
+    float32x4_t total_sx2 = vdupq_n_f32(0), total_sx3 = vdupq_n_f32(0);
+
+    for (int sb = 0; sb < 16; sb++) {
+        u32 sc = scales[sb >> 1];
+        if (sb & 1) sc >>= 4; else sc &= 0xF;
+
+        u32 start = (u32)sb * 16;
+        i8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o   = start + (u32)j;
+            u32 q2  = (data[(o >> 2)] >> ((o & 3) << 1)) & 0x3;
+            u32 sign = (data[(o >> 3)] >> (o & 7)) & 1;
+            vals[j] = (i8)((i32)q2 - (i32)sign * 4);
+        }
+
+        int8x16_t vs8  = vld1q_s8(vals);
+        int16x8_t v16_0 = vmovl_s8(vget_low_s8(vs8));
+        int16x8_t v16_1 = vmovl_s8(vget_high_s8(vs8));
+        float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t vf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t vf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t vf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+
+        float32x4_t xv0 = vld1q_f32(x + start +  0);
+        float32x4_t xv1 = vld1q_f32(x + start +  4);
+        float32x4_t xv2 = vld1q_f32(x + start +  8);
+        float32x4_t xv3 = vld1q_f32(x + start + 12);
+
+        float32x4_t d0 = vmulq_f32(vf0, xv0), d1 = vmulq_f32(vf1, xv1);
+        float32x4_t d2 = vmulq_f32(vf2, xv2), d3 = vmulq_f32(vf3, xv3);
+
+        dot_acc += (float)(i32)sc * neon_hsum_f32x4(
+            vaddq_f32(vaddq_f32(d0, d1), vaddq_f32(d2, d3)));
+
+        total_sx0 = vaddq_f32(total_sx0, xv0); total_sx1 = vaddq_f32(total_sx1, xv1);
+        total_sx2 = vaddq_f32(total_sx2, xv2); total_sx3 = vaddq_f32(total_sx3, xv3);
+    }
+
+    float total_sum_x = neon_hsum_f32x4(
+        vaddq_f32(vaddq_f32(total_sx0, total_sx1), vaddq_f32(total_sx2, total_sx3)));
+    return d * dot_acc - mn * total_sum_x;
+}
+
+/* ================================================================
+ * Public API
+ * ================================================================ */
+
+typedef float (*block_dot_fn)(const u8 *data, const float *x);
+
+float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x) {
+    const u8 *data = base + ti->offset;
+    u32 type = ti->type;
+
+    /* ---- Non-block types: direct NEON dot ---- */
+    switch (type) {
+    case GGUF_TYPE_F32: return dot_f32(data + i * 4, x, n);
+    case GGUF_TYPE_F16: return dot_f16(data + i * 2, x, n);
+    /* For BF16 / integer types, fall through to scalar. */
+    default: break;
+    }
+
+    /* ---- Block-quantised types ---- */
+    u32 block_elems;
+    u32 block_bytes;
+    block_dot_fn dot_fn = NULL;
+
+    if (type <= GGUF_TYPE_Q8_1) {
+        block_elems = BLOCK_SIMPLE;
+        switch (type) {
+            case GGUF_TYPE_Q4_0: block_bytes = 18; dot_fn = neon_dot_q4_0_block; break;
+            case GGUF_TYPE_Q4_1: block_bytes = 20; dot_fn = neon_dot_q4_1_block; break;
+            case GGUF_TYPE_Q5_0: block_bytes = 22; break;
+            case GGUF_TYPE_Q5_1: block_bytes = 24; break;
+            case GGUF_TYPE_Q8_0: block_bytes = 34; dot_fn = neon_dot_q8_0_block; break;
+            case GGUF_TYPE_Q8_1: block_bytes = 40; break;
+            default: goto fallback_dot;
+        }
+    } else {
+        block_elems = BLOCK_KQUANT;
+        switch (type) {
+            case GGUF_TYPE_Q2_K:     block_bytes =  84; dot_fn = neon_dot_q2_k_block; break;
+            case GGUF_TYPE_Q3_K:     block_bytes = 110; dot_fn = neon_dot_q3_k_block; break;
+            case GGUF_TYPE_Q4_K:     block_bytes = 144; dot_fn = neon_dot_q4_k_block; break;
+            case GGUF_TYPE_Q5_K:     block_bytes = 176; dot_fn = neon_dot_q5_k_block; break;
+            case GGUF_TYPE_Q6_K:     block_bytes = 210; dot_fn = neon_dot_q6_k_block; break;
+            case GGUF_TYPE_Q8_K:     block_bytes = 292; dot_fn = neon_dot_q8_k_block; break;
+            case GGUF_TYPE_IQ2_XXS:  block_bytes =  66; break;
+            case GGUF_TYPE_IQ2_XS:   block_bytes =  74; break;
+            case GGUF_TYPE_IQ3_XXS:  block_bytes =  98; break;
+            case GGUF_TYPE_IQ1_S:    block_bytes = 110; break;
+            case GGUF_TYPE_IQ4_NL:   block_bytes =  50; break;
+            case GGUF_TYPE_IQ3_S:    block_bytes = 110; break;
+            case GGUF_TYPE_IQ2_S:    block_bytes =  82; break;
+            case GGUF_TYPE_IQ4_XS:   block_bytes = 136; break;
+            case GGUF_TYPE_IQ1_M:    block_bytes =  56; break;
+            default: goto fallback_dot;
+        }
+    }
+
+    /* Walk blocks intersecting [i, i+n).  Full blocks → fused NEON dot;
+     * partial edges → scalar per-element. */
+    u64 end = i + n;
+    u64 bi0 = i / block_elems;
+    u64 bi1 = (end + block_elems - 1) / block_elems;
+    float result = 0.0f;
+
+    for (u64 bi = bi0; dot_fn && bi < bi1; bi++) {
+        u64 bs = bi * block_elems;
+        u64 be = bs + block_elems;
+        u64 cs = i > bs ? i : bs;
+        u64 ce = end < be ? end : be;
+
+        if (cs == bs && ce == be) {
+            /* Fully contained block — fused NEON dot. */
+            result += dot_fn(data + bi * block_bytes, x + (cs - i));
+        } else {
+            /* Partial block — scalar per-element. */
+            for (u64 j = cs; j < ce; j++)
+                result += gguf_dequant(ti, base, j) * x[j - i];
+        }
+    }
+
+    if (dot_fn) return result;
+
+fallback_dot:
+    /* No fused dot function — scalar per-element. */
+    for (u64 j = i; j < i + n; j++)
+        result += gguf_dequant(ti, base, j) * x[j - i];
+    return result;
+}
+
+/* ================================================================
+ * vdotq_s32  i8 dot-product path  (requires ARMv8.2+ dotprod)
+ *
+ * Key insight: instead of widening i8→i32→f32 for each weight
+ * and then doing f32 multiply-add (5 instructions / 4 elements),
+ * we quantise the x vector to i8 once and use vdotq_s32 which
+ * does 4 i8×i8→i32 multiplies + accumulate in ONE instruction.
+ *
+ *   vdotq_s32(acc, q_i8, x_i8):  1 instruction → 4 MACs
+ *   widening chain:              5+ instructions → 4 MACs
+ * ================================================================ */
+
+#if defined(__ARM_FEATURE_DOTPROD)
+
+/* Quantise a float vector to int8.
+ *   scale = 127 / max(|x|)
+ *   out[i] = round(clamp(x[i] * scale, -128, 127))
+ * Returns scale. */
+float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
+    /* Find max absolute value. */
+    float32x4_t vmax0 = vdupq_n_f32(0), vmax1 = vdupq_n_f32(0);
+    u64 i = 0;
+    for (; i + 8 <= n; i += 8) {
+        vmax0 = vmaxq_f32(vmax0, vabsq_f32(vld1q_f32(x + i + 0)));
+        vmax1 = vmaxq_f32(vmax1, vabsq_f32(vld1q_f32(x + i + 4)));
+    }
+    float32x4_t vmax = vmaxq_f32(vmax0, vmax1);
+    float32x2_t s2 = vpmax_f32(vget_low_f32(vmax), vget_high_f32(vmax));
+    float max_abs = vget_lane_f32(vpmax_f32(s2, s2), 0);
+    for (; i < n; i++) {
+        float v = fabsf(x[i]);
+        if (v > max_abs) max_abs = v;
+    }
+    if (max_abs < 1e-8f) max_abs = 1e-8f;
+
+    float scale = 127.0f / max_abs;
+    float32x4_t vscale = vdupq_n_f32(scale);
+
+    /* NEON quantise: f32 → round → clamp → s32 → saturating narrow → s8. */
+    i = 0;
+    for (; i + 16 <= n; i += 16) {
+        float32x4_t f0 = vld1q_f32(x + i +  0), f1 = vld1q_f32(x + i +  4);
+        float32x4_t f2 = vld1q_f32(x + i +  8), f3 = vld1q_f32(x + i + 12);
+
+        int32x4_t i0 = vcvtnq_s32_f32(vmulq_f32(f0, vscale));
+        int32x4_t i1 = vcvtnq_s32_f32(vmulq_f32(f1, vscale));
+        int32x4_t i2 = vcvtnq_s32_f32(vmulq_f32(f2, vscale));
+        int32x4_t i3 = vcvtnq_s32_f32(vmulq_f32(f3, vscale));
+
+        int16x4_t s16_0 = vqmovn_s32(i0), s16_1 = vqmovn_s32(i1);
+        int16x4_t s16_2 = vqmovn_s32(i2), s16_3 = vqmovn_s32(i3);
+
+        int16x8_t s16_01 = vcombine_s16(s16_0, s16_1);
+        int16x8_t s16_23 = vcombine_s16(s16_2, s16_3);
+
+        int8x8_t s8_0 = vqmovn_s16(s16_01);
+        int8x8_t s8_1 = vqmovn_s16(s16_23);
+
+        vst1q_s8(out + i, vcombine_s8(s8_0, s8_1));
+    }
+    /* Tail. */
+    for (; i < n; i++) {
+        float v = x[i] * scale;
+        if (v > 127.0f) v = 127.0f;
+        if (v < -128.0f) v = -128.0f;
+        out[i] = (i8)(i32)roundf(v);
+    }
+    return scale;
+}
+
+/* ---- vdotq i8 dot kernels ------------------------------------- */
+
+/*
+ * Q8_0 i8-dot: dot_i32 = Σ(qs[j] * x_i8[j])  (32 elements)
+ *   result = (d / x_scale) * dot_i32
+ */
+static float vdot_dot_q8_0_block(const u8 *data, const i8 *x_i8,
+                                  float d, float x_scale) {
+    const i8 *qs = (const i8 *)(data + 2);
+
+    int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0);
+
+    acc0 = vdotq_s32(acc0, vld1q_s8(qs +  0), vld1q_s8(x_i8 +  0));
+    acc1 = vdotq_s32(acc1, vld1q_s8(qs + 16), vld1q_s8(x_i8 + 16));
+
+    int32x4_t acc  = vaddq_s32(acc0, acc1);
+    int32x2_t s2   = vadd_s32(vget_low_s32(acc), vget_high_s32(acc));
+    s2 = vpadd_s32(s2, s2);
+    i32 dot = vget_lane_s32(s2, 0);
+
+    return (d / x_scale) * (float)dot;
+}
+
+/*
+ * Q8_K i8-dot: 16 sub-blocks × 16 elements; each has f16 scale bs[sb].
+ *   dot_i32 = Σ(qs[j] * x_i8[j]) per sub-block
+ *   result = (d / x_scale) * Σ(bs[sb] * dot_i32[sb])
+ */
+static float vdot_dot_q8_k_block(const u8 *data, const i8 *x_i8,
+                                  float d, float x_scale) {
+    const u16 *bs = (const u16 *)(data + 4);
+    const i8  *qs = (const i8 *)(data + 36);
+
+    float acc = 0.0f;
+    for (int sb = 0; sb < 16; sb++) {
+        int off = sb * 16;
+
+        int32x4_t a0 = vdupq_n_s32(0);
+        a0 = vdotq_s32(a0, vld1q_s8(qs + off), vld1q_s8(x_i8 + off));
+
+        int32x2_t s2 = vadd_s32(vget_low_s32(a0), vget_high_s32(a0));
+        s2 = vpadd_s32(s2, s2);
+        i32 dot = vget_lane_s32(s2, 0);
+
+        acc += (float)dot * f16_to_f32(bs[sb]);
+    }
+    return (d / x_scale) * acc;
+}
+
+/* ---- i8 dot dispatcher ---------------------------------------- */
+
+typedef float (*i8_block_dot_fn)(const u8 *data, const i8 *x_i8,
+                                  float d, float x_scale);
+
+float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
+                         const i8 *x_i8, float x_scale) {
+    const u8 *data = base + ti->offset;
+    u32 type = ti->type;
+    u32 block_elems, block_bytes;
+    i8_block_dot_fn fn = NULL;
+    float d_scale = 1.0f;
+
+    /* Determine block params and scale factor. */
+    if (type == GGUF_TYPE_Q8_0) {
+        block_elems = BLOCK_SIMPLE; block_bytes = 34;
+        d_scale = f16_to_f32(*(const u16 *)data); /* same d for all blocks of this tensor */
+        fn = (i8_block_dot_fn)vdot_dot_q8_0_block;
+    } else if (type == GGUF_TYPE_Q8_K) {
+        block_elems = BLOCK_KQUANT; block_bytes = 292;
+        float d; memcpy(&d, data, 4);  /* f32 d */
+        d_scale = d;
+        fn = (i8_block_dot_fn)vdot_dot_q8_k_block;
+    } else {
+        goto fallback_i8;
+    }
+
+    /* Walk blocks. */
+    u64 end = i + n;
+    u64 bi0 = i / block_elems;
+    u64 bi1 = (end + block_elems - 1) / block_elems;
+    float result = 0.0f;
+
+    for (u64 bi = bi0; fn && bi < bi1; bi++) {
+        u64 bs = bi * block_elems;
+        u64 be = bs + block_elems;
+        u64 cs = i > bs ? i : bs;
+        u64 ce = end < be ? end : be;
+        u64 off = (cs - i);
+
+        if (cs == bs && ce == be) {
+            result += fn(data + bi * block_bytes, x_i8 + off, d_scale, x_scale);
+        } else {
+            for (u64 j = cs; j < ce; j++)
+                result += gguf_dequant(ti, base, j) * ((float)(i8)x_i8[j - i] / x_scale);
+        }
+    }
+
+    if (fn) return result;
+
+fallback_i8:
+    /* Fall back: dequant with scalar, multiply with original x scaled back. */
+    for (u64 j = i; j < i + n; j++)
+        result += gguf_dequant(ti, base, j) * ((float)(i8)x_i8[j - i] / x_scale);
+    return result;
+}
+
+#else  /* !__ARM_FEATURE_DOTPROD — stubs, callers fall back to gguf_dot_batch */
+
+float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
+    (void)x; (void)out; (void)n; return 0.0f;
+}
+float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
+                         const i8 *x_i8, float x_scale) {
+    (void)ti; (void)base; (void)i; (void)n; (void)x_i8; (void)x_scale;
+    return 0.0f;
+}
+
+#endif /* __ARM_FEATURE_DOTPROD */
