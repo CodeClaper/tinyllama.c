@@ -6,7 +6,6 @@
  * these kernels and handles edge elements via the scalar gguf_dequant().
  */
 #include <smmintrin.h>
-#include <math.h>
 #include <string.h>
 
 #include "../def.h"

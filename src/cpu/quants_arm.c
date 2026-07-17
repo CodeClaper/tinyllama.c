@@ -1,12 +1,11 @@
 /*
- * quants_arm.c — ARM NEON SIMD batch dequantization
+ * quants_cpu.c — NEON SIMD batch dequantization
  *
  * One block-level dequant function per GGUF quant type.
  * The dispatcher gguf_dequant_batch() processes full blocks with
  * these kernels and handles edge elements via the scalar gguf_dequant().
  */
 #include <arm_neon.h>
-#include <math.h>
 #include <string.h>
 
 #include "../def.h"
