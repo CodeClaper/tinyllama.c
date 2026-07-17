@@ -179,9 +179,8 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
     {
         TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
         if (te->dim[0] == c->n_vocab) {
-            /* [n_vocab, n_embd] */
-            for (u32 i = 0; i < n_embd; i++)
-                ws->x[i] = tensor_get_f32(te, base, (u64)token * n_embd + i);
+            /* [n_vocab, n_embd] — row token is contiguous */
+            tensor_get_f32_batch(te, base, (u64)token * n_embd, n_embd, ws->x);
         } else {
             /* [n_embd, n_vocab] */
             for (u32 i = 0; i < n_embd; i++)
@@ -460,11 +459,10 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
         bool te_trans = (te->dim[0] == c->n_vocab);
         if (te_trans) {
+            /* [n_vocab, n_embd] — each token's row is contiguous */
             for (u32 p = 0; p < n_tokens; p++) {
                 float *xp = xs + (u64)p * n_embd;
-                u64 off = (u64)tokens[p] * n_embd;
-                for (u32 i = 0; i < n_embd; i++)
-                    xp[i] = tensor_get_f32(te, base, off + i);
+                tensor_get_f32_batch(te, base, (u64)tokens[p] * n_embd, n_embd, xp);
             }
         } else {
             for (u32 p = 0; p < n_tokens; p++) {

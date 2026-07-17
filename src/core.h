@@ -2,6 +2,7 @@
 #include "quants.h"
 
 float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i);
+void  tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out);
 
 #define DEFAULT_TEMPERATURE 1.0f
 #define DEFAULT_TOP_P 1.0f

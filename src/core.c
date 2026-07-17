@@ -106,6 +106,32 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
     return gguf_dequant(ti, base, i);
 }
 
+/* Batch version of tensor_get_f32: dequantises nb contiguous elements
+ * starting at i0 into out[0..nb-1].  Uses NEON SIMD for full blocks. */
+void tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
+    if (i0 + nb > ti->n_element || nb == 0) {
+        char name[128];
+        snprintf(name, sizeof(name), "%.*s",
+                 ti->key.len < 127 ? ti->key.len : 127, ti->key.content);
+        slog(WARN, "tensor_get_f32_batch OOB: tensor='%s' n_element=%llu "
+             "range=[%llu,%llu) type=%u",
+             name, (unsigned long long)ti->n_element,
+             (unsigned long long)i0, (unsigned long long)(i0 + nb), ti->type);
+        if (ti->ndim > 0) {
+            slog(WARN, "  dims: [%llu%s%s",
+                 (unsigned long long)ti->dim[0],
+                 ti->ndim > 1 ? "," : "]",
+                 ti->ndim > 1 ? "" : "");
+            for (u32 d = 1; d < ti->ndim && d < 8; d++)
+                slog(WARN, "         %llu%s",
+                     (unsigned long long)ti->dim[d],
+                     d + 1 < ti->ndim ? "," : "]");
+        }
+        slog(ERROR, "Fatal: out-of-bounds batch tensor access");
+    }
+    gguf_dequant_batch(ti, base, i0, nb, out);
+}
+
 /* ---- Math primitives ------------------------------------------- */
 
 /* RMS Normalisation: o = x / rms(x) * w  (in-place ok when o == x). */
@@ -125,7 +151,7 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
     #define RMS_STACK 4096
     float  rms_stack[RMS_STACK];
     float *w_buf = (u64)n <= RMS_STACK ? rms_stack : smalloc((u64)n * sizeof(float));
-    gguf_dequant_batch(tw, base, 0, (u64)n, w_buf);
+    tensor_get_f32_batch(tw, base, 0, (u64)n, w_buf);
     for (int i = 0; i < n; i++)
         o[i] = x[i] * scale * w_buf[i];
     if (w_buf != rms_stack) sfree(w_buf);
@@ -184,7 +210,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
         }
         for (u64 r = 0; r < rows; r++) {
             /* Batch-dequantise one full row of W (contiguous). */
-            gguf_dequant_batch(tw, base, r * cols, cols, w_row);
+            tensor_get_f32_batch(tw, base, r * cols, cols, w_row);
             /* Vectorisable dot product. */
             float sum = 0.0f;
             for (u64 c = 0; c < cols; c++)
@@ -255,7 +281,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
         }
         for (u64 r = 0; r < rows; r++) {
             /* Batch-dequantise one full row of W (contiguous). */
-            gguf_dequant_batch(tw, base, r * cols, cols, w_row);
+            tensor_get_f32_batch(tw, base, r * cols, cols, w_row);
 
             /* Dot product with each batch element's input row. */
             for (u64 b = 0; b < batch; b++) {
