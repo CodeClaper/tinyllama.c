@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include "core.h"
+#include "cpu/quants_cpu.h"
 #include "mm.h"
 #include "slog.h"
 #include <math.h>
@@ -118,10 +119,17 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
     float scale = 1.0f / sqrtf(ss / (float)n + eps);
-    for (int i = 0; i < n; i++) {
-        float w = tensor_get_f32(tw, base, (u64)i);
-        o[i] = x[i] * scale * w;
-    }
+
+    /* Batch-dequantise the 1-D weight into a contiguous buffer so
+     * the hot element-wise multiply loop only touches f32 data. */
+    #define RMS_STACK 4096
+    float  rms_stack[RMS_STACK];
+    float *w_buf = (u64)n <= RMS_STACK ? rms_stack : smalloc((u64)n * sizeof(float));
+    gguf_dequant_batch(tw, base, 0, (u64)n, w_buf);
+    for (int i = 0; i < n; i++)
+        o[i] = x[i] * scale * w_buf[i];
+    if (w_buf != rms_stack) sfree(w_buf);
+    #undef RMS_STACK
 }
 
 /* Matrix-vector multiply: y = W @ x  (W is [rows × cols], stored row-major).
@@ -175,9 +183,8 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             return false;
         }
         for (u64 r = 0; r < rows; r++) {
-            /* Dequantise one full row of W into w_row. */
-            for (u64 c = 0; c < cols; c++)
-                w_row[c] = tensor_get_f32(tw, base, r * cols + c);
+            /* Batch-dequantise one full row of W (contiguous). */
+            gguf_dequant_batch(tw, base, r * cols, cols, w_row);
             /* Vectorisable dot product. */
             float sum = 0.0f;
             for (u64 c = 0; c < cols; c++)
@@ -247,9 +254,8 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             sfree(w_row); return false;
         }
         for (u64 r = 0; r < rows; r++) {
-            /* Dequantise one full row of W. */
-            for (u64 c = 0; c < cols; c++)
-                w_row[c] = tensor_get_f32(tw, base, r * cols + c);
+            /* Batch-dequantise one full row of W (contiguous). */
+            gguf_dequant_batch(tw, base, r * cols, cols, w_row);
 
             /* Dot product with each batch element's input row. */
             for (u64 b = 0; b < batch; b++) {
