@@ -3,7 +3,7 @@
 #include "slog.h"
 
 /* Convert f16 to f32 — shared by all dequant paths. */
-static inline float f16_to_f32(u16 bits) {
+float f16_to_f32(u16 bits) {
     u32 sign = (u32)(bits >> 15) << 31;
     u32 exp  = (bits >> 10) & 0x1f;
     u32 mant = bits & 0x3ff;
@@ -29,7 +29,7 @@ static inline float f16_to_f32(u16 bits) {
 /* ---- IQ lookup tables (from llama.cpp ggml-quants.c) -------------- */
 
 /* iq2_xxs: 256-entry grid for 2.0625 bpw quant. */
-static const float iq2_xxs_grid[] = {
+const float iq2_xxs_grid[] = {
     -0.2500f, -0.1875f, -0.1250f, -0.0625f, 0.0000f, 0.0625f, 0.1250f, 0.1875f,
     -0.2500f, -0.1875f, -0.1250f, -0.0625f, 0.0000f, 0.0625f, 0.1250f, 0.1875f,
     -0.2500f, -0.1875f, -0.1250f, -0.0625f, 0.0000f, 0.0625f, 0.1250f, 0.1875f,
@@ -65,7 +65,7 @@ static const float iq2_xxs_grid[] = {
 };
 
 /* iq2_xs: 512-entry grid for 2.3125 bpw quant. */
-static const float iq2_xs_grid[] = {
+const float iq2_xs_grid[] = {
     -0.3125f, -0.2812f, -0.2500f, -0.2188f, -0.1875f, -0.1562f, -0.1250f, -0.0938f,
     -0.0625f, -0.0312f,  0.0000f,  0.0312f,  0.0625f,  0.0938f,  0.1250f,  0.1562f,
      0.1875f,  0.2188f,  0.2500f,  0.2812f,  0.3125f,  0.3438f,  0.3750f,  0.4062f,
@@ -133,7 +133,7 @@ static const float iq2_xs_grid[] = {
 };
 
 /* iq3_xxs: 256-entry grid for 3.0625 bpw quant (same values as iq2_xxs). */
-static const float iq3_xxs_grid[] = {
+const float iq3_xxs_grid[] = {
     -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,  0.0000f,
      0.0625f,  0.1250f,  0.1875f,  0.2500f,  0.3125f,  0.3750f,  0.4375f,  0.5000f,
     -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,  0.0000f,
@@ -169,7 +169,7 @@ static const float iq3_xxs_grid[] = {
 };
 
 /* iq1_s: 256-entry grid for 1.5625 bpw quant. */
-static const float iq1_s_grid[] = {
+const float iq1_s_grid[] = {
     -1.0000f, -0.8750f, -0.7500f, -0.6250f, -0.5000f, -0.3750f, -0.2500f, -0.1250f,
      0.0000f,  0.1250f,  0.2500f,  0.3750f,  0.5000f,  0.6250f,  0.7500f,  0.8750f,
     -1.0000f, -0.8750f, -0.7500f, -0.6250f, -0.5000f, -0.3750f, -0.2500f, -0.1250f,
@@ -205,7 +205,7 @@ static const float iq1_s_grid[] = {
 };
 
 /* iq4_nl: values from llama.cpp for 4.5 bpw non-linear quant. */
-static const float iq4_nl_values[] = {
+const float iq4_nl_values[] = {
     -2.2500f, -2.1875f, -2.0625f, -1.9375f, -1.8125f, -1.6875f, -1.5625f, -1.4375f,
     -1.3125f, -1.1875f, -1.0625f, -0.9375f, -0.8125f, -0.6875f, -0.5625f, -0.5000f,
     -0.4375f, -0.3750f, -0.3125f, -0.2500f, -0.2188f, -0.1875f, -0.1562f, -0.1250f,
@@ -241,7 +241,7 @@ static const float iq4_nl_values[] = {
 };
 
 /* iq3_s: 512-entry lookup table. */
-static const float iq3_s_grid[] = {
+const float iq3_s_grid[] = {
     -0.8750f, -0.8125f, -0.7500f, -0.6875f, -0.6250f, -0.5625f, -0.5000f, -0.4375f,
     -0.3750f, -0.3125f, -0.2500f, -0.1875f, -0.1250f, -0.0625f,  0.0000f,  0.0625f,
      0.1250f,  0.1875f,  0.2500f,  0.3125f,  0.3750f,  0.4375f,  0.5000f,  0.5625f,
@@ -312,7 +312,7 @@ static const float iq3_s_grid[] = {
 
 /* Extract a 6-bit sub-block scale from K-quant packed scale bytes.
  * 12 bytes encode 16 × 6-bit values. Each group of 3 bytes encodes 4 scales. */
-static inline i8 k_scale_6bit(const u8 *scales, u32 sb) {
+i8 k_scale_6bit(const u8 *scales, u32 sb) {
     u32 g  = sb / 4;          /* group of 4 sub-blocks → 3 bytes */
     u32 p  = sb & 3;          /* position within group              */
     const u8 *b = scales + g * 3;
@@ -321,7 +321,7 @@ static inline i8 k_scale_6bit(const u8 *scales, u32 sb) {
 }
 
 /* Same as k_scale_6bit but returns unsigned 0..63 (used by Q3_K, Q4_K, Q6_K). */
-static inline u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
+u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
     u32 g  = sb / 4;
     u32 p  = sb & 3;
     const u8 *b = scales + g * 3;
@@ -334,7 +334,7 @@ static inline u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
  *   0:  EE AAAAAA    1:  FF BBBBBB    2:  GG CCCCCC    3:  HH DDDDDD
  *   4:  ee aaaaaa    5:  ff bbbbbb    6:  gg cccccc    7:  hh dddddd
  *   8:  eeee EEEE    9:  ffff FFFF   10:  gggg GGGG   11:  hhhh HHHH   */
-static inline void q4k_scale_min(const u8 *s, u32 sb,
+void q4k_scale_min(const u8 *s, u32 sb,
                                   u8 *scale, u8 *min) {
     /* sb ∈ [0, 7] — super-block index                                       */
     u32 d_byte  = sb & 3;         /* byte 0-3  in the first 4-byte group   */
@@ -579,7 +579,7 @@ static inline float dequant_iq2_xxs(const u8 *data, u64 i) {
     float d = f16_to_f32(*(const u16 *)blk);
     u32 q = (blk[2 + (o >> 2)] >> ((o & 3) << 1)) & 0x3;
     u32 sign_bit = (blk[2 + (o >> 3)] >> (o & 7)) & 1;
-    float v = iq2_xxs_grid[q | (sign_bit << 8)];
+    float v = iq2_xxs_grid[q | (sign_bit << 2)];
     return v * d;
 }
 
@@ -622,7 +622,7 @@ static inline float dequant_iq4_nl(const u8 *data, u64 i) {
     const u8 *blk = data + bi * 50;
     float d = f16_to_f32(*(const u16 *)blk);
     u32 q = (blk[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-    return d * iq4_nl_values[q | ((o & 0xF0) << 4)];
+    return d * iq4_nl_values[q | ((o & 0xF) << 4)];
 }
 
 static inline float dequant_iq1_m(const u8 *data, u64 i) {

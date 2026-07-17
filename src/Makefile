@@ -7,7 +7,8 @@ endif
 LDADDCFLAGS = -lm -flto
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       model/llama.o model/qwen2.o model/deepseek.o model/falcon.o
+       model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
+       cpu/quants_cpu.o
 
 all: server
 
@@ -53,7 +54,10 @@ model/deepseek.o: model/deepseek.c model/model.h def.h
 model/falcon.o: model/falcon.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/falcon.c -o $@
 
+cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_cpu.h def.h quants.h
+	$(CC) $(CFLAGS) -c cpu/quants_cpu.c -o $@
+
 .PHONY: clean all
 
 clean:
-	rm -f *.o model/*.o server
+	rm -f *.o model/*.o cpu/*.o server
