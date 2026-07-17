@@ -54,7 +54,7 @@ model/deepseek.o: model/deepseek.c model/model.h def.h
 model/falcon.o: model/falcon.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/falcon.c -o $@
 
-cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_cpu.h def.h quants.h
+cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_arm.c cpu/quants_x86.c cpu/quants_cpu.h def.h quants.h
 	$(CC) $(CFLAGS) -c cpu/quants_cpu.c -o $@
 
 .PHONY: clean all
