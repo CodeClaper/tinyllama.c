@@ -1,18 +1,18 @@
 CC = gcc
 ifdef DEBUG
-	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG
+	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
 else
-	CFLAGS = -O3 -march=native -ffast-math -flto
+	CFLAGS = -O3 -march=native -ffast-math -flto -pthread
 endif
-LDADDCFLAGS = -lm -flto
+LDADDCFLAGS = -lm -flto -pthread
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       tokenizer.o sampler.o \
+       tokenizer.o sampler.o tpool.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
 BENCH_OBJS = core.o quants.o mm.o slog.o utils.o \
-             tokenizer.o sampler.o \
+             tokenizer.o sampler.o tpool.o \
              model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
              cpu/quants_cpu.o
 
@@ -59,6 +59,9 @@ tokenizer.o: tokenizer.c tokenizer.h core.h def.h utils.h
 
 sampler.o: sampler.c sampler.h def.h
 	$(CC) $(CFLAGS) -c sampler.c -o $@
+
+tpool.o: tpool.c tpool.h slog.h
+	$(CC) $(CFLAGS) -c tpool.c -o $@
 
 model/llama.o: model/llama.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/llama.c -o $@
