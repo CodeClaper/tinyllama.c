@@ -7,6 +7,7 @@
  */
 #include <arm_neon.h>
 #include <string.h>
+#include <math.h>
 
 #include "../def.h"
 #include "../quants.h"
