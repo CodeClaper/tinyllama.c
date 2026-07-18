@@ -3,8 +3,7 @@ CFLAGS  = -O0 -g -Wall -pthread
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
-check: test_tpool
-	./test_tpool
+all: test_tpool
 
 test_tpool: c/test_tpool.c tpool.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -23,7 +22,8 @@ mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h
 
 .PHONY: all check clean
 
-all:
+check: test_tpool
+	./test_tpool
 
 clean:
 	rm -f test_tpool *.o
