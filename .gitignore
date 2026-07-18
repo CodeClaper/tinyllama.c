@@ -114,5 +114,6 @@ core
 compile_commands.json
 
 src/server
+src/bench
 test/c/llm
 test/py/*.npy
