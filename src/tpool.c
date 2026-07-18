@@ -62,7 +62,11 @@ tpool_t *tpool_create(int nthreads) {
     pthread_cond_init(&pool->notify, NULL);
 
     pool->threads = calloc(nthreads, sizeof(pthread_t));
-    if (!pool->threads) { slog(ERROR, "tpool_create: thread array calloc failed"); free(pool); return NULL; }
+    if (!pool->threads) { 
+        slog(ERROR, "tpool_create: thread array calloc failed"); 
+        free(pool); 
+        return NULL; 
+    }
 
     for (int i = 0; i < nthreads; i++) {
         if (pthread_create(&pool->threads[i], NULL, worker_loop, pool) != 0) {
