@@ -10,10 +10,20 @@ OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
-all: server
+BENCH_OBJS = core.o quants.o mm.o slog.o utils.o \
+             model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
+             cpu/quants_cpu.o
+
+all: server bench
 
 server: $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDADDCFLAGS)
+
+bench: bench.o $(BENCH_OBJS)
+	$(CC) $(CFLAGS) bench.o $(BENCH_OBJS) -o $@ $(LDADDCFLAGS)
+
+bench.o: bench.c
+	$(CC) $(CFLAGS) -c bench.c -o $@
 
 server.o: server.c def.h el.h http.h
 	$(CC) $(CFLAGS) -c server.c -o $@
@@ -60,4 +70,4 @@ cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_arm.c cpu/quants_x86.c cpu/quants_
 .PHONY: clean all
 
 clean:
-	rm -f *.o model/*.o cpu/*.o server
+	rm -f *.o model/*.o cpu/*.o server bench
