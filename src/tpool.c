@@ -93,8 +93,7 @@ void tpool_destroy(tpool_t *pool) {
     free(pool);
 }
 
-void tpool_parallel_for(tpool_t *pool, int start, int end,
-                         tpool_work work, void *arg) {
+void tpool_parallel_for(tpool_t *pool, int start, int end, tpool_work work, void *arg) {
     if (!pool || pool->nthreads < 1 || start >= end) return;
 
     /* Set work for workers. */
