@@ -567,7 +567,7 @@ static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   server [options]\n");
-    fprintf(file, "Example: server model.gguf -p 9987 \n");
+    fprintf(file, "Example: server -m model.gguf -p 9987 -t 0.9 -p 0.9\n");
     fprintf(file, "Options:\n");
     fprintf(file, "  -m | --model   <string>  The model file path to run\n");
     fprintf(file, "  -h | --host    <string>  The server host, defalt 127.0.0.1\n");
