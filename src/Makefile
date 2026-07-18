@@ -7,10 +7,12 @@ endif
 LDADDCFLAGS = -lm -flto
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
+       tokenizer.o sampler.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
 BENCH_OBJS = core.o quants.o mm.o slog.o utils.o \
+             tokenizer.o sampler.o \
              model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
              cpu/quants_cpu.o
 
@@ -51,6 +53,12 @@ el.o: el.c el.h
 
 anet.o: anet.c anet.h
 	$(CC) $(CFLAGS) -c anet.c -o $@
+
+tokenizer.o: tokenizer.c tokenizer.h core.h def.h utils.h
+	$(CC) $(CFLAGS) -c tokenizer.c -o $@
+
+sampler.o: sampler.c sampler.h def.h
+	$(CC) $(CFLAGS) -c sampler.c -o $@
 
 model/llama.o: model/llama.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/llama.c -o $@
