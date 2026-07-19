@@ -3,7 +3,7 @@ CFLAGS  = -O0 -g -Wall -pthread -Ic
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
-all: test_tpool
+all: test_tpool test_utils
 
 test_tpool: c/test_tpool.c tpool.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -20,10 +20,14 @@ utils.o: $(SRC_DIR)/utils.c $(SRC_DIR)/utils.h $(SRC_DIR)/def.h
 mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/mm.c -o $@
 
+test_utils: c/test_utils.c utils.o slog.o mm.o
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
+
 .PHONY: all check clean
 
-check: test_tpool
+check: test_tpool test_utils
 	./test_tpool
+	./test_utils
 
 clean:
 	rm -f test_tpool *.o
