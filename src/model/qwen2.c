@@ -572,8 +572,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
         /* ---- 2d. Batched attention output projection ---- */
         if (t_out) {
-            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim)) { goto fail;
-            }
+            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim)) { goto fail; }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
             memcpy(norm_buf, attn_buf, row_q * sizeof(float));
