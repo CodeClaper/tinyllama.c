@@ -116,6 +116,6 @@ compile_commands.json
 src/server
 src/bench
 test/c/llm
-test/test_tpool
+test/test_pthreads
 test/test_utils
 test/py/*.npy
