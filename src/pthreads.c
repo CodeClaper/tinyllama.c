@@ -1,15 +1,14 @@
 #include <stdlib.h>
-#include "tpool.h"
+#include "pthreads.h"
 #include "mm.h"
 #include "slog.h"
 #include "utils.h"
 
 static void *worker_loop(void *arg) {
-    tpool_t *pool = (tpool_t *)arg;
+    pthreads_t *pool = (pthreads_t *)arg;
     int tid;
 
     pthread_mutex_lock(&pool->lock);
-    /* Assign thread IDs in creation order. */
     for (tid = 0; tid < pool->nthreads; tid++)
         if (pthread_equal(pthread_self(), pool->threads[tid]))
             break;
@@ -23,14 +22,12 @@ static void *worker_loop(void *arg) {
             return NULL;
         }
 
-        /* Snapshot the work. */
-        tpool_work work = pool->work;
+        pthreads_work work = pool->work;
         void *arg_work  = pool->work_arg;
         int end         = pool->end;
 
         pthread_mutex_unlock(&pool->lock);
 
-        /* Process chunks atomically. */
         FOREVER {
             int i;
             pthread_mutex_lock(&pool->lock);
@@ -47,16 +44,15 @@ static void *worker_loop(void *arg) {
             work(arg_work, tid, i);
         }
 
-        /* Wait for next batch or shutdown. */
         pthread_mutex_lock(&pool->lock);
     }
 }
 
-tpool_t *tpool_create(int nthreads) {
+pthreads_t *pthreads_create(int nthreads) {
     if (nthreads < 1) nthreads = 1;
 
-    tpool_t *pool = scalloc(1, sizeof(tpool_t));
-    if (!pool) { slog(ERROR, "tpool_create: calloc failed"); return NULL; }
+    pthreads_t *pool = scalloc(1, sizeof(pthreads_t));
+    if (!pool) { slog(ERROR, "pthreads_create: calloc failed"); return NULL; }
 
     pool->nthreads = nthreads;
     pthread_mutex_init(&pool->lock, NULL);
@@ -64,16 +60,16 @@ tpool_t *tpool_create(int nthreads) {
 
     pool->threads = scalloc(nthreads, sizeof(pthread_t));
     if (!pool->threads) { 
-        slog(ERROR, "tpool_create: thread array calloc failed"); 
+        slog(ERROR, "pthreads_create: thread array calloc failed"); 
         free(pool); 
         return NULL; 
     }
 
     for (int i = 0; i < nthreads; i++) {
         if (pthread_create(&pool->threads[i], NULL, worker_loop, pool) != 0) {
-            slog(ERROR, "tpool_create: pthread_create failed for thread %d", i);
+            slog(ERROR, "pthreads_create: pthread_create failed for thread %d", i);
             pool->nthreads = i;
-            tpool_destroy(pool);
+            pthreads_destroy(pool);
             return NULL;
         }
     }
@@ -81,7 +77,7 @@ tpool_t *tpool_create(int nthreads) {
     return pool;
 }
 
-void tpool_destroy(tpool_t *pool) {
+void pthreads_destroy(pthreads_t *pool) {
     if (!pool) return;
 
     pthread_mutex_lock(&pool->lock);
@@ -98,10 +94,9 @@ void tpool_destroy(tpool_t *pool) {
     sfree(pool);
 }
 
-void tpool_parallel_for(tpool_t *pool, int start, int end, tpool_work work, void *arg) {
+void pthreads_parallel_for(pthreads_t *pool, int start, int end, pthreads_work work, void *arg) {
     if (!pool || pool->nthreads < 1 || start >= end) return;
 
-    /* Set work for workers. */
     pthread_mutex_lock(&pool->lock);
     pool->start      = start;
     pool->end        = end;
@@ -112,7 +107,6 @@ void tpool_parallel_for(tpool_t *pool, int start, int end, tpool_work work, void
     pthread_cond_broadcast(&pool->notify);
     pthread_mutex_unlock(&pool->lock);
 
-    /* Wait for all workers to finish. */
     pthread_mutex_lock(&pool->lock);
     while (pool->done_count < pool->nthreads)
         pthread_cond_wait(&pool->notify, &pool->lock);

@@ -307,7 +307,7 @@ struct Session {
     void       *arch_data;
 
     /* ---- Thread pool ---- */
-    struct tpool *tpool;
+    struct pthreads *pthreads;
 
     /* ---- Sampling ---- */
     float      temperature;

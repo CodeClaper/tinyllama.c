@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include "minunit.h"
-#include "../../src/tpool.h"
+#include "../../src/pthreads.h"
 #include "../../src/mm.h"
 
 typedef struct {
@@ -36,56 +36,56 @@ static void parfor_free(parfor_state *s) {
 }
 
 MU_TEST(test_create_destroy) {
-    tpool_t *pool = tpool_create(4);
+    pthreads_t *pool = pthreads_create(4);
     mu_check(pool != NULL);
     mu_assert_int_eq(4, pool->nthreads);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_create_one) {
-    tpool_t *pool = tpool_create(1);
+    pthreads_t *pool = pthreads_create(1);
     mu_check(pool != NULL);
     mu_assert_int_eq(1, pool->nthreads);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_create_zero) {
-    tpool_t *pool = tpool_create(0);
+    pthreads_t *pool = pthreads_create(0);
     mu_check(pool != NULL);
     mu_assert_int_eq(1, pool->nthreads);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_empty_range) {
-    tpool_t *pool = tpool_create(2);
+    pthreads_t *pool = pthreads_create(2);
     parfor_state *s = parfor_new(100);
-    tpool_parallel_for(pool, 5, 5, parfor_record, s);
+    pthreads_parallel_for(pool, 5, 5, parfor_record, s);
     for (int i = 0; i < 100; i++)
         mu_assert_int_eq(0, s->counts[i]);
     parfor_free(s);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_each_iteration_exactly_once) {
     const int N = 9973;
-    tpool_t *pool = tpool_create(4);
+    pthreads_t *pool = pthreads_create(4);
     parfor_state *s = parfor_new(N);
 
-    tpool_parallel_for(pool, 0, N, parfor_record, s);
+    pthreads_parallel_for(pool, 0, N, parfor_record, s);
 
     for (int i = 0; i < N; i++)
         mu_assert_int_eq(1, s->counts[i]);
 
     parfor_free(s);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_single_thread) {
     const int N = 1000;
-    tpool_t *pool = tpool_create(1);
+    pthreads_t *pool = pthreads_create(1);
     parfor_state *s = parfor_new(N);
 
-    tpool_parallel_for(pool, 0, N, parfor_record, s);
+    pthreads_parallel_for(pool, 0, N, parfor_record, s);
 
     for (int i = 0; i < N; i++) {
         mu_assert_int_eq(1, s->counts[i]);
@@ -94,16 +94,16 @@ MU_TEST(test_single_thread) {
     mu_assert_int_eq(0, s->max_thread_id);
 
     parfor_free(s);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_all_threads_participate) {
     const int N = 5000;
     const int T = 4;
-    tpool_t *pool = tpool_create(T);
+    pthreads_t *pool = pthreads_create(T);
     parfor_state *s = parfor_new(N);
 
-    tpool_parallel_for(pool, 0, N, parfor_record, s);
+    pthreads_parallel_for(pool, 0, N, parfor_record, s);
 
     for (int tid = 0; tid < T; tid++) {
         int found = 0;
@@ -113,16 +113,16 @@ MU_TEST(test_all_threads_participate) {
     }
 
     parfor_free(s);
-    tpool_destroy(pool);
+    pthreads_destroy(pool);
 }
 
 MU_TEST(test_destroy_null) {
-    tpool_destroy(NULL);
+    pthreads_destroy(NULL);
 }
 
 int main(void) {
-    printf("tpool tests\n");
-    printf("-----------\n");
+    printf("pthreads tests\n");
+    printf("--------------\n");
 
     MU_RUN_TEST(test_create_destroy);
     MU_RUN_TEST(test_create_one);

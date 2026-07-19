@@ -14,7 +14,7 @@
 #include <sys/file.h>
 #include "core.h"
 #include "cpu/quants_cpu.h"
-#include "tpool.h"
+#include "pthreads.h"
 #include "mm.h"
 #include "slog.h"
 #include <math.h>
@@ -1413,7 +1413,7 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     s->en          = en;
     s->ctx_size    = ctx_size;
     s->temperature = DEFAULT_TEMPERATURE;
-    s->tpool       = tpool_create(nthreads);
+    s->pthreads       = pthreads_create(nthreads);
     s->top_p       = DEFAULT_TOP_P ;
     s->top_k       = 1;
     s->max_tokens  = 0;
@@ -1451,7 +1451,7 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
 
 void session_free(Session *s) {
     if (!s) return;
-    tpool_destroy(s->tpool);
+    pthreads_destroy(s->pthreads);
     if (s->ops.free) s->ops.free(s);
     sfree(s);
 }
