@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -O0 -g -Wall -pthread
+CFLAGS  = -O0 -g -Wall -pthread -Ic
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
