@@ -120,7 +120,7 @@ static void (*minunit_teardown)(void) = NULL;
 	minunit_run++;\
 	if (minunit_status) {\
 		minunit_fail++;\
-		printf("F");\
+		printf("✗");\
 		printf("\n%s\n", minunit_last_message);\
 	}\
 	(void)fflush(stdout);\
@@ -148,7 +148,7 @@ static void (*minunit_teardown)(void) = NULL;
 		minunit_status = 1;\
 		return;\
 	} else {\
-		printf(".");\
+		printf("✔");\
 	}\
 )
 
@@ -166,7 +166,7 @@ static void (*minunit_teardown)(void) = NULL;
 		minunit_status = 1;\
 		return;\
 	} else {\
-		printf(".");\
+		printf("✔");\
 	}\
 )
 
@@ -181,7 +181,7 @@ static void (*minunit_teardown)(void) = NULL;
 		minunit_status = 1;\
 		return;\
 	} else {\
-		printf(".");\
+		printf("✔");\
 	}\
 )
 
@@ -197,7 +197,7 @@ static void (*minunit_teardown)(void) = NULL;
 		minunit_status = 1;\
 		return;\
 	} else {\
-		printf(".");\
+		printf("✔");\
 	}\
 )
 
@@ -216,7 +216,7 @@ static void (*minunit_teardown)(void) = NULL;
 		minunit_status = 1;\
 		return;\
 	} else {\
-		printf(".");\
+		printf("✔");\
 	}\
 )
 
