@@ -2,9 +2,9 @@ CC = gcc
 ifdef DEBUG
 	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
 else
-	CFLAGS = -O3 -march=native -ffast-math -flto -pthread
+	CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
 endif
-LDADDCFLAGS = -lm -flto -pthread
+LDADDCFLAGS = -lm -flto=auto -pthread
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        tokenizer.o sampler.o pthreads.o \
