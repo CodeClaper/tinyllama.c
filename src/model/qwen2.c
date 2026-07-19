@@ -589,21 +589,16 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         /* ---- 2f. Pre-FFN norm → norm_buf ---- */
         if (t_post) {
             for (u32 p = 0; p < n_tokens; p++)
-                rms_norm(norm_buf + (u64)p * n_embd,
-                         xs + (u64)p * n_embd, t_post, base, n_embd, eps);
+                rms_norm(norm_buf + (u64)p * n_embd, xs + (u64)p * n_embd, t_post, base, n_embd, eps);
         }
 
         /* ---- 2g. Batched FFN (SwiGLU) ---- */
         {
             /* Gate projection: norm_buf → gate_buf */
-            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf,
-                             n_tokens, fh, n_embd,
-                             t_gate->dim[0] == n_embd)) goto fail;
+            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf, n_tokens, fh, n_embd, t_gate->dim[0] == n_embd)) goto fail;
 
             /* Up projection: norm_buf → up_buf */
-            if (!mat_mat_mul(up_buf, t_up, base, norm_buf,
-                             n_tokens, fh, n_embd,
-                             t_up->dim[0] == n_embd)) goto fail;
+            if (!mat_mat_mul(up_buf, t_up, base, norm_buf, n_tokens, fh, n_embd, t_up->dim[0] == n_embd)) goto fail;
 
             /* Element-wise: gate = silu(gate) * up  (per token, cheap) */
             for (u32 p = 0; p < n_tokens; p++) {
@@ -615,9 +610,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             }
 
             /* Down projection: gate_buf → norm_buf (reuse norm_buf for output) */
-            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf,
-                             n_tokens, n_embd, fh,
-                             t_down->dim[0] == fh)) goto fail;
+            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf, n_tokens, n_embd, fh, t_down->dim[0] == fh)) goto fail;
         }
 
         /* ---- 2h. Residual ---- */
@@ -648,13 +641,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
-        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd,
-                         t_out->dim[0] == n_embd)) goto fail;
-
-        slog(INFO, "logits (first 10): ");
-        for (u32 i = 0; i < 10 && i < c->n_vocab; i++)
-            printf("%.4f ", dst[i]);
-        printf("\n");
+        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd)) goto fail;
     }
 
     /* ---- 5. Update session state ---- */
