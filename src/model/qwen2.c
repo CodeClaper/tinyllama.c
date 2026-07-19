@@ -490,20 +490,13 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 fused_total = q_dim + 2 * kv_dim;
 
                 /* Q → qbuf (stride q_dim, ready for attention + RoPE in-place). */
-                if (!mat_mat_mul(qbuf, t_q, base, norm_buf,
-                                 n_tokens, q_dim, n_embd,
-                                 (q_dim != n_embd) && t_q->dim[0] == n_embd))
-                    goto fail;
+                if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd)) goto fail;
 
                 /* K → after Q in qkv_buf, V → after K. */
                 float *kbuf = qkv_buf;
                 float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
-                if (!mat_mat_mul(kbuf, t_k, base, norm_buf,
-                                 n_tokens, kv_dim, n_embd,
-                                 t_k->dim[0] == n_embd)) goto fail;
-                if (!mat_mat_mul(vbuf, t_v, base, norm_buf,
-                                 n_tokens, kv_dim, n_embd,
-                                 t_v->dim[0] == n_embd)) goto fail;
+                if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd)) goto fail;
+                if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd)) goto fail;
 
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
