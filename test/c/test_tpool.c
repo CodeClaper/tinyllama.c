@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include "minunit.h"
 #include "../../src/tpool.h"
 #include "../../src/mm.h"
@@ -92,7 +91,7 @@ MU_TEST(test_single_thread) {
         mu_assert_int_eq(1, s->counts[i]);
         mu_check(s->thread_ids[i] >= 0);
     }
-    mu_assert_int_eq(1, s->max_thread_id);
+    mu_assert_int_eq(0, s->max_thread_id);
 
     parfor_free(s);
     tpool_destroy(pool);
@@ -106,7 +105,7 @@ MU_TEST(test_all_threads_participate) {
 
     tpool_parallel_for(pool, 0, N, parfor_record, s);
 
-    for (int tid = 0; tid <= T; tid++) {
+    for (int tid = 0; tid < T; tid++) {
         int found = 0;
         for (int i = 0; i < N; i++)
             if (s->thread_ids[i] == tid) { found = 1; break; }

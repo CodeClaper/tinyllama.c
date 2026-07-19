@@ -112,22 +112,6 @@ void tpool_parallel_for(tpool_t *pool, int start, int end, tpool_work work, void
     pthread_cond_broadcast(&pool->notify);
     pthread_mutex_unlock(&pool->lock);
 
-    /* Main thread also works. */
-    FOREVER {
-        int i;
-        pthread_mutex_lock(&pool->lock);
-        i = pool->current;
-        if (i >= end) {
-            pool->done_count++;
-            pthread_mutex_unlock(&pool->lock);
-            break;
-        }
-        pool->current = i + 1;
-        pthread_mutex_unlock(&pool->lock);
-
-        work(arg, pool->nthreads, i);  /* main thread id = nthreads */
-    }
-
     /* Wait for all workers to finish. */
     pthread_mutex_lock(&pool->lock);
     while (pool->done_count < pool->nthreads)
