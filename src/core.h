@@ -20,7 +20,7 @@ Model *model_load(const char *path);
 Engine *engine_open(EngineOptons *opts);
 void engine_close(Engine *en);
 void engine_summary(Engine *en);
-Session *session_create(Engine *en, u32 ctx_size);
+Session *session_create(Engine *en, u32 ctx_size, int nthreads);
 void session_free(Session *s);
 i32 vocab_lookup(Vocab *v, const char *text);
 bool vocab_lookup_len(Vocab *v, const char *text, int len, i32 *id);

@@ -363,7 +363,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    Session *session = session_create(engine, (u32)so.ctx_size);
+    Session *session = session_create(engine, (u32)so.ctx_size, so.nthread);
     if (!session) {
         engine_close(engine);
         slog(ERROR, "Failed to create session.");

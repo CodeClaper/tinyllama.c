@@ -306,6 +306,9 @@ struct Session {
     /* ---- Arch-specific workspace ---- */
     void       *arch_data;
 
+    /* ---- Thread pool ---- */
+    struct tpool *tpool;
+
     /* ---- Sampling ---- */
     float      temperature;
     u32        top_k;

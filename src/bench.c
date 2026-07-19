@@ -121,7 +121,7 @@ int main(int argc, char *argv[]) {
     slog(INFO, "Loaded model (%s)", engine->model->arch_name);
 
     /* Create session. */
-    Session *session = session_create(engine, (u32)opts.ctx_size);
+    Session *session = session_create(engine, (u32)opts.ctx_size, opts.nthread);
     if (!session) slog(ERROR, "Failed to create session");
     session->temperature = opts.temperature;
     session->top_p = opts.top_p;
