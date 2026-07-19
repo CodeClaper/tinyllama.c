@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include "minunit.h"
 #include "../../src/tpool.h"
+#include "../../src/mm.h"
 
 typedef struct {
     int    n;
@@ -21,19 +21,19 @@ static void parfor_record(void *arg, int tid, int i) {
 }
 
 static parfor_state *parfor_new(int n) {
-    parfor_state *s = calloc(1, sizeof(parfor_state));
+    parfor_state *s = scalloc(1, sizeof(parfor_state));
     s->n            = n;
-    s->counts       = calloc(n, sizeof(int));
-    s->thread_ids   = calloc(n, sizeof(int));
+    s->counts       = scalloc(n, sizeof(int));
+    s->thread_ids   = scalloc(n, sizeof(int));
     for (int i = 0; i < n; i++) s->thread_ids[i] = -1;
     s->max_thread_id = -1;
     return s;
 }
 
 static void parfor_free(parfor_state *s) {
-    free(s->counts);
-    free(s->thread_ids);
-    free(s);
+    sfree(s->counts);
+    sfree(s->thread_ids);
+    sfree(s);
 }
 
 MU_TEST(test_create_destroy) {
