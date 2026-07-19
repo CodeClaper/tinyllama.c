@@ -22,6 +22,7 @@ typedef struct {
     const char *input;
     const char *output;
     int repeat;
+    int nthread;
 } BenchOptions;
 
 /* Usage. */
@@ -32,6 +33,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -m | --model   <string>  The model file path to run\n");
     fprintf(file, "  -c | --ctx     <int>     The context size, default 4096\n");
     fprintf(file, "  -n | --tokens  <int>     Number of tokens to generate, default 128\n");
+    fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
     fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.0 (greedy)\n");
     fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 1.0\n");
     fprintf(file, "  -i | --input   <string>  User input\n");
@@ -57,6 +59,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         .input = NULL,
         .output = NULL,
         .repeat = 1,
+        .nthread = 1,
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -64,6 +67,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) bo.engine.model_path = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) bo.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) bo.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) bo.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) bo.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) bo.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--input")) bo.input = parse_arg(argc, argv, &i, arg);
@@ -79,6 +83,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
     if (!bo.input)
         slog(ERROR, "Input text is required (-i / --input)");
     if (bo.repeat < 1) bo.repeat = 1;
+    if (bo.nthread < 1) bo.nthread = 1;
     if (bo.n_tokens < 1) bo.n_tokens = 1;
     return bo;
 }
