@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include "tpool.h"
+#include "mm.h"
 #include "slog.h"
 #include "utils.h"
 
@@ -54,14 +55,14 @@ static void *worker_loop(void *arg) {
 tpool_t *tpool_create(int nthreads) {
     if (nthreads < 1) nthreads = 1;
 
-    tpool_t *pool = calloc(1, sizeof(tpool_t));
+    tpool_t *pool = scalloc(1, sizeof(tpool_t));
     if (!pool) { slog(ERROR, "tpool_create: calloc failed"); return NULL; }
 
     pool->nthreads = nthreads;
     pthread_mutex_init(&pool->lock, NULL);
     pthread_cond_init(&pool->notify, NULL);
 
-    pool->threads = calloc(nthreads, sizeof(pthread_t));
+    pool->threads = scalloc(nthreads, sizeof(pthread_t));
     if (!pool->threads) { 
         slog(ERROR, "tpool_create: thread array calloc failed"); 
         free(pool); 
@@ -91,10 +92,10 @@ void tpool_destroy(tpool_t *pool) {
     for (int i = 0; i < pool->nthreads; i++)
         pthread_join(pool->threads[i], NULL);
 
-    free(pool->threads);
+    sfree(pool->threads);
     pthread_mutex_destroy(&pool->lock);
     pthread_cond_destroy(&pool->notify);
-    free(pool);
+    sfree(pool);
 }
 
 void tpool_parallel_for(tpool_t *pool, int start, int end, tpool_work work, void *arg) {
