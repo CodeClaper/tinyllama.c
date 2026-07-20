@@ -85,6 +85,14 @@ static BenchOptions parse_options(int argc, char *argv[]) {
     if (bo.repeat < 1) bo.repeat = 1;
     if (bo.nthread < 1) bo.nthread = 1;
     if (bo.n_tokens < 1) bo.n_tokens = 1;
+    if (bo.temperature < 0.0f) {
+        fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", bo.temperature);
+        usage(stderr, 2);
+    }
+    if (bo.top_p <= 0.0f || bo.top_p > 1.0f) {
+        fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", bo.top_p);
+        usage(stderr, 2);
+    }
     return bo;
 }
 

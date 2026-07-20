@@ -310,6 +310,14 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         }
     }
     if (so.nthread < 1) so.nthread = 1;
+    if (so.temperature < 0.0f) {
+        fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", so.temperature);
+        usage(stderr, 2);
+    }
+    if (so.top_p <= 0.0f || so.top_p > 1.0f) {
+        fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", so.top_p);
+        usage(stderr, 2);
+    }
     return so;
 }
 
