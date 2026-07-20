@@ -1,8 +1,12 @@
 CC = gcc
+ARCH ?= $(shell uname -m)
 ifdef DEBUG
 	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
 else
 	CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
+endif
+ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
+	CFLAGS += -msse4.1
 endif
 LDADDCFLAGS = -lm -flto=auto -pthread
 
