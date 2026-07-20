@@ -246,7 +246,7 @@ int main(int argc, char *argv[]) {
     printf("Repeats:        %d\n", opts.repeat);
     printf("Temperature:    %.2f\n", opts.temperature);
     printf("Top-p:          %.2f\n", opts.top_p);
-    printf("──────────────────────────────────────────────────────────────────────────\n");
+    printf("────────────────────────────────────────────────────────────────────────────────────────────────\n");
     for (int r = 0; r < opts.repeat; r++) {
         double prefill_tok_s = (double)n_prompt / (prefill_times[r] / 1000.0);
         double gen_tok_s     = (double)gen_counts[r] / (gen_times[r] / 1000.0);
@@ -255,7 +255,7 @@ int main(int argc, char *argv[]) {
                prefill_times[r], prefill_tok_s,
                gen_times[r], gen_counts[r], gen_tok_s);
     }
-    printf("──────────────────────────────────────────────────────────────────────────\n");
+    printf("────────────────────────────────────────────────────────────────────────────────────────────────\n");
 
     double avg_prefill = sum_prefill / opts.repeat;
     double avg_gen     = sum_gen / opts.repeat;
@@ -267,7 +267,7 @@ int main(int argc, char *argv[]) {
     printf("Min/Max Generate: %.1f / %.1f ms\n", min_gen, max_gen);
     if (peak_mem_kb > 0)
         printf("Peak Memory:    %.0f MB\n", (double)peak_mem_kb / 1024.0);
-    printf("══════════════════════════════════════════════════════════════════════════\n");
+    printf("════════════════════════════════════════════════════════════════════════════════════════════════\n");
 
     /* Write output file. */
     if (opts.output && output_len > 0) {
