@@ -25,6 +25,21 @@ typedef struct {
 
 /* ---- Arch ops --------------------------------------------------- */
 
+/* Batch-dequantise a 1-D bias tensor and add it element-wise to dst[0..n-1].
+ * Uses a stack buffer when n <= BIAS_BUF_STACK; falls back to heap for
+ * oversized tensors (unlikely for bias).  This trades memory for speed:
+ * tensor_get_f32_batch uses SIMD block dequant, and the addition loop
+ * is trivially auto-vectorisable with contiguous f32 data. */
+#define BIAS_BUF_STACK 4096
+static inline void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
+    float  stack_buf[BIAS_BUF_STACK];
+    float *buf = n <= BIAS_BUF_STACK ? stack_buf : smalloc((u64)n * sizeof(float));
+    tensor_get_f32_batch(tb, base, 0, n, buf);
+    for (u32 i = 0; i < n; i++)
+        dst[i] += buf[i];
+    if (buf != stack_buf) sfree(buf);
+}
+
 static bool qwen2_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
@@ -172,18 +187,15 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
             TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
             if (tb_q) {
                 u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                for (u32 i = 0; i < n; i++)
-                    ws->q[i] += tensor_get_f32(tb_q, base, i);
+                bias_add(ws->q, tb_q, base, n);
             }
             if (tb_k) {
                 u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                for (u32 i = 0; i < n; i++)
-                    ws->k[i] += tensor_get_f32(tb_k, base, i);
+                bias_add(ws->k, tb_k, base, n);
             }
             if (tb_v) {
                 u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                for (u32 i = 0; i < n; i++)
-                    ws->v[i] += tensor_get_f32(tb_v, base, i);
+                bias_add(ws->v, tb_v, base, n);
             }
         }
 
@@ -453,19 +465,15 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
                     if (tb_q) {
                         u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                        float *qp = qbuf + (u64)p * q_dim;
-                        for (u32 i = 0; i < n; i++)
-                            qp[i] += tensor_get_f32(tb_q, base, i);
+                        bias_add(qbuf + (u64)p * q_dim, tb_q, base, n);
                     }
                     if (tb_k) {
                         u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                        for (u32 i = 0; i < n; i++)
-                            ws->k[i] += tensor_get_f32(tb_k, base, i);
+                        bias_add(ws->k, tb_k, base, n);
                     }
                     if (tb_v) {
                         u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                        for (u32 i = 0; i < n; i++)
-                            ws->v[i] += tensor_get_f32(tb_v, base, i);
+                        bias_add(ws->v, tb_v, base, n);
                     }
 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
@@ -503,19 +511,15 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
                     if (tb_k) {
                         u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                        for (u32 i = 0; i < n; i++)
-                            ws->k[i] += tensor_get_f32(tb_k, base, i);
+                        bias_add(ws->k, tb_k, base, n);
                     }
                     if (tb_v) {
                         u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                        for (u32 i = 0; i < n; i++)
-                            ws->v[i] += tensor_get_f32(tb_v, base, i);
+                        bias_add(ws->v, tb_v, base, n);
                     }
                     if (tb_q) {
                         u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                        float *qp = qbuf + (u64)p * q_dim;
-                        for (u32 i = 0; i < n; i++)
-                            qp[i] += tensor_get_f32(tb_q, base, i);
+                        bias_add(qbuf + (u64)p * q_dim, tb_q, base, n);
                     }
 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
