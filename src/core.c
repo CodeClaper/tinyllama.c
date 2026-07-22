@@ -304,17 +304,16 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
 
 /* RoPE: apply rotary position embedding in-place.
  * buf is [n_heads × head_dim], each head rotated independently. */
-void rope(float *buf, u32 n_heads, u32 head_dim,
-                 u32 pos, float theta_base) {
+void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base) {
     for (u32 h = 0; h < n_heads; h++) {
         float *bh = buf + h * head_dim;
         for (u32 d = 0; d + 1 < head_dim; d += 2) {
             float theta = 1.0f / powf(theta_base, (float)d / (float)head_dim);
-            float c = cosf((float)pos * theta);
-            float s = sinf((float)pos * theta);
-            float a = bh[d], b = bh[d + 1];
-            bh[d]     = a * c - b * s;
-            bh[d + 1] = a * s + b * c;
+            float c     = cosf((float)pos * theta);
+            float s     = sinf((float)pos * theta);
+            float a     = bh[d], b = bh[d + 1];
+            bh[d]       = a * c - b * s;
+            bh[d + 1]   = a * s + b * c;
         }
     }
 }
