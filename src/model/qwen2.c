@@ -276,8 +276,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         /* ---- 2h. Pre-FFN norm ---- */
         {
             TensorInfo *ti = lw->tensors[TENSOR_POST_ATTN_NORM];
-            if (ti)
-                rms_norm(ws->xb, ws->x, ti, base, n_embd, eps);
+            if (ti) rms_norm(ws->xb, ws->x, ti, base, n_embd, eps);
         }
 
         /* ---- 2i. SwiGLU FFN ---- */

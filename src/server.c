@@ -183,7 +183,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
-        slog(INFO, "Gen next token: %d for (%d|%d)", next_token, i, max_tokens);
+        fputc('.', stdout); fflush(stdout);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
@@ -199,6 +199,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         next_token = sample_token(s->logits, s->cfg.n_vocab,
                                    s->temperature, s->top_p);
     }
+    fputc('\n', stdout);
     resp_body[resp_used] = '\0';
 
     /* 6. Build OpenAI-compatible JSON response. */
