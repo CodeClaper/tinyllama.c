@@ -448,6 +448,30 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             u32 fused_total;
             bool qkv_trans;
 
+            /* Dequantise bias tensors once outside the per-token loop.
+             * Biases are identical across all tokens — dequantising them
+             * once and reusing the f32 buffer saves (n_tokens-1) redundant
+             * dequant calls per bias per layer. */
+            u32 n_q = 0, n_k = 0, n_v = 0;
+            float  q_bias_stack[BIAS_BUF_STACK], k_bias_stack[BIAS_BUF_STACK], v_bias_stack[BIAS_BUF_STACK];
+            float *q_bias = NULL, *k_bias = NULL, *v_bias = NULL;
+
+            if (tb_q) {
+                n_q = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
+                q_bias = n_q <= BIAS_BUF_STACK ? q_bias_stack : smalloc((u64)n_q * sizeof(float));
+                tensor_get_f32_batch(tb_q, base, 0, n_q, q_bias);
+            }
+            if (tb_k) {
+                n_k = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
+                k_bias = n_k <= BIAS_BUF_STACK ? k_bias_stack : smalloc((u64)n_k * sizeof(float));
+                tensor_get_f32_batch(tb_k, base, 0, n_k, k_bias);
+            }
+            if (tb_v) {
+                n_v = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
+                v_bias = n_v <= BIAS_BUF_STACK ? v_bias_stack : smalloc((u64)n_v * sizeof(float));
+                tensor_get_f32_batch(tb_v, base, 0, n_v, v_bias);
+            }
+
             if (t_qkv) {
                 /* Fused QKV: one mat_mat_mul, then split per token. */
                 qkv_trans   = (t_qkv->dim[0] == n_embd);
@@ -463,17 +487,16 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     memcpy(ws->k, row + q_dim, kv_dim * sizeof(float));
                     memcpy(ws->v, row + q_dim + kv_dim, kv_dim * sizeof(float));
 
+                    /* Apply pre-dequantised bias (f32 addition, trivially vectorisable). */
                     if (tb_q) {
-                        u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                        bias_add(qbuf + (u64)p * q_dim, tb_q, base, n);
+                        float *qp = qbuf + (u64)p * q_dim;
+                        for (u32 i = 0; i < n_q; i++) qp[i] += q_bias[i];
                     }
                     if (tb_k) {
-                        u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                        bias_add(ws->k, tb_k, base, n);
+                        for (u32 i = 0; i < n_k; i++) ws->k[i] += k_bias[i];
                     }
                     if (tb_v) {
-                        u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                        bias_add(ws->v, tb_v, base, n);
+                        for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
                     }
 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
@@ -509,17 +532,16 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     memcpy(ws->k, kbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
                     memcpy(ws->v, vbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
 
+                    /* Apply pre-dequantised bias (f32 addition). */
                     if (tb_k) {
-                        u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                        bias_add(ws->k, tb_k, base, n);
+                        for (u32 i = 0; i < n_k; i++) ws->k[i] += k_bias[i];
                     }
                     if (tb_v) {
-                        u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                        bias_add(ws->v, tb_v, base, n);
+                        for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
                     }
                     if (tb_q) {
-                        u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                        bias_add(qbuf + (u64)p * q_dim, tb_q, base, n);
+                        float *qp = qbuf + (u64)p * q_dim;
+                        for (u32 i = 0; i < n_q; i++) qp[i] += q_bias[i];
                     }
 
                     rope(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
@@ -540,6 +562,11 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 goto fail;
             }
             akc->n = cache_start + n_tokens;
+
+            /* Release heap-allocated bias buffers. */
+            if (q_bias != q_bias_stack) sfree(q_bias);
+            if (k_bias != k_bias_stack) sfree(k_bias);
+            if (v_bias != v_bias_stack) sfree(v_bias);
         }
 
         /* ---- 2c. Batched causal attention ---- */
