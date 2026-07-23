@@ -1,5 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include "def.h"
+#include "utils.h"
+#include "mm.h"
+#include "core.h"
+#include "tokenizer.h"
+#include "sampler.h"
+
+typedef struct {
+    EngineOptons engine;
+    int ctx_size;
+    u32 n_tokens;
+    float temperature;
+    float top_p;
+    int nthread;
+    const char *system;
+} ChatOptions;
 
 /* Usage. */
 static void usage(FILE *file, int exit_code) {
@@ -16,6 +34,196 @@ static void usage(FILE *file, int exit_code) {
     exit(exit_code);
 }
 
+static void fatal(char *format, ...) {
+    size_t len;
+    va_list ap;
+
+    /* Calculate the len. */
+    va_start(ap, format);
+    len = vsnprintf(NULL, 0, format, ap);
+    if (len <= 0) {
+        va_end(ap);
+        return;
+    }
+
+    len = len + 1;
+    char message[len];
+    memset(message, 0, len);
+
+    va_start(ap, format);
+    vsnprintf(message, len, format, ap);
+    va_end(ap);
+
+    fprintf(stderr, "%s\n", message);
+    exit(3);
+}
+
+/* Parse current arg value. */
+static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
+    if (*i + 1 >= argc)
+        fatal("Missing value for option [%s]", opt);
+    return argv[++(*i)];
+}
+
+
+/* Parse options. */
+static ChatOptions parse_options(int argc, char *argv[]) {
+    ChatOptions co = {
+        .ctx_size = 4096,
+        .n_tokens = 128,
+        .temperature = 0.0f,
+        .top_p = 1.0f,
+        .nthread = 1,
+        .system = NULL
+    };
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) usage(stdout, EXIT_SUCCESS);
+        else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) co.engine.model_path = parse_arg(argc, argv, &i, arg);
+        else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) co.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) co.temperature = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-s") || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
+        else {
+            fprintf(stderr, "Unknown option: %s.\n", arg);
+            usage(stderr, 2);
+        }
+    }
+    if (co.nthread < 1) co.nthread = 1;
+    if (co.n_tokens < 1) co.n_tokens = 1;
+    if (!co.engine.model_path) {
+        fprintf(stderr, "Model path is required (-m / --model)");
+        usage(stderr, 2);
+    }
+    if (co.temperature < 0.0f) {
+        fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", co.temperature);
+        usage(stderr, 2);
+    }
+    if (co.top_p <= 0.0f || co.top_p > 1.0f) {
+        fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", co.top_p);
+        usage(stderr, 2);
+    }
+    return co;
+}
+
+/* Decode a token to UTF-8 text into buf. Returns bytes written. */
+static int decode_token(Session *s, Vocab *v, u32 id, char *buf, int max_len) {
+    if (id >= v->n_vocab) return 0;
+    Key *tk = &v->token[id];
+    if (!tk->content) return 0;
+    if (s->ops.decode)
+        return s->ops.decode((const u8 *)tk->content, (int)tk->len, buf, max_len);
+    return 0;
+}
+
+/* Strip trailing whitespace (including \n, \r) from a string in-place. */
+static void strip_trailing(char *s) {
+    int len = (int)strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' ||
+                       s[len - 1] == ' '  || s[len - 1] == '\t'))
+        s[--len] = '\0';
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) usage(stderr, 4);
+    ChatOptions co = parse_options(argc, argv);
+
+    /* Load model. */
+    Engine *engine = engine_open(&co.engine);
+    if (!engine) fatal("Failed to load model");
+
+    /* Create session. */
+    Session *session = session_create(engine, (u32)co.ctx_size, co.nthread);
+    if (!session) fatal("Failed to create session");
+    session->temperature = co.temperature;
+    session->top_p = co.top_p;
+
+    Vocab *v = engine->vocab;
+    u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
+    bool first_turn = true;
+
+    /* Banner. */
+    printf("Chat with %s. Type /quit to exit, /clear to reset.\n\n",
+           engine->model->arch_name);
+
+    char input[4096];
+    u32 prompt_tokens[4096];
+    int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
+
+    FOREVER {
+        fputs("You > ", stdout);
+        fflush(stdout);
+
+        if (!fgets(input, (int)sizeof(input), stdin)) break; /* EOF */
+        strip_trailing(input);
+
+        /* Commands. */
+        if (!strcmp(input, "/quit") || !strcmp(input, "/exit")) break;
+        if (!strcmp(input, "/clear")) {
+            session->ops.reset(session);
+            first_turn = true;
+            printf("[Conversation cleared]\n");
+            continue;
+        }
+        if (input[0] == '\0') continue; /* skip empty lines */
+
+        /* Build prompt tokens. */
+        int n_prompt;
+        if (first_turn) {
+            n_prompt = build_chat_tokens(v, input, co.system,
+                                         prompt_tokens, max_pt);
+            if (n_prompt == 0) fatal("No valid tokens in input");
+            first_turn = false;
+        } else {
+            n_prompt = build_continuation_tokens(v, input,
+                                                  prompt_tokens, max_pt);
+            if (n_prompt == 0) fatal("No valid tokens in input");
+        }
+
+        /* Forward pass. */
+        if (!session->ops.forward(session, prompt_tokens, n_prompt,
+                                  session->logits))
+            fatal("Forward pass failed");
+
+        /* Sample first token. */
+        u32 next_token;
+        if (co.temperature > 0.0f)
+            next_token = sample_token(session->logits, session->cfg.n_vocab,
+                                      co.temperature, co.top_p);
+        else
+            next_token = sample_greedy(session->logits, session->cfg.n_vocab);
+
+        /* Generate. */
+        fputs("Assistant > ", stdout);
+        fflush(stdout);
+        for (u32 i = 0; i < max_tokens; i++) {
+            if (next_token == (u32)v->eos_id) break;
+            char dec[64];
+            int dlen = decode_token(session, v, next_token, dec,
+                                    (int)sizeof(dec) - 1);
+            if (dlen > 0) {
+                dec[dlen] = '\0';
+                fputs(dec, stdout);
+                fflush(stdout);
+            }
+            if (!session->ops.forward(session, &next_token, 1,
+                                      session->logits))
+                break;
+            if (co.temperature > 0.0f)
+                next_token = sample_token(session->logits,
+                                          session->cfg.n_vocab,
+                                          co.temperature, co.top_p);
+            else
+                next_token = sample_greedy(session->logits,
+                                           session->cfg.n_vocab);
+        }
+        fputs("\n\n", stdout);
+    }
+
+    printf("Bye.\n");
+    session_free(session);
+    engine_close(engine);
+    return 0;
 }

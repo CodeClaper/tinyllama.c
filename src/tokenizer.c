@@ -216,3 +216,48 @@ int build_chat_tokens(Vocab *v, const char *user_msg, const char *sys_msg,
     #undef ADD_TEXT
     return n;
 }
+
+/* Build continuation tokens for multi-turn chat.
+ * Appends: <|im_end|>\n<|im_start|>user\n<user_msg><|im_end|>\n<|im_start|>assistant\n
+ * This closes the previous assistant block and opens a new user→assistant round. */
+int build_continuation_tokens(Vocab *v, const char *user_msg,
+                               u32 *tokens, int max_tokens) {
+    int n = 0;
+
+    i32 im_start_id = v->im_start_id;
+    i32 im_end_id   = v->im_end_id;
+    if (im_start_id == (i32)VOCAB_ID_NONE) {
+        im_start_id = vocab_lookup(v, "<|im_start|>");
+        if (im_start_id == (i32)VOCAB_ID_NONE) return 0;
+    }
+    if (im_end_id == (i32)VOCAB_ID_NONE) {
+        im_end_id = vocab_lookup(v, "<|im_end|>");
+        if (im_end_id == (i32)VOCAB_ID_NONE) return 0;
+    }
+    i32 nl_id = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        int tlen = (int)strlen(txt); \
+        int added = tokenize_bpe(v, txt, tlen, tokens + n, max_tokens - n); \
+        n += added; \
+    } while (0)
+
+    ADD(im_end_id);
+    ADD(nl_id);
+    ADD(im_start_id);
+    ADD_TEXT("user");
+    ADD(nl_id);
+    ADD_TEXT(user_msg);
+    ADD(im_end_id);
+    ADD(nl_id);
+    ADD(im_start_id);
+    ADD_TEXT("assistant");
+    ADD(nl_id);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}

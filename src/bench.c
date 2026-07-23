@@ -78,10 +78,8 @@ static BenchOptions parse_options(int argc, char *argv[]) {
             usage(stderr, 2);
         }
     }
-    if (!bo.engine.model_path)
-        slog(ERROR, "Model path is required (-m / --model)");
-    if (!bo.input)
-        slog(ERROR, "Input text is required (-i / --input)");
+    if (!bo.engine.model_path) slog(ERROR, "Model path is required (-m / --model)");
+    if (!bo.input) slog(ERROR, "Input text is required (-i / --input)");
     if (bo.repeat < 1) bo.repeat = 1;
     if (bo.nthread < 1) bo.nthread = 1;
     if (bo.n_tokens < 1) bo.n_tokens = 1;
