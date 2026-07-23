@@ -115,7 +115,7 @@ compile_commands.json
 
 src/server
 src/bench
-test/c/llm
+src/chat
 test/test_pthreads
 test/test_utils
 test/py/*.npy
