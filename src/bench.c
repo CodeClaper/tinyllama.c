@@ -189,6 +189,7 @@ int main(int argc, char *argv[]) {
         u32 n_gen = 0;
         for (u32 i = 0; i < opts.n_tokens; i++) {
             if (next_token == (u32)v->eos_id) break;
+            fputc('.', stdout); fflush(stdout);
 
             /* Decode token for output. */
             if (opts.output && output_len < 65000) {
@@ -213,6 +214,7 @@ int main(int argc, char *argv[]) {
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }
+        fputc('\n', stdout);
         double t_gen1 = time_sec();
         gen_times[r]  = (t_gen1 - t_gen0) * 1000.0; /* ms */
         gen_counts[r] = n_gen;
