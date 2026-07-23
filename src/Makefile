@@ -15,24 +15,30 @@ OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
-BENCH_OBJS = core.o quants.o mm.o slog.o utils.o \
+MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
              tokenizer.o sampler.o pthreads.o \
              model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
              cpu/quants_cpu.o
 
-all: server bench
+all: server chat bench
 
 server: $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $@ $(LDADDCFLAGS)
 
-bench: bench.o $(BENCH_OBJS)
-	$(CC) $(CFLAGS) bench.o $(BENCH_OBJS) -o $@ $(LDADDCFLAGS)
+chat: chat.o $(MAIN_OBJS)
+	$(CC) $(CFLAGS) chat.o $(MAIN_OBJS) -o $@ $(LDADDCFLAGS)
 
-bench.o: bench.c
-	$(CC) $(CFLAGS) -c bench.c -o $@
+bench: bench.o $(MAIN_OBJS)
+	$(CC) $(CFLAGS) bench.o $(MAIN_OBJS) -o $@ $(LDADDCFLAGS)
 
 server.o: server.c def.h el.h http.h
 	$(CC) $(CFLAGS) -c server.c -o $@
+
+chat.o: chat.c
+	$(CC) $(CFLAGS) -c chat.c -o $@
+
+bench.o: bench.c
+	$(CC) $(CFLAGS) -c bench.c -o $@
 
 http.o: http.c http.h
 	$(CC) $(CFLAGS) -c http.c -o $@
