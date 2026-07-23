@@ -2,12 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <time.h>
 #include "def.h"
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
 #include "tokenizer.h"
 #include "sampler.h"
+#include "slog.h"
 
 typedef struct {
     EngineOptons engine;
@@ -126,7 +128,17 @@ static void strip_trailing(char *s) {
         s[--len] = '\0';
 }
 
+/* High-resolution time in seconds. */
+static double time_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 int main(int argc, char *argv[]) {
+    /* Suppress INFO logs during chat to keep output clean. */
+    slog_set_level(WARN);
+
     if (argc < 2) usage(stderr, 4);
     ChatOptions co = parse_options(argc, argv);
 
@@ -140,13 +152,13 @@ int main(int argc, char *argv[]) {
     session->temperature = co.temperature;
     session->top_p = co.top_p;
 
+
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
     bool first_turn = true;
 
     /* Banner. */
-    printf("Chat with %s. Type /quit to exit, /clear to reset.\n\n",
-           engine->model->arch_name);
+    printf("Chat with %s. Type /quit to exit, /clear to reset.\n", engine->model->arch_name);
 
     char input[4096];
     u32 prompt_tokens[4096];
@@ -196,8 +208,8 @@ int main(int argc, char *argv[]) {
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
         /* Generate. */
-        fputs("Assistant > ", stdout);
-        fflush(stdout);
+        u32 n_gen = 0;
+        double t0 = time_sec();
         for (u32 i = 0; i < max_tokens; i++) {
             if (next_token == (u32)v->eos_id) break;
             char dec[64];
@@ -208,6 +220,7 @@ int main(int argc, char *argv[]) {
                 fputs(dec, stdout);
                 fflush(stdout);
             }
+            n_gen++;
             if (!session->ops.forward(session, &next_token, 1,
                                       session->logits))
                 break;
@@ -219,7 +232,9 @@ int main(int argc, char *argv[]) {
                 next_token = sample_greedy(session->logits,
                                            session->cfg.n_vocab);
         }
-        fputs("\n\n", stdout);
+        double dt = time_sec() - t0;
+        double tok_s = dt > 0.0 ? (double)n_gen / dt : 0.0;
+        printf("\n[%u tokens, %.1f tok/s]\n", n_gen, tok_s);
     }
 
     printf("Bye.\n");

@@ -13,3 +13,4 @@ typedef enum {
 
 void slog(LogLevel level, char *format, ...);
 void slog_errno(char *format, ...);
+void slog_set_level(LogLevel min_level);

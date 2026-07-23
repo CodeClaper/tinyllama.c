@@ -336,11 +336,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
 static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen2_forward_one(s, tokens[0], logits);
-
     slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
-    for (u32 p = 0; p < n_tokens; p++)
-        printf("%u ", tokens[p]);
-    printf("\n");
 
     Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;

@@ -10,8 +10,14 @@
 #include "mm.h"
 
 static char* LOG_LEVEL_NAME_LIST[] = { "INFO", "WARN", "EROR" };
+static LogLevel g_min_level = INFO;
+
+void slog_set_level(LogLevel min_level) {
+    g_min_level = min_level;
+}
 
 void slog(LogLevel level, char *format, ...) {
+    if (level < g_min_level) return;
     size_t len;
     va_list ap;
 
