@@ -36,6 +36,7 @@ static void usage(FILE *file, int exit_code) {
     exit(exit_code);
 }
 
+/* Fatala. */
 static void fatal(char *format, ...) {
     size_t len;
     va_list ap;
@@ -184,26 +185,22 @@ int main(int argc, char *argv[]) {
         /* Build prompt tokens. */
         int n_prompt;
         if (first_turn) {
-            n_prompt = build_chat_tokens(v, input, co.system,
-                                         prompt_tokens, max_pt);
+            n_prompt = build_chat_tokens(v, input, co.system, prompt_tokens, max_pt);
             if (n_prompt == 0) fatal("No valid tokens in input");
             first_turn = false;
         } else {
-            n_prompt = build_continuation_tokens(v, input,
-                                                  prompt_tokens, max_pt);
+            n_prompt = build_continuation_tokens(v, input, prompt_tokens, max_pt);
             if (n_prompt == 0) fatal("No valid tokens in input");
         }
 
         /* Forward pass. */
-        if (!session->ops.forward(session, prompt_tokens, n_prompt,
-                                  session->logits))
+        if (!session->ops.forward(session, prompt_tokens, n_prompt, session->logits))
             fatal("Forward pass failed");
 
         /* Sample first token. */
         u32 next_token;
         if (co.temperature > 0.0f)
-            next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                      co.temperature, co.top_p);
+            next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_p);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
@@ -221,16 +218,12 @@ int main(int argc, char *argv[]) {
                 fflush(stdout);
             }
             n_gen++;
-            if (!session->ops.forward(session, &next_token, 1,
-                                      session->logits))
+            if (!session->ops.forward(session, &next_token, 1, session->logits))
                 break;
             if (co.temperature > 0.0f)
-                next_token = sample_token(session->logits,
-                                          session->cfg.n_vocab,
-                                          co.temperature, co.top_p);
+                next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_p);
             else
-                next_token = sample_greedy(session->logits,
-                                           session->cfg.n_vocab);
+                next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }
         double dt = time_sec() - t0;
         double tok_s = dt > 0.0 ? (double)n_gen / dt : 0.0;
