@@ -116,6 +116,6 @@ compile_commands.json
 src/server
 src/bench
 src/chat
-test/test_pthreads
-test/test_utils
+# Test executables (generated, no extension)
+test/test_*
 test/py/*.npy
