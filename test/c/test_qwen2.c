@@ -8,6 +8,48 @@ static int decode(const u8 *raw, int raw_len, char *out, int max_len) {
     return qwen2_ops.decode(raw, raw_len, out, max_len);
 }
 
+/* Helper: GPT-2 byte-level encode a raw byte sequence (inverse of qwen2_decode).
+ * Returns the number of encoded bytes written to out. */
+static int gpt2_encode_bytes(const u8 *raw, int raw_len, u8 *out, int max_out) {
+    int w = 0;
+    for (int i = 0; i < raw_len && w < max_out; i++) {
+        u8 b = raw[i];
+        if (b >= 0x21 && b <= 0x7E) {
+            out[w++] = b;
+        } else if (b <= 0x3F) {
+            if (w + 1 >= max_out) break;
+            out[w++] = 0xC4;
+            out[w++] = (u8)(b + 0x80);
+        } else if (b <= 0x7F) {
+            if (w + 1 >= max_out) break;
+            out[w++] = 0xC5;
+            out[w++] = (u8)(b + 0x40);
+        } else if (b <= 0xBF) {
+            if (w + 1 >= max_out) break;
+            out[w++] = 0xC2;
+            out[w++] = b;
+        } else {
+            if (w + 1 >= max_out) break;
+            out[w++] = 0xC3;
+            out[w++] = (u8)(b - 0x40);
+        }
+    }
+    return w;
+}
+
+/* Convenience: encode a null-terminated UTF-8 string via GPT-2 encoding,
+ * then decode it back and verify it matches the original bytes. */
+static int roundtrip_check(const char *utf8_str, u8 *encoded, int enc_cap, char *decoded, int dec_cap) {
+    int raw_len = (int)strlen(utf8_str);
+    int enc_len = gpt2_encode_bytes((const u8 *)utf8_str, raw_len, encoded, enc_cap);
+    int dec_len = decode(encoded, enc_len, decoded, dec_cap);
+    if (dec_len != raw_len) return -1;
+    for (int i = 0; i < raw_len; i++) {
+        if ((u8)utf8_str[i] != (u8)decoded[i]) return -1;
+    }
+    return raw_len;
+}
+
 /* ================================================================
  * Printable ASCII (0x21-0x7E): direct passthrough
  * ================================================================ */
@@ -145,6 +187,127 @@ MU_TEST(test_decode_mixed) {
     mu_assert_int_eq('!',  out[3]);
     mu_assert_int_eq(0x80, (u8)out[4]);
     mu_assert_int_eq(0xFF, (u8)out[5]);
+}
+
+/* ================================================================
+ * Japanese: "こんにちは" (konnichiwa)
+ * UTF-8: E3 81 93 | E3 82 93 | E3 81 AB | E3 81 A1 | E3 81 AF
+ * Enc:   C3 A3 C2 81 C2 93 | C3 A3 C2 82 C2 93 | C3 A3 C2 81 C2 AB | C3 A3 C2 81 C2 A1 | C3 A3 C2 81 C2 AF
+ * Each byte: E3→C3 A3, 81→C2 81, 93→C2 93, 82→C2 82, AB→C2 AB, A1→C2 A1, AF→C2 AF
+ * ================================================================ */
+
+MU_TEST(test_decode_japanese) {
+    u8 encoded[] = {
+        0xC3, 0xA3, 0xC2, 0x81, 0xC2, 0x93,  /* こ */
+        0xC3, 0xA3, 0xC2, 0x82, 0xC2, 0x93,  /* ん */
+        0xC3, 0xA3, 0xC2, 0x81, 0xC2, 0xAB,  /* に */
+        0xC3, 0xA3, 0xC2, 0x81, 0xC2, 0xA1,  /* ち */
+        0xC3, 0xA3, 0xC2, 0x81, 0xC2, 0xAF,  /* は */
+    };
+    u8 expected[] = {0xE3, 0x81, 0x93, 0xE3, 0x82, 0x93,
+                     0xE3, 0x81, 0xAB, 0xE3, 0x81, 0xA1,
+                     0xE3, 0x81, 0xAF};
+    char out[64] = {0};
+    int n = decode(encoded, sizeof(encoded), out, sizeof(out));
+    mu_assert_int_eq(15, n);
+    for (int i = 0; i < 15; i++)
+        mu_assert_int_eq(expected[i], (u8)out[i]);
+
+    /* Also verify roundtrip via helper. */
+    u8 enc[64]; char dec[64];
+    mu_assert_int_eq(15, roundtrip_check("こんにちは", enc, sizeof(enc), dec, sizeof(dec)));
+}
+
+/* ================================================================
+ * Japanese mixed with ASCII: "Hello World! こんにちは"
+ * ================================================================ */
+
+MU_TEST(test_decode_japanese_mixed_ascii) {
+    const char *text = "Hello World! ";
+    const char *jp   = "こんにちは";
+    u8 enc[256]; char dec[256];
+    char full[256];
+    snprintf(full, sizeof(full), "%s%s", text, jp);
+    int raw_len = (int)strlen(full);
+    mu_assert_int_eq(raw_len, roundtrip_check(full, enc, sizeof(enc), dec, sizeof(dec)));
+}
+
+/* ================================================================
+ * Korean: "안녕하세요" (annyeonghaseyo)
+ * UTF-8: EC 95 88 | EB 85 95 | ED 95 98 | EC 84 B8 | EC 9A 94
+ * EC→C3 AC, 95→C2 95, 88→C2 88, EB→C3 AB, 85→C2 85, ED→C3 AD,
+ * 98→C2 98, 84→C2 84, B8→C2 B8, 9A→C2 9A, 94→C2 94
+ * ================================================================ */
+
+MU_TEST(test_decode_korean) {
+    u8 encoded[] = {
+        0xC3, 0xAC, 0xC2, 0x95, 0xC2, 0x88,  /* 안 */
+        0xC3, 0xAB, 0xC2, 0x85, 0xC2, 0x95,  /* 녕 */
+        0xC3, 0xAD, 0xC2, 0x95, 0xC2, 0x98,  /* 하 */
+        0xC3, 0xAC, 0xC2, 0x84, 0xC2, 0xB8,  /* 세 */
+        0xC3, 0xAC, 0xC2, 0x9A, 0xC2, 0x94,  /* 요 */
+    };
+    u8 expected[] = {0xEC, 0x95, 0x88, 0xEB, 0x85, 0x95,
+                     0xED, 0x95, 0x98, 0xEC, 0x84, 0xB8,
+                     0xEC, 0x9A, 0x94};
+    char out[64] = {0};
+    int n = decode(encoded, sizeof(encoded), out, sizeof(out));
+    mu_assert_int_eq(15, n);
+    for (int i = 0; i < 15; i++)
+        mu_assert_int_eq(expected[i], (u8)out[i]);
+
+    /* Roundtrip via helper. */
+    u8 enc[64]; char dec[64];
+    mu_assert_int_eq(15, roundtrip_check("안녕하세요", enc, sizeof(enc), dec, sizeof(dec)));
+}
+
+/* ================================================================
+ * Korean mixed with ASCII: "안녕! Hello?"
+ * ================================================================ */
+
+MU_TEST(test_decode_korean_mixed_ascii) {
+    u8 enc[256]; char dec[256];
+    /* "안녕! Hello?" = 3 + 3 + 1 + 1 + 5 + 1 = 14 bytes */
+    mu_assert_int_eq(14, roundtrip_check("안녕! Hello?", enc, sizeof(enc), dec, sizeof(dec)));
+}
+
+/* ================================================================
+ * Emoji: "😀🎉"
+ * 😀 U+1F600 → UTF-8: F0 9F 98 80
+ * 🎉 U+1F389 → UTF-8: F0 9F 8E 89
+ *
+ * Encoding per byte:
+ *   F0→C3 B0, 9F→C2 9F, 98→C2 98, 80→C2 80  →  😀
+ *   F0→C3 B0, 9F→C2 9F, 8E→C2 8E, 89→C2 89  →  🎉
+ * ================================================================ */
+
+MU_TEST(test_decode_emoji) {
+    u8 encoded[] = {
+        0xC3, 0xB0, 0xC2, 0x9F, 0xC2, 0x98, 0xC2, 0x80,  /* 😀 */
+        0xC3, 0xB0, 0xC2, 0x9F, 0xC2, 0x8E, 0xC2, 0x89,  /* 🎉 */
+    };
+    u8 expected[] = {0xF0, 0x9F, 0x98, 0x80, 0xF0, 0x9F, 0x8E, 0x89};
+    char out[32] = {0};
+    int n = decode(encoded, sizeof(encoded), out, sizeof(out));
+    mu_assert_int_eq(8, n);
+    for (int i = 0; i < 8; i++)
+        mu_assert_int_eq(expected[i], (u8)out[i]);
+
+    /* Roundtrip via helper. */
+    u8 enc[64]; char dec[64];
+    mu_assert_int_eq(8, roundtrip_check("😀🎉", enc, sizeof(enc), dec, sizeof(dec)));
+}
+
+/* ================================================================
+ * Emoji + CJK mix: "Hello 😀 你好 こんにちは 안녕"
+ * Stress test combining ASCII + emoji + Chinese + Japanese + Korean.
+ * ================================================================ */
+
+MU_TEST(test_decode_unicode_mixed) {
+    const char *text = "Hello 😀 你好 こんにちは 안녕";
+    int raw_len = (int)strlen(text);
+    u8 enc[512]; char dec[512];
+    mu_assert_int_eq(raw_len, roundtrip_check(text, enc, sizeof(enc), dec, sizeof(dec)));
 }
 
 /* ================================================================
@@ -313,6 +476,15 @@ MU_TEST_SUITE(test_decode_multibyte) {
     MU_RUN_TEST(test_decode_space);
 }
 
+MU_TEST_SUITE(test_decode_unicode) {
+    MU_RUN_TEST(test_decode_japanese);
+    MU_RUN_TEST(test_decode_japanese_mixed_ascii);
+    MU_RUN_TEST(test_decode_korean);
+    MU_RUN_TEST(test_decode_korean_mixed_ascii);
+    MU_RUN_TEST(test_decode_emoji);
+    MU_RUN_TEST(test_decode_unicode_mixed);
+}
+
 MU_TEST_SUITE(test_decode_complex) {
     MU_RUN_TEST(test_decode_chinese);
     MU_RUN_TEST(test_decode_mixed);
@@ -344,6 +516,9 @@ int main(void) {
 
     printf("\n--- Multi-byte ranges ---\n");
     MU_RUN_SUITE(test_decode_multibyte);
+
+    printf("\n--- Unicode (Japanese / Korean / Emoji) ---\n");
+    MU_RUN_SUITE(test_decode_unicode);
 
     printf("\n--- Complex content ---\n");
     MU_RUN_SUITE(test_decode_complex);
