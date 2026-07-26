@@ -1,5 +1,9 @@
 CC      = gcc
+ARCH    ?= $(shell uname -m)
 CFLAGS  = -O0 -g -Wall -pthread -Ic
+ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
+	CFLAGS += -msse4.1
+endif
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
