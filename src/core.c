@@ -717,11 +717,10 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
             t->n_element *= t->dim[d];
         }
 
-        /* GGUF stores all quantised 2-D tensors in column-major order,
-         * i.e. the innermost (fastest-varying) dimension is the one that
-         * was declared as dim[0].  Swapping dim[0]↔dim[1] makes the
-         * standard row-major indexing in the inference code match the
-         * physical file layout. */
+        /* GGUF stores dimensions with dim[0] as the fastest-varying
+          * (innermost) dimension.  Swapping dim[0]↔dim[1] makes dim[0]
+          * the row count and dim[1] the column count, matching the
+          * row-major convention used by the inference code. */
         if (t->ndim == 2) {
             u64 tmp = t->dim[0];
             t->dim[0] = t->dim[1];
