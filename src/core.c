@@ -718,7 +718,7 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
         }
 
         /* GGUF stores dimensions with dim[0] as the fastest-varying
-          * (innermost) dimension.  Swapping dim[0]↔dim[1] makes dim[0]
+          * (innermost) dimension.  Swapping dim[0]↔ dim[1] makes dim[0]
           * the row count and dim[1] the column count, matching the
           * row-major convention used by the inference code. */
         if (t->ndim == 2) {
