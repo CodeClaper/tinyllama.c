@@ -74,8 +74,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
     ChatOptions co = {
         .ctx_size = 4096,
         .n_tokens = 128,
-        .temperature = 0.0f,
-        .top_p = 1.0f,
+        .temperature = 0.8f,
+        .top_p = 0.9f,
         .nthread = 1,
         .system = NULL
     };

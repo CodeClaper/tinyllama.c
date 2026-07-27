@@ -289,7 +289,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .port = 8080,
         .ctx_size = 4096,
         .default_tokens = 393216,
-        .temperature = 1.0f,
+        .temperature = 0.8f,
         .top_p = 0.9f,
         .nthread = 1,
     };
