@@ -72,7 +72,9 @@ typedef struct {
     int default_tokens;
     int nthread;
     float temperature;
+    u32 top_k;
     float top_p;
+    float min_p;
     bool inspect;
 } ServerOptions;
 
@@ -313,6 +315,7 @@ struct Session {
     float      temperature;
     u32        top_k;
     float      top_p;
+    float      min_p;
     u32        max_tokens;
 };
 

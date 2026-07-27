@@ -28,12 +28,16 @@ u32 sample_greedy(float *logits, u32 n_vocab) {
     return best;
 }
 
-/* Temperature + top-p (nucleus) sampling.
+/* Temperature + top-k + top-p + min-p sampling.
  * Modifies logits in-place (caller re-fills before next use).
- * Falls back to greedy when temperature <= 0 or top_p >= 1. */
+ * Falls back to greedy when no stochastic filter is active. */
 u32 sample_token(float *logits, u32 n_vocab,
-                  float temperature, float top_p) {
-    if (temperature <= 1e-6f || top_p >= 1.0f)
+                  float temperature, u32 top_k, float top_p, float min_p) {
+    if (temperature <= 1e-6f)
+        return sample_greedy(logits, n_vocab);
+
+    bool no_filter = (top_k == 0) && (top_p >= 1.0f) && (min_p <= 1e-6f);
+    if (no_filter)
         return sample_greedy(logits, n_vocab);
 
     /* Allocate sort buffer before mutating logits. */
@@ -66,13 +70,35 @@ u32 sample_token(float *logits, u32 n_vocab,
     /* Sort descending by probability. */
     qsort(pi, n_vocab, sizeof(ProbIdx), probidx_cmp);
 
-    /* Find top-p nucleus. */
-    float cum = 0.0f;
+    /* --- top-k: keep only the k most probable tokens --- */
     u32 cutoff = n_vocab;
-    for (u32 i = 0; i < n_vocab; i++) {
-        cum += pi[i].prob;
-        if (cum >= top_p) { cutoff = i + 1; break; }
+    if (top_k > 0 && top_k < cutoff)
+        cutoff = top_k;
+
+    /* --- min-p: keep tokens with prob >= min_p * max_prob --- */
+    if (min_p > 1e-6f && cutoff > 0) {
+        float threshold = min_p * pi[0].prob;
+        u32 new_cutoff = 0;
+        for (u32 i = 0; i < cutoff; i++) {
+            if (pi[i].prob >= threshold)
+                new_cutoff = i + 1;
+            else
+                break;
+        }
+        if (new_cutoff > 0) cutoff = new_cutoff;
     }
+
+    /* --- top-p (nucleus): smallest set with cumulative prob >= top_p --- */
+    if (top_p < 1.0f) {
+        float cum = 0.0f;
+        u32 p_cutoff = cutoff;
+        for (u32 i = 0; i < cutoff; i++) {
+            cum += pi[i].prob;
+            if (cum >= top_p) { p_cutoff = i + 1; break; }
+        }
+        if (p_cutoff < cutoff) cutoff = p_cutoff;
+    }
+
     if (cutoff < 1) cutoff = 1;
 
     /* Renormalise truncated distribution. */

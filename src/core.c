@@ -1414,7 +1414,8 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     s->temperature = DEFAULT_TEMPERATURE;
     s->pthreads       = pthreads_create(nthreads);
     s->top_p       = DEFAULT_TOP_P ;
-    s->top_k       = 1;
+    s->top_k       = DEFAULT_TOP_K ;
+    s->min_p       = DEFAULT_MIN_P;
     s->max_tokens  = 0;
 
     /* Fill architecture config from model metadata. */

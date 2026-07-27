@@ -16,7 +16,9 @@ typedef struct {
     int ctx_size;
     u32 n_tokens;
     float temperature;
+    u32 top_k;
     float top_p;
+    float min_p;
     int nthread;
     const char *system;
 } ChatOptions;
@@ -30,8 +32,10 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -c | --ctx     <int>     The context size, default 4096\n");
     fprintf(file, "  -n | --tokens  <int>     Number of tokens to generate, default 128\n");
     fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.0 (greedy)\n");
-    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 1.0\n");
+    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
     fprintf(file, "  -s | --system  <string>  System input\n");
     exit(exit_code);
 }
@@ -75,7 +79,9 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .ctx_size = 4096,
         .n_tokens = 128,
         .temperature = 0.8f,
+        .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
+        .min_p = DEFAULT_MIN_P,
         .nthread = 1,
         .system = NULL
     };
@@ -88,6 +94,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) co.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) co.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-s") || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
@@ -106,6 +114,10 @@ static ChatOptions parse_options(int argc, char *argv[]) {
     }
     if (co.top_p <= 0.0f || co.top_p > 1.0f) {
         fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", co.top_p);
+        usage(stderr, 2);
+    }
+    if (co.min_p < 0.0f || co.min_p > 1.0f) {
+        fprintf(stderr, "Min-p must be in [0.0, 1.0], got %.2f\n", co.min_p);
         usage(stderr, 2);
     }
     return co;
@@ -151,7 +163,9 @@ int main(int argc, char *argv[]) {
     Session *session = session_create(engine, (u32)co.ctx_size, co.nthread);
     if (!session) fatal("Failed to create session");
     session->temperature = co.temperature;
+    session->top_k = co.top_k;
     session->top_p = co.top_p;
+    session->min_p = co.min_p;
 
 
     Vocab *v = engine->vocab;
@@ -200,7 +214,7 @@ int main(int argc, char *argv[]) {
         /* Sample first token. */
         u32 next_token;
         if (co.temperature > 0.0f)
-            next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_p);
+            next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_k, co.top_p, co.min_p);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
@@ -221,7 +235,7 @@ int main(int argc, char *argv[]) {
             if (!session->ops.forward(session, &next_token, 1, session->logits))
                 break;
             if (co.temperature > 0.0f)
-                next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_p);
+                next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_k, co.top_p, co.min_p);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }

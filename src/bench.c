@@ -18,7 +18,9 @@ typedef struct {
     int ctx_size;
     u32 n_tokens;
     float temperature;
+    u32 top_k;
     float top_p;
+    float min_p;
     const char *input;
     const char *output;
     int repeat;
@@ -34,8 +36,10 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -c | --ctx     <int>     The context size, default 4096\n");
     fprintf(file, "  -n | --tokens  <int>     Number of tokens to generate, default 128\n");
     fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.0 (greedy)\n");
-    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 1.0\n");
+    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
     fprintf(file, "  -i | --input   <string>  User input\n");
     fprintf(file, "  -o | --output  <string>  Output file for generated text (optional)\n");
     fprintf(file, "  -r | --repeat  <int>     Repeat count, default 1\n");
@@ -55,7 +59,9 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         .ctx_size = 4096,
         .n_tokens = 128,
         .temperature = 0.8f,
+        .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
+        .min_p = DEFAULT_MIN_P,
         .input = NULL,
         .output = NULL,
         .repeat = 1,
@@ -70,6 +76,8 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) bo.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) bo.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) bo.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) bo.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) bo.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--input")) bo.input = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-o") || !strcmp(arg, "--output")) bo.output = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-r") || !strcmp(arg, "--repeat")) bo.repeat = parse_int(parse_arg(argc, argv, &i, arg));
@@ -89,6 +97,10 @@ static BenchOptions parse_options(int argc, char *argv[]) {
     }
     if (bo.top_p <= 0.0f || bo.top_p > 1.0f) {
         fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", bo.top_p);
+        usage(stderr, 2);
+    }
+    if (bo.min_p < 0.0f || bo.min_p > 1.0f) {
+        fprintf(stderr, "Min-p must be in [0.0, 1.0], got %.2f\n", bo.min_p);
         usage(stderr, 2);
     }
     return bo;
@@ -130,7 +142,9 @@ int main(int argc, char *argv[]) {
     Session *session = session_create(engine, (u32)opts.ctx_size, opts.nthread);
     if (!session) slog(ERROR, "Failed to create session");
     session->temperature = opts.temperature;
+    session->top_k = opts.top_k;
     session->top_p = opts.top_p;
+    session->min_p = opts.min_p;
 
     Vocab *v = engine->vocab;
 
@@ -177,7 +191,7 @@ int main(int argc, char *argv[]) {
         u32 next_token;
         if (opts.temperature > 0.0f)
             next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                      opts.temperature, opts.top_p);
+                                      opts.temperature, opts.top_k, opts.top_p, opts.min_p);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
@@ -208,7 +222,7 @@ int main(int argc, char *argv[]) {
 
             if (opts.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                          opts.temperature, opts.top_p);
+                                          opts.temperature, opts.top_k, opts.top_p, opts.min_p);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }
@@ -253,7 +267,9 @@ int main(int argc, char *argv[]) {
     printf("Target Tokens:  %u\n", opts.n_tokens);
     printf("Repeats:        %d\n", opts.repeat);
     printf("Temperature:    %.2f\n", opts.temperature);
+    printf("Top-k:          %u\n", opts.top_k);
     printf("Top-p:          %.2f\n", opts.top_p);
+    printf("Min-p:          %.2f\n", opts.min_p);
     printf("────────────────────────────────────────────────────────────────────────────────────────────────\n");
     for (int r = 0; r < opts.repeat; r++) {
         double prefill_tok_s = (double)n_prompt / (prefill_times[r] / 1000.0);

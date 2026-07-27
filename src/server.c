@@ -179,7 +179,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     int  resp_used = 0;
 
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab,
-                                   s->temperature, s->top_p);
+                                    s->temperature, s->top_k, s->top_p, s->min_p);
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
@@ -197,7 +197,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         n_gen++;
         if (!s->ops.forward(s, &next_token, 1, s->logits)) break;
         next_token = sample_token(s->logits, s->cfg.n_vocab,
-                                   s->temperature, s->top_p);
+                                    s->temperature, s->top_k, s->top_p, s->min_p);
     }
     fputc('\n', stdout);
     resp_body[resp_used] = '\0';
@@ -268,9 +268,11 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -p | --port    <int>     The Port to listening, default 9987\n");
     fprintf(file, "  -c | --ctx     <int>     The context size, defalt 4096\n");
     fprintf(file, "  -n | --tokens  <int>     The default token size, defalt 393216\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 1.0\n");
+    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
     fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
     fprintf(file, "  -i | --inspect <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
@@ -290,7 +292,9 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .ctx_size = 4096,
         .default_tokens = 393216,
         .temperature = 0.8f,
+        .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
+        .min_p = DEFAULT_MIN_P,
         .nthread = 1,
     };
     for (int i = 1; i < argc; i++) {
@@ -304,6 +308,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
@@ -317,6 +323,10 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     }
     if (so.top_p <= 0.0f || so.top_p > 1.0f) {
         fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", so.top_p);
+        usage(stderr, 2);
+    }
+    if (so.min_p < 0.0f || so.min_p > 1.0f) {
+        fprintf(stderr, "Min-p must be in [0.0, 1.0], got %.2f\n", so.min_p);
         usage(stderr, 2);
     }
     return so;
@@ -379,7 +389,9 @@ int main(int argc, char *argv[]) {
     }
     session->max_tokens = (u32)so.default_tokens;
     session->temperature = so.temperature;
+    session->top_k = so.top_k;
     session->top_p = so.top_p;
+    session->min_p = so.min_p;
 
     Server server;
     server.engine = engine;

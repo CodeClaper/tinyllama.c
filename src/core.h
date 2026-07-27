@@ -5,6 +5,7 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i);
 void  tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out);
 
 #define DEFAULT_TEMPERATURE 1.0f
+#define DEFAULT_TOP_K 40
 #define DEFAULT_TOP_P 1.0f
 #define DEFAULT_MIN_P 0.05f
 void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps);
