@@ -374,6 +374,7 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    srand((unsigned)time(NULL) ^ (unsigned)getpid());
     ServerOptions so = parse_options(argc, argv);
     Engine *engine = engine_open(&so.engine);
     if (so.inspect) { 

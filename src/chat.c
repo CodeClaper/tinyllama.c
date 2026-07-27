@@ -152,6 +152,7 @@ int main(int argc, char *argv[]) {
     /* Suppress INFO logs during chat to keep output clean. */
     slog_set_level(WARN);
 
+    srand((unsigned)time(NULL) ^ (unsigned)getpid());
     if (argc < 2) usage(stderr, 4);
     ChatOptions co = parse_options(argc, argv);
 

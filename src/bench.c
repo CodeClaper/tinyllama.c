@@ -129,7 +129,7 @@ int main(int argc, char *argv[]) {
     BenchOptions opts = parse_options(argc, argv);
 
     /* Seed random for sampling. */
-    srand((unsigned)time(NULL));
+    srand((unsigned)time(NULL) ^ (unsigned)getpid());
 
     /* Load model. */
     slog(INFO, "Loading model: %s", opts.engine.model_path);
