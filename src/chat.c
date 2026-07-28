@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
+#include <unistd.h>
 #include "def.h"
 #include "utils.h"
 #include "mm.h"
