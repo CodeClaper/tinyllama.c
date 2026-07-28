@@ -1,12 +1,18 @@
 # tinyllama.c
 
-Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. It loads GGUF v3 model files (the format used by llama.cpp) via mmap for zero-copy access and runs them as an OpenAI-compatible HTTP chat server.
+Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. It loads GGUF v3 model files (the format used by llama.cpp) via mmap for zero-copy access. It provides three modes of operation:
+
+- **server** — OpenAI-compatible HTTP chat server
+- **chat** — Interactive CLI chat
+- **bench** — CLI inference benchmark
 
 ## Features
 
 - Pure C, no external ML frameworks
 - mmap-based zero-copy GGUF v3 model loading
 - OpenAI-compatible chat completions API (`/v1/chat/completions`)
+- Interactive CLI chat with conversation history
+- Inference benchmark with time and throughput statistics
 - Multi-threaded inference via thread pool
 - Supports multiple model architectures:
   - LLaMA
@@ -26,7 +32,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 ## Build
 
 ```bash
-# Release build (O3, march=native, LTO)
+# Release build (O3, march=native, LTO) — produces server, chat, and bench
 make
 
 # Debug build (O0, debug symbols, -DDEBUG)
@@ -39,9 +45,11 @@ make check
 make clean
 ```
 
-The binary is produced at `src/server`.
+Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
 
 ## Usage
+
+### Server — OpenAI-compatible HTTP API
 
 ```bash
 # Run with a GGUF model file
@@ -76,11 +84,61 @@ curl http://localhost:8080/v1/chat/completions \
 }'
 ```
 
+### Chat — Interactive CLI
+
+```bash
+# Start an interactive chat session
+./src/chat -m path/to/model.gguf
+
+# Full options
+./src/chat -m model.gguf                      # Model file (required)
+           -c 4096                            # Context size (default: 4096)
+           -n 128                             # Max tokens per response (default: 128)
+           -T 1                               # Thread count (default: 1)
+           -t 0.8                             # Temperature (default: 0.8)
+           -tp 0.9                            # Top-p sampling (default: 0.9)
+           -tk 40                             # Top-k sampling (default: 40)
+           -P 0.05                            # Min-p threshold (default: 0.05)
+           -s "You are a helpful assistant."  # System prompt
+
+# With a custom system prompt
+./src/chat -m model.gguf -s "You are a Python programming expert."
+```
+
+During the chat session, use `/clear` to reset the conversation and `/quit` to exit.
+
+### Bench — Inference Benchmark
+
+```bash
+# Run a benchmark with a prompt
+./src/bench -m path/to/model.gguf -i "Who is Isaac Newton?"
+
+# Full options
+./src/bench -m model.gguf                     # Model file (required)
+            -c 4096                           # Context size (default: 4096)
+            -n 128                            # Tokens to generate per iteration (default: 128)
+            -T 1                              # Thread count (default: 1)
+            -t 0.8                            # Temperature (default: 0.8)
+            -tp 0.9                           # Top-p sampling (default: 0.9)
+            -tk 40                            # Top-k sampling (default: 40)
+            -P 0.05                           # Min-p threshold (default: 0.05)
+            -i "Some prompt"                  # Input prompt (required)
+            -r 5                              # Repeat count (default: 1)
+            -o output.txt                     # Save generated text to file
+
+# Run 10 iterations and save output
+./src/bench -m model.gguf -i "Explain quantum computing." -r 10 -o output.txt
+```
+
+The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage.
+
 ## Project Structure
 
 ```
 ├── src/
 │   ├── server.c        — CLI entry point, HTTP server, option parsing
+│   ├── chat.c          — Interactive CLI chat
+│   ├── bench.c         — Inference benchmark
 │   ├── core.c          — Engine/model loading, GGUF parsing
 │   ├── mm.c            — Safe memory allocators
 │   ├── slog.c          — Logging
