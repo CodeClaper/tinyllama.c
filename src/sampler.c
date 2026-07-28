@@ -33,10 +33,10 @@ u32 sample_greedy(float *logits, u32 n_vocab) {
  * Falls back to greedy when no stochastic filter is active. */
 u32 sample_token(float *logits, u32 n_vocab,
                   float temperature, u32 top_k, float top_p, float min_p) {
-    if (temperature <= 1e-6f)
+    if (temperature <= DEFAULT_EPS)
         return sample_greedy(logits, n_vocab);
 
-    bool no_filter = (top_k == 0) && (top_p >= 1.0f) && (min_p <= 1e-6f);
+    bool no_filter = (top_k == 0) && (top_p >= 1.0f) && (min_p <= DEFAULT_EPS);
     if (no_filter)
         return sample_greedy(logits, n_vocab);
 
@@ -76,7 +76,7 @@ u32 sample_token(float *logits, u32 n_vocab,
         cutoff = top_k;
 
     /* --- min-p: keep tokens with prob >= min_p * max_prob --- */
-    if (min_p > 1e-6f && cutoff > 0) {
+    if (min_p > DEFAULT_EPS && cutoff > 0) {
         float threshold = min_p * pi[0].prob;
         u32 new_cutoff = 0;
         for (u32 i = 0; i < cutoff; i++) {

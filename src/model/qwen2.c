@@ -133,7 +133,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
     u32 pos         = s->n_tokens;
     u32 gqa_ratio   = n_head / n_kv_head;
     float scale     = 1.0f / sqrtf((float)kv_head_dim);
-    float eps       = 1e-6f;
+    float eps       = DEFAULT_EPS;
 
     /* ---- 1. Token embedding ---- */
     {
@@ -354,7 +354,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     u32 cache_start = s->n_tokens;
     u32 gqa_ratio   = n_head / n_kv_head;
     float scale     = 1.0f / sqrtf((float)kv_head_dim);
-    float eps       = 1e-6f;
+    float eps       = DEFAULT_EPS;
 
     /* Determine max fused QKV output width across layers. */
     u32 max_fused = q_dim + 2 * kv_dim;

@@ -73,12 +73,12 @@ MU_TEST(test_parse_float_zero) {
 
 MU_TEST(test_parse_float_basic) {
     float v = parse_float("3.14");
-    mu_check(fabs(v - 3.14f) < 1e-6f);
+    mu_check(fabs(v - 3.14f) < DEFAULT_EPS);
 }
 
 MU_TEST(test_parse_float_negative) {
     float v = parse_float("-2.5");
-    mu_check(fabs(v - (-2.5f)) < 1e-6f);
+    mu_check(fabs(v - (-2.5f)) < DEFAULT_EPS);
 }
 
 /* parse_long */

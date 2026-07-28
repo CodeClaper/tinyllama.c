@@ -6,6 +6,7 @@
 
 #define MAX_DIMS 8
 #define VOCAB_ID_NONE ((u32)-1)
+#define DEFAULT_EPS (1e-6f)
 
 typedef uint8_t     u8;
 typedef uint16_t    u16;
