@@ -65,7 +65,10 @@ The binary is produced at `src/server`.
 Send requests to the server:
 
 ```bash
-curl http://127.0.0.1:8080 -d '{
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "qwen2.5",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
