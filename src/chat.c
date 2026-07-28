@@ -19,6 +19,8 @@ typedef struct {
     u32 top_k;
     float top_p;
     float min_p;
+    float repeat_penalty;
+    u32 repeat_last_n;
     int nthread;
     const char *system;
 } ChatOptions;
@@ -36,6 +38,8 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
     fprintf(file, "  -P  | --minp    <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -rp | --repeatpenalty <float>  Repeat penalty, default 1.0 (1.0=disabled)\n");
+    fprintf(file, "  -rl | --repeatlastn  <int>    Repeat penalty lookback, default 64\n");
     fprintf(file, "  -s  | --system  <string>  System input\n");
     exit(exit_code);
 }
@@ -82,6 +86,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
         .min_p = DEFAULT_MIN_P,
+        .repeat_penalty = DEFAULT_REPEAT_PENALTY,
+        .repeat_last_n = DEFAULT_REPEAT_LAST_N,
         .nthread = 1,
         .system = NULL
     };
@@ -96,6 +102,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) co.min_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeatpenalty")) co.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeatlastn")) co.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-s") || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
@@ -167,6 +175,8 @@ int main(int argc, char *argv[]) {
     session->top_k = co.top_k;
     session->top_p = co.top_p;
     session->min_p = co.min_p;
+    session->repeat_penalty = co.repeat_penalty;
+    session->repeat_last_n = co.repeat_last_n;
 
 
     Vocab *v = engine->vocab;
@@ -215,7 +225,10 @@ int main(int argc, char *argv[]) {
         /* Sample first token. */
         u32 next_token;
         if (co.temperature > 0.0f)
-            next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_k, co.top_p, co.min_p);
+            next_token = sample_token(session->logits, session->cfg.n_vocab,
+                                       co.temperature, co.top_k, co.top_p, co.min_p,
+                                       co.repeat_penalty, co.repeat_last_n,
+                                       session->tokens, session->n_tokens);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
@@ -236,7 +249,10 @@ int main(int argc, char *argv[]) {
             if (!session->ops.forward(session, &next_token, 1, session->logits))
                 break;
             if (co.temperature > 0.0f)
-                next_token = sample_token(session->logits, session->cfg.n_vocab, co.temperature, co.top_k, co.top_p, co.min_p);
+                next_token = sample_token(session->logits, session->cfg.n_vocab,
+                                           co.temperature, co.top_k, co.top_p, co.min_p,
+                                           co.repeat_penalty, co.repeat_last_n,
+                                           session->tokens, session->n_tokens);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }

@@ -179,7 +179,9 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     int  resp_used = 0;
 
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab,
-                                    s->temperature, s->top_k, s->top_p, s->min_p);
+                                    s->temperature, s->top_k, s->top_p, s->min_p,
+                                    s->repeat_penalty, s->repeat_last_n,
+                                    s->tokens, s->n_tokens);
     u32 n_gen = 0;
 
     for (u32 i = 0; i < max_tokens; i++) {
@@ -197,7 +199,9 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         n_gen++;
         if (!s->ops.forward(s, &next_token, 1, s->logits)) break;
         next_token = sample_token(s->logits, s->cfg.n_vocab,
-                                    s->temperature, s->top_k, s->top_p, s->min_p);
+                                    s->temperature, s->top_k, s->top_p, s->min_p,
+                                    s->repeat_penalty, s->repeat_last_n,
+                                    s->tokens, s->n_tokens);
     }
     fputc('\n', stdout);
     resp_body[resp_used] = '\0';
@@ -273,6 +277,8 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
     fprintf(file, "  -P  | --minp    <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -rp | --repeatpenalty <float>  Repeat penalty, default 1.0 (1.0=disabled)\n");
+    fprintf(file, "  -rl | --repeatlastn  <int>    Repeat penalty lookback, default 64\n");
     fprintf(file, "  -i  | --inspect <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
@@ -295,6 +301,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
         .min_p = DEFAULT_MIN_P,
+        .repeat_penalty = DEFAULT_REPEAT_PENALTY,
+        .repeat_last_n = DEFAULT_REPEAT_LAST_N,
         .nthread = 1,
     };
     for (int i = 1; i < argc; i++) {
@@ -310,6 +318,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeatpenalty")) so.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeatlastn")) so.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
@@ -393,6 +403,8 @@ int main(int argc, char *argv[]) {
     session->top_k = so.top_k;
     session->top_p = so.top_p;
     session->min_p = so.min_p;
+    session->repeat_penalty = so.repeat_penalty;
+    session->repeat_last_n = so.repeat_last_n;
 
     Server server;
     server.engine = engine;

@@ -32,7 +32,25 @@ u32 sample_greedy(float *logits, u32 n_vocab) {
  * Modifies logits in-place (caller re-fills before next use).
  * Falls back to greedy when no stochastic filter is active. */
 u32 sample_token(float *logits, u32 n_vocab,
-                  float temperature, u32 top_k, float top_p, float min_p) {
+                  float temperature, u32 top_k, float top_p, float min_p,
+                  float repeat_penalty, u32 repeat_last_n,
+                  u32 *history_tokens, u32 n_history) {
+
+    /* ---- Repeat penalty: penalise tokens already present in recent history.
+     * Applied on logits before temperature scaling, matching llama.cpp. ---- */
+    if (repeat_penalty > 1.0f && repeat_last_n > 0 && history_tokens && n_history > 0) {
+        u32 start = (n_history > repeat_last_n) ? (n_history - repeat_last_n) : 0;
+        for (u32 j = start; j < n_history; j++) {
+            u32 tid = history_tokens[j];
+            if (tid < n_vocab) {
+                if (logits[tid] > 0.0f)
+                    logits[tid] /= repeat_penalty;
+                else
+                    logits[tid] *= repeat_penalty;
+            }
+        }
+    }
+
     if (temperature <= DEFAULT_EPS)
         return sample_greedy(logits, n_vocab);
 

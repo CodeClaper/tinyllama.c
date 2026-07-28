@@ -191,7 +191,9 @@ int main(int argc, char *argv[]) {
         u32 next_token;
         if (opts.temperature > 0.0f)
             next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                      opts.temperature, opts.top_k, opts.top_p, opts.min_p);
+                                      opts.temperature, opts.top_k, opts.top_p, opts.min_p,
+                                      session->repeat_penalty, session->repeat_last_n,
+                                      session->tokens, session->n_tokens);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
 
@@ -222,7 +224,9 @@ int main(int argc, char *argv[]) {
 
             if (opts.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                          opts.temperature, opts.top_k, opts.top_p, opts.min_p);
+                                          opts.temperature, opts.top_k, opts.top_p, opts.min_p,
+                                          session->repeat_penalty, session->repeat_last_n,
+                                          session->tokens, session->n_tokens);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
         }

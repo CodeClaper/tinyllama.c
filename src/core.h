@@ -8,6 +8,8 @@ void  tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float
 #define DEFAULT_TOP_K 40
 #define DEFAULT_TOP_P 1.0f
 #define DEFAULT_MIN_P 0.05f
+#define DEFAULT_REPEAT_PENALTY 1.1f
+#define DEFAULT_REPEAT_LAST_N 64
 void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps);
 bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans);
 bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X, u64 batch, u64 rows, u64 cols, bool trans);

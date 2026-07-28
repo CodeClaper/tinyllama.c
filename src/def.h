@@ -76,6 +76,8 @@ typedef struct {
     u32 top_k;
     float top_p;
     float min_p;
+    float repeat_penalty;
+    u32 repeat_last_n;
     bool inspect;
 } ServerOptions;
 
@@ -317,6 +319,8 @@ struct Session {
     u32        top_k;
     float      top_p;
     float      min_p;
+    float      repeat_penalty;
+    u32        repeat_last_n;
     u32        max_tokens;
 };
 
