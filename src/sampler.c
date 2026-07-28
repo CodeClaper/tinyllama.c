@@ -34,19 +34,41 @@ u32 sample_greedy(float *logits, u32 n_vocab) {
 u32 sample_token(float *logits, u32 n_vocab,
                   float temperature, u32 top_k, float top_p, float min_p,
                   float repeat_penalty, u32 repeat_last_n,
+                  float frequency_penalty, float presence_penalty,
                   u32 *history_tokens, u32 n_history) {
 
-    /* ---- Repeat penalty: penalise tokens already present in recent history.
-     * Applied on logits before temperature scaling, matching llama.cpp. ---- */
-    if (repeat_penalty > 1.0f && repeat_last_n > 0 && history_tokens && n_history > 0) {
-        u32 start = (n_history > repeat_last_n) ? (n_history - repeat_last_n) : 0;
-        for (u32 j = start; j < n_history; j++) {
-            u32 tid = history_tokens[j];
-            if (tid < n_vocab) {
-                if (logits[tid] > 0.0f)
-                    logits[tid] /= repeat_penalty;
-                else
+    /* ---- Repeat penalty: matches llama.cpp's token_count approach.
+     * For each unique token in the recent history window, apply penalty ONCE:
+     *   if logit <= 0: logit *= repeat_penalty
+     *   else:          logit /= repeat_penalty
+     *   then:          logit -= count * frequency_penalty + (count > 0) * presence_penalty
+     * Applied on logits before temperature scaling. ---- */
+    if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
+        if (repeat_last_n > 0 && history_tokens && n_history > 0) {
+            u32 start = (n_history > repeat_last_n) ? (n_history - repeat_last_n) : 0;
+            for (u32 j = start; j < n_history; j++) {
+                u32 tid = history_tokens[j];
+                if (tid >= n_vocab) continue;
+                /* Skip if already processed this unique token */
+                bool already_seen = false;
+                for (u32 k = start; k < j; k++) {
+                    if (history_tokens[k] == tid) {
+                        already_seen = true;
+                        break;
+                    }
+                }
+                if (already_seen) continue;
+                /* Count occurrences in window */
+                int count = 1;
+                for (u32 k = j + 1; k < n_history; k++) {
+                    if (history_tokens[k] == tid) count++;
+                }
+                /* Apply penalty (once per unique token) */
+                if (logits[tid] <= 0.0f)
                     logits[tid] *= repeat_penalty;
+                else
+                    logits[tid] /= repeat_penalty;
+                logits[tid] -= (float)count * frequency_penalty + (float)(count > 0) * presence_penalty;
             }
         }
     }

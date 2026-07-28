@@ -181,6 +181,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab,
                                     s->temperature, s->top_k, s->top_p, s->min_p,
                                     s->repeat_penalty, s->repeat_last_n,
+                                    s->frequency_penalty, s->presence_penalty,
                                     s->tokens, s->n_tokens);
     u32 n_gen = 0;
 
@@ -201,6 +202,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         next_token = sample_token(s->logits, s->cfg.n_vocab,
                                     s->temperature, s->top_k, s->top_p, s->min_p,
                                     s->repeat_penalty, s->repeat_last_n,
+                                    s->frequency_penalty, s->presence_penalty,
                                     s->tokens, s->n_tokens);
     }
     fputc('\n', stdout);
@@ -403,8 +405,10 @@ int main(int argc, char *argv[]) {
     session->top_k          = so.top_k;
     session->top_p          = so.top_p;
     session->min_p          = so.min_p;
-    session->repeat_penalty = so.repeat_penalty;
-    session->repeat_last_n  = so.repeat_last_n;
+    session->repeat_penalty   = so.repeat_penalty;
+    session->repeat_last_n    = so.repeat_last_n;
+    session->frequency_penalty = so.frequency_penalty;
+    session->presence_penalty  = so.presence_penalty;
 
     Server server;
     server.engine = engine;

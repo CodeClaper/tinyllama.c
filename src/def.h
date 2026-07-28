@@ -78,6 +78,8 @@ typedef struct {
     float min_p;
     float repeat_penalty;
     u32 repeat_last_n;
+    float frequency_penalty;
+    float presence_penalty;
     bool inspect;
 } ServerOptions;
 
@@ -321,6 +323,8 @@ struct Session {
     float      min_p;
     float      repeat_penalty;
     u32        repeat_last_n;
+    float      frequency_penalty;
+    float      presence_penalty;
     u32        max_tokens;
 };
 

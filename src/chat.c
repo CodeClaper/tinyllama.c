@@ -22,6 +22,8 @@ typedef struct {
     float min_p;
     float repeat_penalty;
     u32 repeat_last_n;
+    float frequency_penalty;
+    float presence_penalty;
     int nthread;
     const char *system;
 } ChatOptions;
@@ -176,9 +178,10 @@ int main(int argc, char *argv[]) {
     session->top_k = co.top_k;
     session->top_p = co.top_p;
     session->min_p = co.min_p;
-    session->repeat_penalty = co.repeat_penalty;
-    session->repeat_last_n = co.repeat_last_n;
-
+    session->repeat_penalty   = co.repeat_penalty;
+    session->repeat_last_n    = co.repeat_last_n;
+    session->frequency_penalty = co.frequency_penalty;
+    session->presence_penalty  = co.presence_penalty;
 
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
@@ -229,6 +232,7 @@ int main(int argc, char *argv[]) {
             next_token = sample_token(session->logits, session->cfg.n_vocab,
                                        co.temperature, co.top_k, co.top_p, co.min_p,
                                        co.repeat_penalty, co.repeat_last_n,
+                                       co.frequency_penalty, co.presence_penalty,
                                        session->tokens, session->n_tokens);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
@@ -253,6 +257,7 @@ int main(int argc, char *argv[]) {
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
                                            co.temperature, co.top_k, co.top_p, co.min_p,
                                            co.repeat_penalty, co.repeat_last_n,
+                                           co.frequency_penalty, co.presence_penalty,
                                            session->tokens, session->n_tokens);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);

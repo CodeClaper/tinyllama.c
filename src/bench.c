@@ -21,6 +21,8 @@ typedef struct {
     u32 top_k;
     float top_p;
     float min_p;
+    float frequency_penalty;
+    float presence_penalty;
     const char *input;
     const char *output;
     int repeat;
@@ -193,6 +195,7 @@ int main(int argc, char *argv[]) {
             next_token = sample_token(session->logits, session->cfg.n_vocab,
                                       opts.temperature, opts.top_k, opts.top_p, opts.min_p,
                                       session->repeat_penalty, session->repeat_last_n,
+                                      session->frequency_penalty, session->presence_penalty,
                                       session->tokens, session->n_tokens);
         else
             next_token = sample_greedy(session->logits, session->cfg.n_vocab);
@@ -226,6 +229,7 @@ int main(int argc, char *argv[]) {
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
                                           opts.temperature, opts.top_k, opts.top_p, opts.min_p,
                                           session->repeat_penalty, session->repeat_last_n,
+                                          session->frequency_penalty, session->presence_penalty,
                                           session->tokens, session->n_tokens);
             else
                 next_token = sample_greedy(session->logits, session->cfg.n_vocab);
