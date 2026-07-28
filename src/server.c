@@ -261,19 +261,19 @@ static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
 /* Useage. */
 static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   server [options]\n");
-    fprintf(file, "Example: server -m model.gguf -p 9987 -t 0.9 -p 0.9\n");
+    fprintf(file, "Example: server -m model.gguf -p 9987 -t 0.9 -tp 0.9\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m | --model   <string>  The model file path to run\n");
-    fprintf(file, "  -h | --host    <string>  The server host, defalt 127.0.0.1\n");
-    fprintf(file, "  -p | --port    <int>     The Port to listening, default 9987\n");
-    fprintf(file, "  -c | --ctx     <int>     The context size, defalt 4096\n");
-    fprintf(file, "  -n | --tokens  <int>     The default token size, defalt 393216\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
-    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
-    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
-    fprintf(file, "  -i | --inspect <none>    Inspect the engine/model\n");
+    fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
+    fprintf(file, "  -h  | --host    <string>  The server host, defalt 127.0.0.1\n");
+    fprintf(file, "  -p  | --port    <int>     The Port to listening, default 9987\n");
+    fprintf(file, "  -c  | --ctx     <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -n  | --tokens  <int>     The default token size, defalt 393216\n");
+    fprintf(file, "  -t  | --temp    <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -T  | --threads <int>     Number of threads, default 1\n");
+    fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P  | --minp    <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -i  | --inspect <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
 
@@ -307,8 +307,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {

@@ -28,15 +28,15 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   chat [options]\n");
     fprintf(file, "Example: chat -m model.gguf -s \"You are a helpful assistant.\"\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m | --model   <string>  The model file path to run\n");
-    fprintf(file, "  -c | --ctx     <int>     The context size, default 4096\n");
-    fprintf(file, "  -n | --tokens  <int>     Number of tokens to generate, default 128\n");
-    fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
-    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
-    fprintf(file, "  -s | --system  <string>  System input\n");
+    fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
+    fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
+    fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
+    fprintf(file, "  -T  | --threads <int>     Number of threads, default 1\n");
+    fprintf(file, "  -t  | --temp    <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P  | --minp    <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -s  | --system  <string>  System input\n");
     exit(exit_code);
 }
 
@@ -93,8 +93,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) co.temperature = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) co.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-s") || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {

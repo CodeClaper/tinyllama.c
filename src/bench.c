@@ -32,17 +32,17 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   bench [options]\n");
     fprintf(file, "Example: bench -m model.gguf -i \"Who is Isaac Newton?\"\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m | --model   <string>  The model file path to run\n");
-    fprintf(file, "  -c | --ctx     <int>     The context size, default 4096\n");
-    fprintf(file, "  -n | --tokens  <int>     Number of tokens to generate, default 128\n");
-    fprintf(file, "  -T | --threads <int>     Number of threads, default 1\n");
-    fprintf(file, "  -t | --temp    <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -p | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -k | --topk    <int>     Top-k sampling, default 40\n");
-    fprintf(file, "  -P | --minp    <float>   Min-p threshold, default 0.05\n");
-    fprintf(file, "  -i | --input   <string>  User input\n");
-    fprintf(file, "  -o | --output  <string>  Output file for generated text (optional)\n");
-    fprintf(file, "  -r | --repeat  <int>     Repeat count, default 1\n");
+    fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
+    fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
+    fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
+    fprintf(file, "  -T  | --threads <int>     Number of threads, default 1\n");
+    fprintf(file, "  -t  | --temp    <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P  | --minp    <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -i  | --input   <string>  User input\n");
+    fprintf(file, "  -o  | --output  <string>  Output file for generated text (optional)\n");
+    fprintf(file, "  -r  | --repeat  <int>     Repeat count, default 1\n");
     exit(exit_code);
 }
 
@@ -75,8 +75,8 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) bo.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) bo.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) bo.temperature = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-p") || !strcmp(arg, "--topp")) bo.top_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-k") || !strcmp(arg, "--topk")) bo.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) bo.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) bo.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P") || !strcmp(arg, "--minp")) bo.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--input")) bo.input = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-o") || !strcmp(arg, "--output")) bo.output = parse_arg(argc, argv, &i, arg);
