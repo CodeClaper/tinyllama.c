@@ -159,12 +159,49 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
     #undef RMS_STACK
 }
 
+/* ---- Parallel mat-vec row workers ----------------------------------
+ * Each invocation of the worker computes one output element y[i].
+ * The context is shared read-only across threads (it is fully
+ * initialised before pthreads_parallel_for is entered), and each
+ * worker writes a disjoint index of y, so there is no data race. */
+typedef struct {
+    float       *y;       /* output row slice                      */
+    TensorInfo  *tw;      /* weight tensor                         */
+    const u8    *base;    /* mmap base                             */
+    const float *x;       /* input vector                          */
+    u64          cols;    /* row length / dot-product length       */
+    const i8    *x_i8;    /* i8-quantised x (dotprod path only)    */
+    float        x_scale; /* scale for x_i8 (dotprod path only)    */
+} MatVecCtx;
+
+/* Standard fused dequant + dot product row worker. */
+static void matvec_worker(void *arg, int tid, int i) {
+    (void)tid;
+    MatVecCtx *c = (MatVecCtx *)arg;
+    c->y[i] = gguf_dot_batch(c->tw, c->base, (u64)i * c->cols, c->cols, c->x);
+}
+
+/* i8 dot-product row worker (ARMv8.2+ dotprod, Q8_0 / Q8_K). */
+#if defined(__ARM_FEATURE_DOTPROD)
+static void matvec_i8_worker(void *arg, int tid, int i) {
+    (void)tid;
+    MatVecCtx *c = (MatVecCtx *)arg;
+    c->y[i] = gguf_dot_i8_batch(c->tw, c->base, (u64)i * c->cols, c->cols,
+                                c->x_i8, c->x_scale);
+}
+#endif
+
 /* Matrix-vector multiply: y = W @ x  (W is [rows × cols], stored row-major).
  * cols is derived from the tensor's last dimension; rows must match dim[0].
  *
  * When trans=true, the weight is treated as transposed: y = W^T @ x.
- * In that case dim[0] is the input dimension and dim[ndim-1] is the output. */
-bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans) {
+ * In that case dim[0] is the input dimension and dim[ndim-1] is the output.
+ *
+ * When pool is non-NULL and has more than one thread, the row loop of the
+ * standard (non-transposed) path is dispatched across the worker pool;
+ * each row's fused dequant + dot product runs on a separate core.  The
+ * transposed path stays serial (its strided gather needs per-row scratch). */
+bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
     if (!tw || tw->ndim < 2) {
         slog(WARN, "mat_vec_mul: tensor missing or ndim < 2");
         return false;
@@ -214,15 +251,25 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             i8 *x_i8 = smalloc(cols * sizeof(i8));
             if (!x_i8) return false;
             float x_scale = quantize_f32_to_i8(x, x_i8, cols);
-            for (u64 r = 0; r < rows; r++)
-                y[r] = gguf_dot_i8_batch(tw, base, r * cols, cols,
-                                         x_i8, x_scale);
+            if (pool && pool->nthreads > 1 && rows > 1) {
+                MatVecCtx ctx = { y, tw, base, x, cols, x_i8, x_scale };
+                pthreads_parallel_for(pool, 0, (int)rows, matvec_i8_worker, &ctx);
+            } else {
+                for (u64 r = 0; r < rows; r++)
+                    y[r] = gguf_dot_i8_batch(tw, base, r * cols, cols,
+                                             x_i8, x_scale);
+            }
             sfree(x_i8);
         } else
 #endif
         {
-            for (u64 r = 0; r < rows; r++)
-                y[r] = gguf_dot_batch(tw, base, r * cols, cols, x);
+            if (pool && pool->nthreads > 1 && rows > 1) {
+                MatVecCtx ctx = { y, tw, base, x, cols, NULL, 0.0f };
+                pthreads_parallel_for(pool, 0, (int)rows, matvec_worker, &ctx);
+            } else {
+                for (u64 r = 0; r < rows; r++)
+                    y[r] = gguf_dot_batch(tw, base, r * cols, cols, x);
+            }
         }
     }
     return true;

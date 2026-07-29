@@ -167,14 +167,14 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         if (t_qkv) {
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans)) return false;
+            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans, s->pthreads)) return false;
             memcpy(ws->q, ws->qkv_fused, q_dim * sizeof(float));
             memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
             memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
         } else if (t_q && t_k && t_v) {
-            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd)) return false;
-            if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd)) return false;
-            if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd)) return false;
+            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) return false;
         } else {
             slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
             return false;
@@ -261,7 +261,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim)) return false;
+                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
             }
         }
 
@@ -286,14 +286,14 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
             TensorInfo *t_down = lw->tensors[TENSOR_FFN_DOWN];
             u32 fh = ws->ffn_hidden;
 
-            if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd, t_gate->dim[0] == n_embd)) return false;
-            if (!mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd, t_up->dim[0] == n_embd)) return false;
+            if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) return false;
 
             silu(ws->hb, fh);
             for (u32 i = 0; i < fh; i++)
                 ws->hb[i] *= ws->hb2[i];
 
-            if (!mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh, t_down->dim[0] == fh)) return false;
+            if (!mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) return false;
 
             /* Residual. */
             for (u32 i = 0; i < n_embd; i++)
@@ -318,7 +318,7 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
         float *dst = logits ? logits : s->logits;
-        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd)) return false;
+        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) return false;
         DBG_VEC("logits", dst, c->n_vocab);
     }
 
@@ -667,7 +667,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
-        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd)) goto fail;
+        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) goto fail;
     }
 
     /* ---- 5. Update session state ---- */
