@@ -318,6 +318,25 @@ void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base) {
     }
 }
 
+/* RoPE (GPT-NeoX / Llama style): rotate-half pairing.
+ * buf is [n_heads × head_dim], each head rotated independently.
+ * Pairs element i with i + head_dim/2 (across halves) instead of the
+ * interleaved (2i, 2i+1) pairing used by rope(). Required for Qwen2/Llama. */
+void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base) {
+    u32 half = head_dim / 2;
+    for (u32 h = 0; h < n_heads; h++) {
+        float *bh = buf + h * head_dim;
+        for (u32 i = 0; i < half; i++) {
+            float theta = 1.0f / powf(theta_base, (float)(2 * i) / (float)head_dim);
+            float c     = cosf((float)pos * theta);
+            float s     = sinf((float)pos * theta);
+            float a     = bh[i], b = bh[i + half];
+            bh[i]        = a * c - b * s;
+            bh[i + half] = a * s + b * c;
+        }
+    }
+}
+
 /* SiLU activation in-place. */
 void silu(float *x, int n) {
     for (int i = 0; i < n; i++)
