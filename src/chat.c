@@ -35,7 +35,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
-    fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 128\n");
+    fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default 1\n");
     fprintf(file, "  -s  | --system            <string>  System input\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
@@ -86,7 +86,7 @@ static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
 static ChatOptions parse_options(int argc, char *argv[]) {
     ChatOptions co = {
         .ctx_size = 4096,
-        .n_tokens = 128,
+        .n_tokens = 393216,
         .temperature = 0.8f,
         .top_k = DEFAULT_TOP_K,
         .top_p = 0.9f,
@@ -184,6 +184,7 @@ int main(int argc, char *argv[]) {
     session->top_k = co.top_k;
     session->top_p = co.top_p;
     session->min_p = co.min_p;
+    session->max_tokens       = co.n_tokens;
     session->repeat_penalty   = co.repeat_penalty;
     session->repeat_last_n    = co.repeat_last_n;
     session->frequency_penalty = co.frequency_penalty;
