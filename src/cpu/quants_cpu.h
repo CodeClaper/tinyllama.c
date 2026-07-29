@@ -28,7 +28,6 @@ float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *
  * instead of the 5-instruction widening chain.
  */
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n);
-float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
-                         const i8 *x_i8, float x_scale);
+float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const i8 *x_i8, float x_scale);
 
 #endif
