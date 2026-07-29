@@ -33,17 +33,19 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   chat [options]\n");
     fprintf(file, "Example: chat -m model.gguf -s \"You are a helpful assistant.\"\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m  | --model          <string>  The model file path to run\n");
-    fprintf(file, "  -c  | --ctx            <int>     The context size, default 4096\n");
-    fprintf(file, "  -n  | --tokens         <int>     Number of tokens to generate, default 128\n");
-    fprintf(file, "  -T  | --threads        <int>     Number of threads, default 1\n");
-    fprintf(file, "  -t  | --temp           <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -tp | --topp           <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -tk | --topk           <int>     Top-k sampling, default 40\n");
-    fprintf(file, "  -P  | --minp           <float>   Min-p threshold, default 0.05\n");
-    fprintf(file, "  -rp | --repeat-penalty <float>   Repeat penalty, default 1.0 (1.0=disabled)\n");
-    fprintf(file, "  -rl | --repeat-last-n  <int>     Repeat penalty lookback, default 64\n");
-    fprintf(file, "  -s  | --system         <string>  System input\n");
+    fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
+    fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
+    fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 128\n");
+    fprintf(file, "  -T  | --threads           <int>     Number of threads, default 1\n");
+    fprintf(file, "  -s  | --system            <string>  System input\n");
+    fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P  | --minp              <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -rp | --repeat-penalty    <float>   Repeat penalty, default 1.0 (1.0=disabled)\n");
+    fprintf(file, "  -rl | --repeat-last-n     <int>     Repeat penalty lookback, default 64\n");
+    fprintf(file, "  -fp | --frequency-penalty <float>   Frequency penalty, default 0.0 (0.0=disabled)\n");
+    fprintf(file, "  -pp | --presence-penalty  <float>   Presence penalty, default 0.0 (0.0=disabled)\n");
     exit(exit_code);
 }
 
@@ -91,6 +93,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .min_p = DEFAULT_MIN_P,
         .repeat_penalty = DEFAULT_REPEAT_PENALTY,
         .repeat_last_n = DEFAULT_REPEAT_LAST_N,
+        .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
+        .presence_penalty = DEFAULT_PRESENCE_PENALTY,
         .nthread = 1,
         .system = NULL
     };
@@ -107,6 +111,8 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) co.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeat-penalty")) co.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) co.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) co.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) co.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-s")  || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);

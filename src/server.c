@@ -269,19 +269,21 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Usage:   server [options]\n");
     fprintf(file, "Example: server -m model.gguf -p 9987 -t 0.9 -tp 0.9\n");
     fprintf(file, "Options:\n");
-    fprintf(file, "  -m  | --model          <string>  The model file path to run\n");
-    fprintf(file, "  -h  | --host           <string>  The server host, defalt 127.0.0.1\n");
-    fprintf(file, "  -p  | --port           <int>     The Port to listening, default 9987\n");
-    fprintf(file, "  -c  | --ctx            <int>     The context size, defalt 4096\n");
-    fprintf(file, "  -n  | --tokens         <int>     The default token size, defalt 393216\n");
-    fprintf(file, "  -t  | --temp           <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -T  | --threads        <int>     Number of threads, default 1\n");
-    fprintf(file, "  -tp | --topp           <float>   Top-p (nucleus) threshold, default 0.9\n");
-    fprintf(file, "  -tk | --topk           <int>     Top-k sampling, default 40\n");
-    fprintf(file, "  -P  | --minp           <float>   Min-p threshold, default 0.05\n");
-    fprintf(file, "  -rp | --repeat-penalty <float>   Repeat penalty, default 1.0 (1.0=disabled)\n");
-    fprintf(file, "  -rl | --repeat-last-n  <int>     Repeat penalty lookback, default 64\n");
-    fprintf(file, "  -i  | --inspect        <none>    Inspect the engine/model\n");
+    fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
+    fprintf(file, "  -h  | --host              <string>  The server host, defalt 127.0.0.1\n");
+    fprintf(file, "  -p  | --port              <int>     The Port to listening, default 9987\n");
+    fprintf(file, "  -c  | --ctx               <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
+    fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
+    fprintf(file, "  -T  | --threads           <int>     Number of threads, default 1\n");
+    fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
+    fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
+    fprintf(file, "  -P  | --minp              <float>   Min-p threshold, default 0.05\n");
+    fprintf(file, "  -rp | --repeat-penalty    <float>   Repeat penalty, default 1.0 (1.0=disabled)\n");
+    fprintf(file, "  -rl | --repeat-last-n     <int>     Repeat penalty lookback, default 64\n");
+    fprintf(file, "  -fp | --frequency-penalty <float>   Frequency penalty, default 0.0 (0.0=disabled)\n");
+    fprintf(file, "  -pp | --presence-penalty  <float>   Presence penalty, default 0.0 (0.0=disabled)\n");
+    fprintf(file, "  -i  | --inspect           <none>    Inspect the engine/model\n");
     exit(exit_code);
 }
 
@@ -305,7 +307,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .min_p = DEFAULT_MIN_P,
         .repeat_penalty = DEFAULT_REPEAT_PENALTY,
         .repeat_last_n = DEFAULT_REPEAT_LAST_N,
-        .nthread = 1,
+        .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
+        .presence_penalty = DEFAULT_PRESENCE_PENALTY,
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -322,6 +325,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeat-penalty")) so.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) so.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) so.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) so.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i")  || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
