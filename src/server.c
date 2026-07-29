@@ -382,6 +382,7 @@ static void server_resource_close(Server *server) {
 }
 
 int main(int argc, char *argv[]) {
+    /* 1. Parse server options. */
     if (argc < 2) usage(stderr, 2);
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
@@ -393,6 +394,8 @@ int main(int argc, char *argv[]) {
 
     srand((unsigned)time(NULL) ^ (unsigned)getpid());
     ServerOptions so = parse_options(argc, argv);
+
+    /* 2. Load model. */
     Engine *engine = engine_open(&so.engine);
     if (so.inspect) { 
         engine_summary(engine);
@@ -400,6 +403,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    /* 3. Create session & configure sampling. */
     Session *session = session_create(engine, (u32)so.ctx_size, so.nthread);
     if (!session) {
         engine_close(engine);
@@ -415,6 +419,7 @@ int main(int argc, char *argv[]) {
     session->frequency_penalty = so.frequency_penalty;
     session->presence_penalty  = so.presence_penalty;
 
+    /* 4. Set up server & signal handling. */
     Server server;
     server.engine = engine;
     server.session = session;
@@ -431,8 +436,10 @@ int main(int argc, char *argv[]) {
 
     slog(INFO, "Server: listening on http://%s:%d", so.host, so.port);
 
+    /* 5. Run event loop (blocks until shutdown). */
     el_main(server.el);
 
+    /* 6. Cleanup. */
     slog(INFO, "Server: shutdown requested, draining requests");
     server_resource_close(&server);
     return 0;
