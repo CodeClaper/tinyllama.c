@@ -11,14 +11,14 @@ endif
 LDADDCFLAGS = -lm -flto=auto -pthread
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       tokenizer.o sampler.o pthreads.o kvcache.o \
+       tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
        model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
-             tokenizer.o sampler.o pthreads.o kvcache.o \
-             model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
-             cpu/quants_cpu.o
+              tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
+              model/llama.o model/qwen2.o model/deepseek.o model/falcon.o \
+              cpu/quants_cpu.o
 
 all: server chat bench
 
@@ -91,7 +91,10 @@ cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_arm.c cpu/quants_x86.c cpu/quants_
 kvcache.o: kvcache.c kvcache.h def.h
 	$(CC) $(CFLAGS) -c kvcache.c -o $@
 
+rax.o: rax.c rax.h
+	$(CC) $(CFLAGS) -c rax.c -o $@
+
 .PHONY: clean all
 
 clean:
-	rm -f *.o model/*.o cpu/*.o server bench
+	rm -f *.o model/*.o cpu/*.o server bench rax.o
