@@ -275,7 +275,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -c  | --ctx               <int>     The context size, defalt 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
-    fprintf(file, "  -T  | --threads           <int>     Number of threads, default 1\n");
+    fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
     fprintf(file, "  -P  | --minp              <float>   Min-p threshold, default 0.05\n");
@@ -303,12 +303,13 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .default_tokens = 393216,
         .temperature = 0.8f,
         .top_k = DEFAULT_TOP_K,
-        .top_p = 0.9f,
+        .top_p = DEFAULT_TOP_P,
         .min_p = DEFAULT_MIN_P,
         .repeat_penalty = DEFAULT_REPEAT_PENALTY,
         .repeat_last_n = DEFAULT_REPEAT_LAST_N,
         .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
         .presence_penalty = DEFAULT_PRESENCE_PENALTY,
+        .nthread = DEFAULT_N_THREAD
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -333,7 +334,10 @@ static ServerOptions parse_options(int argc, char *argv[]) {
             usage(stderr, 2);
         }
     }
-    if (so.nthread < 1) so.nthread = 1;
+    if (so.nthread <= 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        so.nthread = (int)(n > 0 ? n : 1);
+    }
     if (so.temperature < 0.0f) {
         fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", so.temperature);
         usage(stderr, 2);

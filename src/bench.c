@@ -37,7 +37,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
     fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
-    fprintf(file, "  -T  | --threads <int>     Number of threads, default 1\n");
+    fprintf(file, "  -T  | --threads <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -t  | --temp    <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
@@ -67,7 +67,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         .input = NULL,
         .output = NULL,
         .repeat = 1,
-        .nthread = 1,
+        .nthread = -1,
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -91,7 +91,10 @@ static BenchOptions parse_options(int argc, char *argv[]) {
     if (!bo.engine.model_path) slog(ERROR, "Model path is required (-m / --model)");
     if (!bo.input) slog(ERROR, "Input text is required (-i / --input)");
     if (bo.repeat < 1) bo.repeat = 1;
-    if (bo.nthread < 1) bo.nthread = 1;
+    if (bo.nthread <= 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        bo.nthread = (int)(n > 0 ? n : 1);
+    }
     if (bo.n_tokens < 1) bo.n_tokens = 1;
     if (bo.temperature < 0.0f) {
         fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", bo.temperature);

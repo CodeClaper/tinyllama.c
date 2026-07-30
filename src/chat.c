@@ -36,7 +36,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
-    fprintf(file, "  -T  | --threads           <int>     Number of threads, default 1\n");
+    fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -s  | --system            <string>  System input\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
@@ -95,7 +95,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .repeat_last_n = DEFAULT_REPEAT_LAST_N,
         .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
         .presence_penalty = DEFAULT_PRESENCE_PENALTY,
-        .nthread = 1,
+        .nthread = -1,
         .system = NULL
     };
     for (int i = 1; i < argc; i++) {
@@ -119,7 +119,10 @@ static ChatOptions parse_options(int argc, char *argv[]) {
             usage(stderr, 2);
         }
     }
-    if (co.nthread < 1) co.nthread = 1;
+    if (co.nthread <= 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        co.nthread = (int)(n > 0 ? n : 1);
+    }
     if (co.n_tokens < 1) co.n_tokens = 1;
     if (!co.engine.model_path) {
         fprintf(stderr, "Model path is required (-m / --model)");
