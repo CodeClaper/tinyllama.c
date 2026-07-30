@@ -159,25 +159,39 @@ Benchmark results on a consumer desktop:
 │   ├── server.c        — CLI entry point, HTTP server, option parsing
 │   ├── chat.c          — Interactive CLI chat
 │   ├── bench.c         — Inference benchmark
-│   ├── core.c          — Engine/model loading, GGUF parsing
-│   ├── mm.c            — Safe memory allocators
-│   ├── slog.c          — Logging
-│   ├── utils.c         — String parsing, key comparison, etc.
-│   ├── el.c            — epoll event loop
-│   ├── anet.c          — TCP networking helpers
-│   ├── http.c          — HTTP request/response helpers
-│   ├── tokenizer.c     — Tokenizer (BPE/SPM/WPM)
-│   ├── sampler.c       — Token sampling
-│   ├── tpool.c         — Thread pool
-│   ├── quants.c        — Quantized tensor dequantization
+│   ├── core.c / core.h — Engine/model loading, GGUF parsing
+│   ├── mm.c / mm.h     — Safe memory allocators
+│   ├── slog.c / slog.h — Logging
+│   ├── utils.c / utils.h — String parsing, key comparison, etc.
+│   ├── el.c / el.h     — epoll event loop
+│   ├── anet.c / anet.h — TCP networking helpers
+│   ├── http.c / http.h — HTTP request/response helpers
+│   ├── tokenizer.c / tokenizer.h — Tokenizer (BPE/SPM/WPM)
+│   ├── sampler.c / sampler.h — Token sampling
+│   ├── pthreads.c / pthreads.h — Thread pool
+│   ├── quants.c / quants.h — Quantized tensor dequantization
+│   ├── kvcache.c / kvcache.h — KV cache
+│   ├── rax.c / rax.h   — Radix tree
 │   ├── model/          — Architecture-specific forward passes
+│   │   ├── model.h
 │   │   ├── llama.c
 │   │   ├── qwen2.c
 │   │   ├── deepseek.c
 │   │   └── falcon.c
-│   └── cpu/            — CPU-optimized kernels
-│       ├── quants_cpu.c
-│       ├── quants_x86.c
-│       └── quants_arm.c
+│   ├── cpu/            — CPU-optimized kernels
+│   │   ├── quants_cpu.c / quants_cpu.h
+│   │   ├── quants_x86.c
+│   │   └── quants_arm.c
+│   └── gpu/            — GPU-optimized kernels
+│       ├── quants_gpu.c
+│       └── quants_gpu.h
 └── test/               — Unit tests
+    ├── Makefile
+    ├── c/              — Test sources
+    │   ├── minunit.h
+    │   ├── test_pthreads.c
+    │   ├── test_qwen2.c
+    │   └── test_utils.c
+    └── py/             — Test utilities
+        └── generate_test_vectors.py
 ```
