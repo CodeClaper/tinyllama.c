@@ -23,6 +23,16 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - epoll-based event loop for HTTP serving
 - CPU backends with x86 and ARM optimizations
 
+## Supported Models
+
+| Model Family | GGUF Architecture ID | Status |
+|---|---|---|
+| Qwen2 / Qwen2.5 | `qwen2` | Supported |
+| Qwen3 / Qwen3.5 | `qwen35` | WIP |
+| LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | WIP |
+| DeepSeek-V2 | `deepseek2` | WIP |
+| Falcon | `falcon` | WIP |
+
 ## Dependencies
 
 - **Compiler:** GCC
