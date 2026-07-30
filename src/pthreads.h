@@ -18,6 +18,7 @@ typedef struct pthreads {
     pthreads_work   work;
     void            *work_arg;
     volatile int    done_count;
+    volatile int    done_work;
 } pthreads_t;
 
 pthreads_t *pthreads_create(int nthreads);

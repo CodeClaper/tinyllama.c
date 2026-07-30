@@ -1474,18 +1474,18 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     if (!en || ctx_size == 0) return NULL;
 
     Session *s = smalloc(sizeof(*s));
-    s->en              = en;
-    s->ctx_size        = ctx_size;
-    s->temperature     = DEFAULT_TEMPERATURE;
-    s->pthreads        = pthreads_create(nthreads);
-    s->top_p           = DEFAULT_TOP_P ;
-    s->top_k           = DEFAULT_TOP_K ;
-    s->min_p           = DEFAULT_MIN_P;
-    s->repeat_penalty   = DEFAULT_REPEAT_PENALTY;
-    s->repeat_last_n    = DEFAULT_REPEAT_LAST_N;
+    s->en                = en;
+    s->ctx_size          = ctx_size;
+    s->temperature       = DEFAULT_TEMPERATURE;
+    s->top_p             = DEFAULT_TOP_P ;
+    s->top_k             = DEFAULT_TOP_K ;
+    s->min_p             = DEFAULT_MIN_P;
+    s->repeat_penalty    = DEFAULT_REPEAT_PENALTY;
+    s->repeat_last_n     = DEFAULT_REPEAT_LAST_N;
     s->frequency_penalty = 0.0f;
     s->presence_penalty  = 0.0f;
-    s->max_tokens       = 0;
+    s->max_tokens        = 0;
+    s->pthreads          = pthreads_create(nthreads);
 
     /* Fill architecture config from model metadata. */
     arch_config_init(en, &s->cfg);

@@ -23,8 +23,8 @@ static void *worker_loop(void *arg) {
         }
 
         pthreads_work work = pool->work;
-        void *arg_work  = pool->work_arg;
-        int end         = pool->end;
+        void *arg_work     = pool->work_arg;
+        int end            = pool->end;
 
         pthread_mutex_unlock(&pool->lock);
 
@@ -42,6 +42,7 @@ static void *worker_loop(void *arg) {
             pthread_mutex_unlock(&pool->lock);
 
             work(arg_work, tid, i);
+            __sync_fetch_and_add(&pool->done_work, 1);
         }
 
         pthread_mutex_lock(&pool->lock);
@@ -102,13 +103,14 @@ void pthreads_parallel_for(pthreads_t *pool, int start, int end, pthreads_work w
     pool->end        = end;
     pool->current    = start;
     pool->done_count = 0;
+    pool->done_work  = start;
     pool->work       = work;
     pool->work_arg   = arg;
     pthread_cond_broadcast(&pool->notify);
     pthread_mutex_unlock(&pool->lock);
 
     pthread_mutex_lock(&pool->lock);
-    while (pool->done_count < pool->nthreads)
+    while (pool->done_count < pool->nthreads || pool->done_work < end)
         pthread_cond_wait(&pool->notify, &pool->lock);
     pool->work = NULL;
     pthread_mutex_unlock(&pool->lock);
