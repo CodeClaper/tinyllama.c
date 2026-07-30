@@ -271,16 +271,21 @@ int main(int argc, char *argv[]) {
 
     /* Print results. */
     printf("\n===== TinyLLaMA Benchmark =====\n");
-    printf("Model:          %s\n", opts.engine.model_path);
-    printf("Architecture:   %s\n", engine->model->arch_name);
-    printf("Context Size:   %d\n", opts.ctx_size);
-    printf("Prompt Tokens:  %d\n", n_prompt);
-    printf("Target Tokens:  %u\n", opts.n_tokens);
-    printf("Repeats:        %d\n", opts.repeat);
-    printf("Temperature:    %.2f\n", opts.temperature);
-    printf("Top-k:          %u\n", opts.top_k);
-    printf("Top-p:          %.2f\n", opts.top_p);
-    printf("Min-p:          %.2f\n", opts.min_p);
+    printf("Model:              %s\n", opts.engine.model_path);
+    printf("Architecture:       %s\n", engine->model->arch_name);
+    printf("Context Size:       %d\n", opts.ctx_size);
+    printf("Threads:            %d\n", opts.nthread);
+    printf("Prompt Tokens:      %d\n", n_prompt);
+    printf("Target Tokens:      %u\n", opts.n_tokens);
+    printf("Repeats:            %d\n", opts.repeat);
+    printf("Temperature:        %.2f\n", opts.temperature);
+    printf("Top-k:              %u\n", opts.top_k);
+    printf("Top-p:              %.2f\n", opts.top_p);
+    printf("Min-p:              %.2f\n", opts.min_p);
+    printf("Repeat Penalty:     %.2f\n", session->repeat_penalty);
+    printf("Repeat Last N:      %u\n", session->repeat_last_n);
+    printf("Frequency Penalty:  %.2f\n", opts.frequency_penalty);
+    printf("Presence Penalty:   %.2f\n", opts.presence_penalty);
     printf("────────────────────────────────────────────────────────────────────────────────────────────────\n");
     for (int r = 0; r < opts.repeat; r++) {
         double prefill_tok_s = (double)n_prompt / (prefill_times[r] / 1000.0);
