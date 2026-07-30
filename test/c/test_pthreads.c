@@ -101,6 +101,11 @@ MU_TEST(test_destroy_null) {
     pthreads_destroy(NULL);
 }
 
+typedef struct {
+    volatile int acc;
+    int total;
+} IncCtx;
+
 /* Regression test for the SIGSEGV seen when mat_vec_mul dispatched
  * through the pool with a stack-local ctx.  Before the generation-
  * counter fix, a slow worker could still be reading the (already
@@ -112,10 +117,11 @@ MU_TEST(test_destroy_null) {
  * a handful of iterations. */
 static void slow_inc(void *arg, int tid, int i) {
     (void)tid; (void)i;
-    volatile int *acc = (volatile int *)arg;
-    __atomic_fetch_add(acc, 1, __ATOMIC_SEQ_CST);
+    IncCtx *ctx = (IncCtx *)arg;
+    __atomic_fetch_add(&ctx->acc, 1, __ATOMIC_SEQ_CST);
     /* Burn cycles to widen the race window for a straggling worker. */
     for (volatile int v = 0; v < 200; v++) { /* nop */ }
+    mu_check(ctx->acc <= 100);
 }
 
 MU_TEST(test_rapid_reentrant_dispatch_stack_arg) {
@@ -125,12 +131,27 @@ MU_TEST(test_rapid_reentrant_dispatch_stack_arg) {
     pthreads_t *pool = pthreads_create(T);
     long total = 0;
     for (int iter = 0; iter < ITERS; iter++) {
-        int acc = 0;                 /* stack-local, torn down on loop end */
-        pthreads_parallel_for(pool, 0, N, slow_inc, &acc);
-        mu_assert_int_eq(N, acc);
-        total += acc;
+        IncCtx ctx = {.acc = 0, .total=N };
+        /* stack-local, torn down on loop end */
+        pthreads_parallel_for(pool, 0, N, slow_inc, &ctx);
+        mu_assert_int_eq(N, ctx.acc);
+        total += ctx.acc;
     }
     mu_assert_int_eq((long)ITERS * N, total);
+    pthreads_destroy(pool);
+}
+
+
+MU_TEST(test_rapid_reentrant_dispatch_stack_sig) {
+    const int N = 100;
+    const int T = 4;
+    const int ITERS = 50;
+    pthreads_t *pool = pthreads_create(T);
+    for (int iter = 0; iter < ITERS; iter++) {
+        IncCtx ctx = {.acc = 0, .total=N };
+        /* stack-local, torn down on loop end */
+        pthreads_parallel_for(pool, 0, N, slow_inc, &ctx);
+    }
     pthreads_destroy(pool);
 }
 
@@ -146,6 +167,7 @@ int main(void) {
     MU_RUN_TEST(test_single_thread);
     MU_RUN_TEST(test_destroy_null);
     MU_RUN_TEST(test_rapid_reentrant_dispatch_stack_arg);
+    MU_RUN_TEST(test_rapid_reentrant_dispatch_stack_sig);
 
     MU_REPORT();
     return MU_EXIT_CODE;
