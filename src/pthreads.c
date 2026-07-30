@@ -22,17 +22,13 @@ static void *worker_loop(void *arg) {
             return NULL;
         }
 
-        pthreads_work work = pool->work;
-        void *arg_work     = pool->work_arg;
-        int end            = pool->end;
-
         pthread_mutex_unlock(&pool->lock);
 
         FOREVER {
             int i;
             pthread_mutex_lock(&pool->lock);
             i = pool->current;
-            if (i >= end) {
+            if (i >= pool->end) {
                 pool->done_count++;
                 pthread_cond_signal(&pool->notify);
                 pthread_mutex_unlock(&pool->lock);
@@ -41,7 +37,7 @@ static void *worker_loop(void *arg) {
             pool->current = i + 1;
             pthread_mutex_unlock(&pool->lock);
 
-            work(arg_work, tid, i);
+            pool->work(pool->work_arg, tid, i);
             __sync_fetch_and_add(&pool->done_work, 1);
         }
 

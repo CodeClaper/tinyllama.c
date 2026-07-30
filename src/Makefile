@@ -1,7 +1,7 @@
 CC = gcc
 ARCH ?= $(shell uname -m)
 ifdef DEBUG
-	CFLAGS = -O0 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
+	CFLAGS = -O3 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
 else
 	CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
 endif
