@@ -155,43 +155,57 @@ Benchmark results on a consumer desktop:
 ## Project Structure
 
 ```
-├── src/
-│   ├── server.c        — CLI entry point, HTTP server, option parsing
-│   ├── chat.c          — Interactive CLI chat
-│   ├── bench.c         — Inference benchmark
-│   ├── core.c / core.h — Engine/model loading, GGUF parsing
-│   ├── mm.c / mm.h     — Safe memory allocators
-│   ├── slog.c / slog.h — Logging
-│   ├── utils.c / utils.h — String parsing, key comparison, etc.
-│   ├── el.c / el.h     — epoll event loop
-│   ├── anet.c / anet.h — TCP networking helpers
-│   ├── http.c / http.h — HTTP request/response helpers
-│   ├── tokenizer.c / tokenizer.h — Tokenizer (BPE/SPM/WPM)
-│   ├── sampler.c / sampler.h — Token sampling
-│   ├── pthreads.c / pthreads.h — Thread pool
-│   ├── quants.c / quants.h — Quantized tensor dequantization
-│   ├── kvcache.c / kvcache.h — KV cache
-│   ├── rax.c / rax.h   — Radix tree
-│   ├── model/          — Architecture-specific forward passes
-│   │   ├── model.h
-│   │   ├── llama.c
-│   │   ├── qwen2.c
-│   │   ├── deepseek.c
-│   │   └── falcon.c
-│   ├── cpu/            — CPU-optimized kernels
-│   │   ├── quants_cpu.c / quants_cpu.h
-│   │   ├── quants_x86.c
-│   │   └── quants_arm.c
-│   └── gpu/            — GPU-optimized kernels
-│       ├── quants_gpu.c
-│       └── quants_gpu.h
-└── test/               — Unit tests
-    ├── Makefile
-    ├── c/              — Test sources
-    │   ├── minunit.h
-    │   ├── test_pthreads.c
-    │   ├── test_qwen2.c
-    │   └── test_utils.c
-    └── py/             — Test utilities
-        └── generate_test_vectors.py
+- src/
+  - server.c          — CLI entry point, HTTP server, option parsing
+  - chat.c            — Interactive CLI chat
+  - bench.c           — Inference benchmark
+  - core.c / core.h   — Engine/model loading, GGUF parsing
+  - mm.c              — Safe memory allocators
+  - mm.h
+  - slog.c            — Logging
+  - slog.h
+  - utils.c           — String parsing, key comparison, etc.
+  - utils.h
+  - el.c              — epoll event loop
+  - el.h
+  - anet.c            — TCP networking helpers
+  - anet.h
+  - http.c            — HTTP request/response helpers
+  - http.h
+  - tokenizer.c       — Tokenizer (BPE/SPM/WPM)
+  - tokenizer.h
+  - sampler.c         — Token sampling
+  - sampler.h
+  - pthreads.c        — Thread pool
+  - pthreads.h
+  - quants.c          — Quantized tensor dequantization
+  - quants.h
+  - kvcache.c         — KV cache
+  - kvcache.h
+  - rax.c             — Radix tree
+  - rax.h
+  - model/            — Architecture-specific forward passes
+    - model.h
+    - llama.c         — LLaMA architecture
+    - qwen2.c         — Qwen2 architecture
+    - deepseek.c      — DeepSeek architecture
+    - falcon.c        — Falcon architecture
+  - cpu/              — CPU-optimized kernels
+    - quants_cpu.c    — Kernel dispatcher
+    - quants_cpu.h
+    - quants_x86.c    — x86 SIMD optimizations
+    - quants_arm.c    — ARM NEON optimizations
+  - gpu/              — GPU-optimized kernels
+    - quants_gpu.c    — GPU quantized kernel
+    - quants_gpu.h
+
+- test/               — Unit tests
+  - Makefile
+  - c/                — Test sources
+    - minunit.h
+    - test_pthreads.c — Thread pool tests
+    - test_qwen2.c    — Qwen2 integration tests
+    - test_utils.c    — Utility function tests
+  - py/               — Test utilities
+    - generate_test_vectors.py
 ```
