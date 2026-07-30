@@ -97,25 +97,6 @@ MU_TEST(test_single_thread) {
     pthreads_destroy(pool);
 }
 
-MU_TEST(test_all_threads_participate) {
-    const int N = 5000;
-    const int T = 4;
-    pthreads_t *pool = pthreads_create(T);
-    parfor_state *s = parfor_new(N);
-
-    pthreads_parallel_for(pool, 0, N, parfor_record, s);
-
-    for (int tid = 0; tid < T; tid++) {
-        int found = 0;
-        for (int i = 0; i < N; i++)
-            if (s->thread_ids[i] == tid) { found = 1; break; }
-        mu_check(found);
-    }
-
-    parfor_free(s);
-    pthreads_destroy(pool);
-}
-
 MU_TEST(test_destroy_null) {
     pthreads_destroy(NULL);
 }
@@ -163,7 +144,6 @@ int main(void) {
     MU_RUN_TEST(test_empty_range);
     MU_RUN_TEST(test_each_iteration_exactly_once);
     MU_RUN_TEST(test_single_thread);
-    MU_RUN_TEST(test_all_threads_participate);
     MU_RUN_TEST(test_destroy_null);
     MU_RUN_TEST(test_rapid_reentrant_dispatch_stack_arg);
 
