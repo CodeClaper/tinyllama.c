@@ -275,15 +275,57 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     return true;
 }
 
+/* ---- Parallel mat-mat row workers -----------------------------------
+ * Each invocation computes one output row: dequantise the weight row
+ * into a per-thread buffer, then compute a dot product against every
+ * batch element's input row.  The w_row_buf array has nthreads slices
+ * of cols floats; thread tid writes to w_row_buf[tid * cols]. */
+typedef struct {
+    float       *Y;         /* output matrix [batch × rows]           */
+    TensorInfo  *tw;        /* weight tensor                          */
+    const u8    *base;      /* mmap base                              */
+    const float *X;         /* input matrix [batch × cols]            */
+    u64          batch;
+    u64          rows;
+    u64          cols;      /* dot-product length                     */
+    u64          tc;        /* tensor column-stride (transposed only) */
+    bool         trans;
+    float       *w_row_buf; /* nthreads * cols float buffer           */
+} MatMatCtx;
+
+static void matmat_worker(void *arg, int tid, int i) {
+    MatMatCtx *c = (MatMatCtx *)arg;
+    float *w_row = c->w_row_buf + (u64)tid * c->cols;
+
+    if (c->trans) {
+        for (u64 ci = 0; ci < c->cols; ci++)
+            w_row[ci] = tensor_get_f32(c->tw, c->base, ci * c->tc + (u64)i);
+    } else {
+        tensor_get_f32_batch(c->tw, c->base, (u64)i * c->cols, c->cols, w_row);
+    }
+
+    for (u64 b = 0; b < c->batch; b++) {
+        const float *x_row = c->X + b * c->cols;
+        float sum = 0.0f;
+        for (u64 ci = 0; ci < c->cols; ci++)
+            sum += w_row[ci] * x_row[ci];
+        c->Y[b * c->rows + (u64)i] = sum;
+    }
+}
+
 /* Batch matrix-matrix multiply:  Y[b] = W @ X[b]  for b ∈ [0, batch).
  *
  * Strategy: for each output row r, dequantise the entire weight
  * row into a contiguous buffer, then compute a dot product against
  * every batch element's input row.  The inner dot-product loop
  * runs over two contiguous arrays (trivially auto-vectorisable by
- * the compiler), and each weight is dequantised only once.          */
+ * the compiler), and each weight is dequantised only once.
+ *
+ * When pool is non-NULL and has more than one thread, the outer row
+ * loop is dispatched across the worker pool (one row per work item);
+ * each thread gets its own w_row slice to avoid data races. */
 bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
-                 u64 batch, u64 rows, u64 cols, bool trans) {
+                 u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
     if (!tw || tw->ndim < 2) {
         slog(WARN, "mat_mat_mul: tensor missing or ndim < 2");
         return false;
@@ -291,7 +333,37 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
-    /* Allocate a reusable buffer for one row of dequantised weights. */
+    if (trans) {
+        if (tr != cols || tc != rows) {
+            slog(WARN, "mat_mat_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
+                 (unsigned long)rows, (unsigned long)cols,
+                 (unsigned long)tc, (unsigned long)tr);
+            return false;
+        }
+    } else {
+        if (tr != rows || tc != cols) {
+            slog(WARN, "mat_mat_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+                 (unsigned long)rows, (unsigned long)cols,
+                 (unsigned long)tr, (unsigned long)tc);
+            return false;
+        }
+    }
+
+    /* Parallel path: dispatch rows across the thread pool. */
+    if (pool && pool->nthreads > 1 && rows > 1) {
+        int nt = pool->nthreads;
+        float *w_row_buf = smalloc((u64)nt * cols * sizeof(float));
+        if (!w_row_buf) {
+            slog(WARN, "mat_mat_mul: smalloc failed for parallel row buffers");
+            return false;
+        }
+        MatMatCtx ctx = { Y, tw, base, X, batch, rows, cols, tc, trans, w_row_buf };
+        pthreads_parallel_for(pool, 0, (int)rows, matmat_worker, &ctx);
+        sfree(w_row_buf);
+        return true;
+    }
+
+    /* Serial path: single reusable row buffer. */
     float *w_row = smalloc(cols * sizeof(float));
     if (!w_row) {
         slog(WARN, "mat_mat_mul: smalloc failed for row buffer (%lu cols)",
@@ -300,20 +372,10 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
     }
 
     if (trans) {
-        /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
-         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows. */
-        if (tr != cols || tc != rows) {
-            slog(WARN, "mat_mat_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
-                 (unsigned long)rows, (unsigned long)cols,
-                 (unsigned long)tc, (unsigned long)tr);
-            sfree(w_row); return false;
-        }
         for (u64 r = 0; r < rows; r++) {
-            /* Dequantise column r of stored W (row r of W^T). */
             for (u64 c = 0; c < cols; c++)
                 w_row[c] = tensor_get_f32(tw, base, c * tc + r);
 
-            /* Dot product with each batch element's input row. */
             for (u64 b = 0; b < batch; b++) {
                 const float *x_row = X + b * cols;
                 float sum = 0.0f;
@@ -323,18 +385,9 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             }
         }
     } else {
-        /* Standard: W stored as [rows × cols], compute y = W @ x. */
-        if (tr != rows || tc != cols) {
-            slog(WARN, "mat_mat_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
-                 (unsigned long)rows, (unsigned long)cols,
-                 (unsigned long)tr, (unsigned long)tc);
-            sfree(w_row); return false;
-        }
         for (u64 r = 0; r < rows; r++) {
-            /* Batch-dequantise one full row of W (contiguous). */
             tensor_get_f32_batch(tw, base, r * cols, cols, w_row);
 
-            /* Dot product with each batch element's input row. */
             for (u64 b = 0; b < batch; b++) {
                 const float *x_row = X + b * cols;
                 float sum = 0.0f;

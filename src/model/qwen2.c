@@ -471,7 +471,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 /* Fused QKV: one mat_mat_mul, then split per token. */
                 qkv_trans   = (t_qkv->dim[0] == n_embd);
                 fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-                if (!mat_mat_mul(qkv_buf, t_qkv, base, norm_buf, n_tokens, fused_total, n_embd, qkv_trans)) goto fail;
+                if (!mat_mat_mul(qkv_buf, t_qkv, base, norm_buf, n_tokens, fused_total, n_embd, qkv_trans, s->pthreads)) goto fail;
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
                     float *row = qkv_buf + (u64)p * fused_total;
@@ -513,13 +513,13 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 fused_total = q_dim + 2 * kv_dim;
 
                 /* Q → qbuf (stride q_dim, ready for attention + RoPE in-place). */
-                if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd)) goto fail;
+                if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) goto fail;
 
                 /* K → after Q in qkv_buf, V → after K. */
                 float *kbuf = qkv_buf;
                 float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
-                if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd)) goto fail;
-                if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd)) goto fail;
+                if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) goto fail;
+                if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) goto fail;
 
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
@@ -598,7 +598,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
         /* ---- 2d. Batched attention output projection ---- */
         if (t_out) {
-            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim)) { goto fail; }
+            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
             memcpy(norm_buf, attn_buf, row_q * sizeof(float));
@@ -621,10 +621,10 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         /* ---- 2g. Batched FFN (SwiGLU) ---- */
         {
             /* Gate projection: norm_buf → gate_buf */
-            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf, n_tokens, fh, n_embd, t_gate->dim[0] == n_embd)) goto fail;
+            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf, n_tokens, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) goto fail;
 
             /* Up projection: norm_buf → up_buf */
-            if (!mat_mat_mul(up_buf, t_up, base, norm_buf, n_tokens, fh, n_embd, t_up->dim[0] == n_embd)) goto fail;
+            if (!mat_mat_mul(up_buf, t_up, base, norm_buf, n_tokens, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) goto fail;
 
             /* Element-wise: gate = silu(gate) * up  (per token, cheap) */
             for (u32 p = 0; p < n_tokens; p++) {
@@ -636,7 +636,7 @@ static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             }
 
             /* Down projection: gate_buf → norm_buf (reuse norm_buf for output) */
-            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf, n_tokens, n_embd, fh, t_down->dim[0] == fh)) goto fail;
+            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf, n_tokens, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) goto fail;
         }
 
         /* ---- 2h. Residual ---- */
