@@ -9,7 +9,7 @@ SRC_DIR  = ../src
 
 all: test_pthreads test_utils test_qwen2
 
-test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o
+test_pthreads: c/test_pthreads.c pthreads.o spinlock.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
 
 pthreads.o: $(SRC_DIR)/pthreads.c $(SRC_DIR)/pthreads.h $(SRC_DIR)/slog.h
@@ -20,6 +20,9 @@ slog.o: $(SRC_DIR)/slog.c $(SRC_DIR)/slog.h
 
 utils.o: $(SRC_DIR)/utils.c $(SRC_DIR)/utils.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/utils.c -o $@
+
+spinlock.o: $(SRC_DIR)/spinlock.c $(SRC_DIR)/spinlock.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/spinlock.c -o $@
 
 mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/mm.c -o $@
@@ -48,7 +51,7 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen2: c/test_qwen2.c qwen2.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
+test_qwen2: c/test_qwen2.c qwen2.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o spinlock.o mm.o slog.o utils.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
