@@ -242,8 +242,8 @@ int main(int argc, char *argv[]) {
         gen_times[r]  = (t_gen1 - t_gen0) * 1000.0; /* ms */
         gen_counts[r] = n_gen;
 
-        fprintf(stderr, "\r[%d/%d] Prefill: %.1f ms | Generate: %.1f ms (%d tokens, %.1f tok/s)    ",
-                r + 1, opts.repeat, prefill_times[r], gen_times[r], n_gen,
+        fprintf(stderr, "\r[%d/%d] TTFT: %.1f ms | Prefill: %.1f ms | Generate: %.1f ms (%d tokens, %.1f tok/s)    ",
+                r + 1, opts.repeat, prefill_times[r], prefill_times[r], gen_times[r], n_gen,
                 n_gen / ((t_gen1 - t_gen0) > 0 ? (t_gen1 - t_gen0) : 1e-9));
     }
     fprintf(stderr, "\n");
@@ -290,8 +290,9 @@ int main(int argc, char *argv[]) {
     for (int r = 0; r < opts.repeat; r++) {
         double prefill_tok_s = (double)n_prompt / (prefill_times[r] / 1000.0);
         double gen_tok_s     = (double)gen_counts[r] / (gen_times[r] / 1000.0);
-        printf("[%d/%d] Prefill: %8.1f ms (%7.1f tok/s) | Generate: %8.1f ms (%d tok, %7.1f tok/s)\n",
+        printf("[%d/%d] TTFT: %8.1f ms | Prefill: %8.1f ms (%7.1f tok/s) | Generate: %8.1f ms (%d tok, %7.1f tok/s)\n",
                r + 1, opts.repeat,
+               prefill_times[r],
                prefill_times[r], prefill_tok_s,
                gen_times[r], gen_counts[r], gen_tok_s);
     }
@@ -301,9 +302,10 @@ int main(int argc, char *argv[]) {
     double avg_gen     = sum_gen / opts.repeat;
     double avg_prefill_tok_s = (double)n_prompt * opts.repeat / (sum_prefill / 1000.0);
     double avg_gen_tok_s     = (double)sum_n_gen / (sum_gen / 1000.0);
+    printf("Avg TTFT:       %8.1f ms\n", avg_prefill);
     printf("Avg Prefill:    %8.1f ms (%7.1f tok/s)\n", avg_prefill, avg_prefill_tok_s);
     printf("Avg Generate:   %8.1f ms (%7.1f tok/s)\n", avg_gen, avg_gen_tok_s);
-    printf("Min/Max Prefill: %.1f / %.1f ms\n", min_prefill, max_prefill);
+    printf("Min/Max TTFT:     %.1f / %.1f ms\n", min_prefill, max_prefill);
     printf("Min/Max Generate: %.1f / %.1f ms\n", min_gen, max_gen);
     if (peak_mem_kb > 0)
         printf("Peak Memory:    %.0f MB\n", (double)peak_mem_kb / 1024.0);
