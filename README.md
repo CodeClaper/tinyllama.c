@@ -142,6 +142,16 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 
 The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage.
 
+## Benchmark
+
+Benchmark results on a consumer desktop:
+
+| Model | Quant | Peak Mem | TTFT | Prefill | Generate | tok/s |
+|---|---|---|---|---|---|---|
+| Qwen2.5 1.5B Instruct | Q4_K_M | 1103 MB | 287.8 ms | 287.8 ms (45.2 tok/s) | 6691.7 ms | 5.2 |
+
+> 12 threads, context 4096, 13 prompt tokens, 35 generated tokens
+
 ## Project Structure
 
 ```
