@@ -8,7 +8,7 @@
  * If cnt < 1024, it will PAUSE.
  * Else, it will sleep. 
  * */
-int lock_spin(uint32_t cnt) {
+static int lock_spin(uint32_t cnt) {
     volatile int idx;
     /* Acutally, this should be cnt < 1024, then pause. 
      * But, pause might cause processor `starve`. 
@@ -22,7 +22,7 @@ int lock_spin(uint32_t cnt) {
 }
 
 /* Lock sleep. */
-void lock_sleep (int cnt) {
+static void lock_sleep (int cnt) {
     struct timespec ts[1];
 	ts->tv_sec = 0;
 	ts->tv_nsec = cnt;
@@ -46,7 +46,6 @@ void acquire_spin_lock(volatile s_lock *lock) {
 
 /* Release spin lock. */
 void release_spin_lock(volatile s_lock *lock) {
-    Assert(*lock == SPIN_LOCKED_STATUS);
     /* Tell the c compiler and the CPU to not move loads or stores
      * past this point, to ensure that all the stores in the critical
      * section are visible to other CPUs before the  lock is released,
@@ -63,10 +62,3 @@ void release_spin_lock(volatile s_lock *lock) {
     NOTICE();
 }
 
-/* Wait for spin lock released. */
-void wait_for_spin_lock(volatile s_lock *lock) {
-    while (*lock) {
-        if (lock_spin(DEFAULT_SPIN_INTERVAL))
-            lock_sleep(DEFAULT_SPIN_INTERVAL);
-    }
-}
