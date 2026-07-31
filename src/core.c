@@ -762,7 +762,7 @@ static ModelArch model_detect_arch(Model *m) {
     m->arch_name[n] = '\0';
     if (key_streq(arch_name, "llama"))   return ARCH_LLAMA;
     if (key_streq(arch_name, "qwen2"))   return ARCH_QWEN2;
-    if (key_streq(arch_name, "qwen35"))  return ARCH_QWEN2;
+    if (key_streq(arch_name, "qwen35"))  return ARCH_QWEN3;
     if (key_streq(arch_name, "deepseek2")) return ARCH_DEEPSEEK;
     if (key_streq(arch_name, "falcon"))  return ARCH_FALCON;
     slog(WARN, "Unknown architecture: %s, loading as generic.", get_key_name(arch_name));
@@ -1194,6 +1194,7 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
     } arch_layer_maps[] = {
         {ARCH_LLAMA,    llama_layer_map,     ARR_LEN(llama_layer_map)},
         {ARCH_QWEN2,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
+        {ARCH_QWEN3,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
         {ARCH_DEEPSEEK, deepseek_layer_map,  ARR_LEN(deepseek_layer_map)},
         {ARCH_UNKNOWN,  unknown_layer_map,   ARR_LEN(unknown_layer_map)},
     };
@@ -1256,6 +1257,7 @@ static Weights *weights_load(Model *m) {
     } arch_maps[] = {
         {ARCH_LLAMA,    llama_tensor_map,    ARR_LEN(llama_tensor_map)},
         {ARCH_QWEN2,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
+        {ARCH_QWEN3,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
         {ARCH_DEEPSEEK, deepseek_tensor_map, ARR_LEN(deepseek_tensor_map)},
         {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
     };
@@ -1547,6 +1549,7 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     switch (en->model->arch) {
         case ARCH_LLAMA:    s->ops = llama_ops;    break;
         case ARCH_QWEN2:    s->ops = qwen2_ops;    break;
+        case ARCH_QWEN3:    s->ops = qwen3_ops;    break;
         case ARCH_DEEPSEEK: s->ops = deepseek_ops; break;
         case ARCH_FALCON:   s->ops = falcon_ops;   break;
         default:

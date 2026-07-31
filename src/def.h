@@ -145,6 +145,7 @@ typedef enum {
     ARCH_UNKNOWN,
     ARCH_LLAMA,
     ARCH_QWEN2,
+    ARCH_QWEN3,
     ARCH_DEEPSEEK,
     ARCH_FALCON,
 } ModelArch;

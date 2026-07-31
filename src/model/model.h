@@ -5,6 +5,7 @@
 
 extern const ArchOps llama_ops;
 extern const ArchOps qwen2_ops;
+extern const ArchOps qwen3_ops;
 extern const ArchOps deepseek_ops;
 extern const ArchOps falcon_ops;
 

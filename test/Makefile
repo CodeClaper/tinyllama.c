@@ -30,6 +30,9 @@ test_utils: c/test_utils.c utils.o slog.o mm.o
 qwen2.o: $(SRC_DIR)/model/qwen2.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen2.c -o $@
 
+qwen3.o: $(SRC_DIR)/model/qwen3.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen3.c -o $@
+
 core.o: $(SRC_DIR)/core.c $(SRC_DIR)/core.h $(SRC_DIR)/def.h $(SRC_DIR)/model/model.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/core.c -o $@
 
@@ -48,7 +51,7 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen2: c/test_qwen2.c qwen2.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
+test_qwen2: c/test_qwen2.c qwen2.o qwen3.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
