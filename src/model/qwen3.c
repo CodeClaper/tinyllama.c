@@ -261,7 +261,26 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
+                if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
+                    for (u32 i = 0; i < 2 * n_embd; i++) {
+                        u64 off = (u64)i * q_dim;
+                        float sum = 0.0f;
+                        for (u32 j = 0; j < q_dim; j++)
+                            sum += tensor_get_f32(t_out, base, off + j) * attn_out[j];
+                        ws->hb2[i] = sum;
+                    }
+                    silu(ws->hb2, (int)n_embd);
+                    for (u32 i = 0; i < n_embd; i++)
+                        ws->xb2[i] = ws->hb2[i] * ws->hb2[i + n_embd];
+                } else {
+                    if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
+                }
+            } else {
+                if (q_dim == n_embd) {
+                    memcpy(ws->xb2, attn_out, q_dim * sizeof(float));
+                } else {
+                    memcpy(ws->xb2, attn_out, n_embd * sizeof(float));
+                }
             }
         }
 
@@ -585,7 +604,23 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
 
         /* ---- 2d. Batched attention output projection ---- */
         if (t_out) {
-            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
+            if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
+                for (u32 p = 0; p < n_tokens; p++) {
+                    float *y_row = norm_buf + (u64)p * n_embd;
+                    const float *x_row = attn_buf + (u64)p * q_dim;
+                    float *tmp = gate_buf + (u64)p * 2 * n_embd;
+                    for (u32 i = 0; i < 2 * n_embd; i++) {
+                        u64 off = (u64)i * q_dim;
+                        float sum = 0.0f;
+                        for (u32 j = 0; j < q_dim; j++)
+                            sum += tensor_get_f32(t_out, base, off + j) * x_row[j];
+                        tmp[i] = sum;
+                    }
+                    silu(tmp, (int)n_embd);
+                    for (u32 i = 0; i < n_embd; i++)
+                        y_row[i] = tmp[i] * tmp[i + n_embd];
+                }
+            } else if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
             if (q_dim == n_embd) {
@@ -696,17 +731,10 @@ static void qwen3_free(Session *s) {
 
     Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
     if (ws) {
-        sfree(ws->x);
-        sfree(ws->xb);
-        sfree(ws->xb2);
-        sfree(ws->q);
-        sfree(ws->k);
-        sfree(ws->v);
-        sfree(ws->qkv_fused);
-        sfree(ws->scores);
-        sfree(ws->hb);
-        sfree(ws->hb2);
-        sfree(ws);
+        sfree(ws->x); sfree(ws->xb); sfree(ws->xb2);
+        sfree(ws->q); sfree(ws->k); sfree(ws->v); 
+        sfree(ws->qkv_fused); sfree(ws->scores); 
+        sfree(ws->hb); sfree(ws->hb2); sfree(ws);
         s->arch_data = NULL;
     }
 }
