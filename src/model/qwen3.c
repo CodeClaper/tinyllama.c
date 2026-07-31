@@ -366,10 +366,11 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     u64 row_q  = (u64)n_tokens * q_dim;
     u64 row_kv = (u64)n_tokens * max_fused;
     u64 row_fh = (u64)n_tokens * ws->ffn_hidden;
+    u64 row_max = row_x > row_q ? row_x : row_q;
 
     /* ---- Temporary buffers ---- */
     float *xs       = smalloc(row_x * sizeof(float));   /* hidden states          */
-    float *norm_buf = smalloc(row_x * sizeof(float));   /* RMS-norm scratch       */
+    float *norm_buf = smalloc(row_max * sizeof(float)); /* RMS-norm scratch       */
     float *qkv_buf  = smalloc(row_kv * sizeof(float));  /* batched QKV output     */
     float *qbuf     = smalloc(row_q * sizeof(float));   /* Q buffer for attention */
     float *attn_buf = smalloc(row_q * sizeof(float));   /* attention output       */
@@ -587,7 +588,12 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
-            memcpy(norm_buf, attn_buf, row_q * sizeof(float));
+            if (q_dim == n_embd) {
+                memcpy(norm_buf, attn_buf, row_q * sizeof(float));
+            } else {
+                for (u32 p = 0; p < n_tokens; p++)
+                    memcpy(norm_buf + (u64)p * n_embd, attn_buf + (u64)p * q_dim, n_embd * sizeof(float));
+            }
         }
 
         /* ---- 2e. Residual ---- */

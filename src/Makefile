@@ -1,14 +1,15 @@
 CC = gcc
 ARCH ?= $(shell uname -m)
 ifdef DEBUG
-	CFLAGS = -O3 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread
+	CFLAGS = -O3 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread -fsanitize=address
+	LDADDCFLAGS = -lm -pthread -fsanitize=address
 else
 	CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
+	LDADDCFLAGS = -lm -flto=auto -pthread
 endif
 ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
 	CFLAGS += -msse4.1
 endif
-LDADDCFLAGS = -lm -flto=auto -pthread
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
