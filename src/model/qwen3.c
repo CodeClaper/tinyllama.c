@@ -40,6 +40,51 @@ static inline void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
     if (buf != stack_buf) sfree(buf);
 }
 
+/* In-place RMS normalization of a single head_dim slice.
+ * Equivalent to rms_norm(o, x, weight, epsilon) but operates
+ * directly on the input buffer (o == x).  The caller has already
+ * dequantised the weight array. */
+static void rms_norm_inplace(float *x, const float *weight, u32 n, float eps) {
+    float ss = 0.0f;
+    for (u32 j = 0; j < n; j++)
+        ss += x[j] * x[j];
+    ss = 1.0f / sqrtf(ss / (float)n + eps);
+    for (u32 j = 0; j < n; j++)
+        x[j] = x[j] * ss * weight[j];
+}
+
+/* Qwen3.5 Q-norm: the Q projection output has shape [n_head, 2, head_dim].
+ * Apply RMS norm to each head_dim slice using the provided dequantised
+ * weight, then take the FIRST head_dim half as the effective Q.
+ * dst  – [n_head * head_dim] output
+ * src  – [n_head * 2 * head_dim] input (Q projection output, may be
+ *        destroyed by this function)
+ * norm_weight – [head_dim] dequantised norm weight */
+static void qwen_q_norm(float *dst, float *src, u32 n_head, u32 head_dim,
+                        const float *norm_weight, float eps) {
+    u32 stride = 2 * head_dim;
+    for (u32 h = 0; h < n_head; h++) {
+        float *hsrc = src + (u64)h * stride;
+        float *hdst = dst + (u64)h * head_dim;
+        /* Normalise both halves in-place in src, then copy the first
+         * half to dst.  Doing it in src avoids overflowing dst which
+         * is only head_dim wide per head. */
+        rms_norm_inplace(hsrc,           norm_weight, head_dim, eps);
+        rms_norm_inplace(hsrc + head_dim, norm_weight, head_dim, eps);
+        memcpy(hdst, hsrc, head_dim * sizeof(float));
+    }
+}
+
+/* Qwen3.5 K-norm: the K projection output has shape [n_kv_head, head_dim].
+ * Apply RMS norm to each head_dim slice in-place. */
+static void qwen_k_norm(float *k, u32 n_kv_head, u32 head_dim,
+                        const float *norm_weight, float eps) {
+    for (u32 h = 0; h < n_kv_head; h++) {
+        float *hk = k + (u64)h * head_dim;
+        rms_norm_inplace(hk, norm_weight, head_dim, eps);
+    }
+}
+
 static bool qwen3_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
@@ -172,31 +217,72 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
             memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
             memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
         } else if (t_q && t_k && t_v) {
-            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
-            if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) return false;
-            if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) return false;
+            TensorInfo *t_q_norm = lw->tensors[TENSOR_ATTN_Q_NORM];
+            TensorInfo *t_k_norm = lw->tensors[TENSOR_ATTN_K_NORM];
+
+            /* Q projection with optional Q-norm (Qwen3.5).
+             * Q-norm mode: Q weight produces n_head * 2 * head_dim outputs;
+             * after per-head RMS-norm we keep the first head_dim half,
+             * yielding the standard q_dim = n_head * head_dim. */
+            if (t_q_norm) {
+                u32 q_proj_dim = (t_q->dim[0] == n_embd)
+                                 ? (u32)t_q->dim[1] : (u32)t_q->dim[0];
+                u32 stride = 2 * q_head_dim;
+                if (!mat_vec_mul(ws->qkv_fused, t_q, base, ws->xb,
+                                 q_proj_dim, n_embd,
+                                 (q_proj_dim != n_embd) && t_q->dim[0] == n_embd,
+                                 s->pthreads)) return false;
+                /* Add Q bias before norm (applied to full projection). */
+                {
+                    TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
+                    if (tb_q) bias_add(ws->qkv_fused, tb_q, base, q_proj_dim);
+                }
+                /* Dequantise norm weight once, then apply per head. */
+                {
+                    float *nw = smalloc((u64)q_head_dim * sizeof(float));
+                    tensor_get_f32_batch(t_q_norm, base, 0, q_head_dim, nw);
+                    for (u32 h = 0; h < n_head; h++) {
+                        float *hsrc = ws->qkv_fused + (u64)h * stride;
+                        rms_norm_inplace(hsrc, nw, q_head_dim, eps);
+                        rms_norm_inplace(hsrc + q_head_dim, nw, q_head_dim, eps);
+                        memcpy(ws->q + (u64)h * q_head_dim, hsrc,
+                               q_head_dim * sizeof(float));
+                    }
+                    sfree(nw);
+                }
+            } else {
+                if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim, n_embd,
+                    (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
+                {
+                    TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
+                    if (tb_q) bias_add(ws->q, tb_q, base, q_dim);
+                }
+            }
+
+            /* K projection with optional K-norm (Qwen3.5). */
+            {
+                if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd,
+                                 t_k->dim[0] == n_embd, s->pthreads)) return false;
+                TensorInfo *tb_k = lw->tensors[TENSOR_ATTN_K_BIAS];
+                if (tb_k) bias_add(ws->k, tb_k, base, kv_dim);
+                if (t_k_norm) {
+                    float *nw = smalloc((u64)kv_head_dim * sizeof(float));
+                    tensor_get_f32_batch(t_k_norm, base, 0, kv_head_dim, nw);
+                    qwen_k_norm(ws->k, n_kv_head, kv_head_dim, nw, eps);
+                    sfree(nw);
+                }
+            }
+
+            /* V projection (no norm). */
+            {
+                if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd,
+                                 t_v->dim[0] == n_embd, s->pthreads)) return false;
+                TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
+                if (tb_v) bias_add(ws->v, tb_v, base, kv_dim);
+            }
         } else {
             slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
             return false;
-        }
-
-        /* Add biases when present (Qwen2.5 uses bias=True in attention). */
-        {
-            TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
-            TensorInfo *tb_k = lw->tensors[TENSOR_ATTN_K_BIAS];
-            TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
-            if (tb_q) {
-                u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                bias_add(ws->q, tb_q, base, n);
-            }
-            if (tb_k) {
-                u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                bias_add(ws->k, tb_k, base, n);
-            }
-            if (tb_v) {
-                u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                bias_add(ws->v, tb_v, base, n);
-            }
         }
 
         if (l == 0) {
@@ -370,7 +456,10 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
     float scale     = 1.0f / sqrtf((float)kv_head_dim);
     float eps       = DEFAULT_EPS;
 
-    /* Determine max fused QKV output width across layers. */
+    /* Determine max fused QKV output width across layers.
+     * This buffer is also used as temporary scratch for Q-norm
+     * processing (Qwen3.5), so we must also account for the
+     * largest attn_q tensor when Q-norm is present. */
     u32 max_fused = q_dim + 2 * kv_dim;
     for (u32 l = 0; l < n_layer; l++) {
         TensorInfo *t_qkv = w->layers[l].tensors[TENSOR_ATTN_QKV];
@@ -378,6 +467,15 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
             u32 sz = (t_qkv->dim[0] > t_qkv->dim[1])
                    ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
             if (sz > max_fused) max_fused = sz;
+        }
+        /* Also check attn_q for Q-norm layers (Qwen3.5 hybrid). */
+        TensorInfo *t_q = w->layers[l].tensors[TENSOR_ATTN_Q];
+        if (t_q && t_q->ndim >= 2) {
+            u32 q_sz = (t_q->dim[0] > t_q->dim[1])
+                     ? (u32)t_q->dim[0] : (u32)t_q->dim[1];
+            /* Need space for Q-proj + K + V in qkv_buf. */
+            u32 need = q_sz + 2 * kv_dim;
+            if (need > max_fused) max_fused = need;
         }
     }
 
@@ -519,44 +617,101 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                     }
                 }
             } else if (t_q && t_k && t_v) {
-                fused_total = q_dim + 2 * kv_dim;
+                TensorInfo *t_q_norm = lw->tensors[TENSOR_ATTN_Q_NORM];
+                TensorInfo *t_k_norm = lw->tensors[TENSOR_ATTN_K_NORM];
 
-                if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) goto fail;
-
-                float *kbuf = qkv_buf;
-                float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
-                if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) goto fail;
-                if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) goto fail;
-
-                for (u32 p = 0; p < n_tokens; p++) {
-                    u32 pos = cache_start + p;
-
-                    memcpy(ws->k, kbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
-                    memcpy(ws->v, vbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
-
-                    if (tb_k) {
-                        for (u32 i = 0; i < n_k; i++) ws->k[i] += k_bias[i];
-                    }
-                    if (tb_v) {
-                        for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
-                    }
-                    if (tb_q) {
-                        float *qp = qbuf + (u64)p * q_dim;
-                        for (u32 i = 0; i < n_q; i++) qp[i] += q_bias[i];
-                    }
-
-                    rope_neox(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
-                    rope_neox(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
-
-                    {
-                        u32 hs = akc->cap * kv_head_dim;
-                        for (u32 h = 0; h < n_kv_head; h++) {
-                            u64 dst = (u64)h * hs + (u64)pos * kv_head_dim;
-                            u64 src = (u64)h * kv_head_dim;
-                            memcpy(akc->k + dst, ws->k + src, kv_head_dim * sizeof(float));
-                            memcpy(akc->v + dst, ws->v + src, kv_head_dim * sizeof(float));
+                /* Q projection with optional Q-norm (Qwen3.5).
+                 * Use qkv_buf as temporary space for the full Q projection
+                 * (q_proj_dim per token), then apply Q-norm → qbuf. */
+                if (t_q_norm) {
+                    u32 q_proj_dim = (t_q->dim[0] == n_embd)
+                                     ? (u32)t_q->dim[1] : (u32)t_q->dim[0];
+                    u32 stride = 2 * q_head_dim;
+                    if (!mat_mat_mul(qkv_buf, t_q, base, norm_buf, n_tokens,
+                                     q_proj_dim, n_embd,
+                                     (q_proj_dim != n_embd) && t_q->dim[0] == n_embd,
+                                     s->pthreads)) goto fail;
+                    /* Dequantise Q-norm weight once. */
+                    float *qnw = smalloc((u64)q_head_dim * sizeof(float));
+                    tensor_get_f32_batch(t_q_norm, base, 0, q_head_dim, qnw);
+                    for (u32 p = 0; p < n_tokens; p++) {
+                        float *src = qkv_buf + (u64)p * q_proj_dim;
+                        float *dst = qbuf   + (u64)p * q_dim;
+                        /* Add Q bias before norm. */
+                        if (tb_q) {
+                            for (u32 i = 0; i < n_q; i++)
+                                src[i] += q_bias[i];
+                        }
+                        for (u32 h = 0; h < n_head; h++) {
+                            float *hsrc = src + (u64)h * stride;
+                            rms_norm_inplace(hsrc, qnw, q_head_dim, eps);
+                            rms_norm_inplace(hsrc + q_head_dim, qnw, q_head_dim, eps);
+                            memcpy(dst + (u64)h * q_head_dim, hsrc,
+                                   q_head_dim * sizeof(float));
                         }
                     }
+                    sfree(qnw);
+                } else {
+                    if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens,
+                                     q_dim, n_embd,
+                                     (q_dim != n_embd) && t_q->dim[0] == n_embd,
+                                     s->pthreads)) goto fail;
+                    if (tb_q) {
+                        for (u32 p = 0; p < n_tokens; p++) {
+                            float *qp = qbuf + (u64)p * q_dim;
+                            for (u32 i = 0; i < n_q; i++) qp[i] += q_bias[i];
+                        }
+                    }
+                }
+
+                /* K + V: use area of qkv_buf beyond the Q-proj region. */
+                {
+                    u32 q_use = t_q_norm
+                        ? (t_q->dim[0] == n_embd ? (u32)t_q->dim[1] : (u32)t_q->dim[0])
+                        : q_dim;
+                    float *kbuf = qkv_buf + (u64)n_tokens * q_use;
+                    float *vbuf = kbuf + (u64)n_tokens * kv_dim;
+                    if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim,
+                                     n_embd, t_k->dim[0] == n_embd, s->pthreads)) goto fail;
+                    if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim,
+                                     n_embd, t_v->dim[0] == n_embd, s->pthreads)) goto fail;
+
+                    /* Dequantise K-norm weight once if present. */
+                    float *knw = NULL;
+                    if (t_k_norm) {
+                        knw = smalloc((u64)kv_head_dim * sizeof(float));
+                        tensor_get_f32_batch(t_k_norm, base, 0, kv_head_dim, knw);
+                    }
+                    for (u32 p = 0; p < n_tokens; p++) {
+                        u32 pos = cache_start + p;
+
+                        memcpy(ws->k, kbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
+                        memcpy(ws->v, vbuf + (u64)p * kv_dim, kv_dim * sizeof(float));
+
+                        if (tb_k) {
+                            for (u32 i = 0; i < n_k; i++) ws->k[i] += k_bias[i];
+                        }
+                        if (t_k_norm) {
+                            qwen_k_norm(ws->k, n_kv_head, kv_head_dim, knw, eps);
+                        }
+                        if (tb_v) {
+                            for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
+                        }
+
+                        rope_neox(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
+                        rope_neox(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+
+                        {
+                            u32 hs = akc->cap * kv_head_dim;
+                            for (u32 h = 0; h < n_kv_head; h++) {
+                                u64 dst = (u64)h * hs + (u64)pos * kv_head_dim;
+                                u64 src = (u64)h * kv_head_dim;
+                                memcpy(akc->k + dst, ws->k + src, kv_head_dim * sizeof(float));
+                                memcpy(akc->v + dst, ws->v + src, kv_head_dim * sizeof(float));
+                            }
+                        }
+                    }
+                    sfree(knw);
                 }
             } else {
                 slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);

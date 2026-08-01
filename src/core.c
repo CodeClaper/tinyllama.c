@@ -1151,6 +1151,8 @@ static const LayerTensorMap qwen2_layer_map[] = {
     {TENSOR_ATTN_K_BIAS,      "attn_k.bias",           false},
     {TENSOR_ATTN_V_BIAS,      "attn_v.bias",           false},
     {TENSOR_ATTN_OUT,         "attn_output",           false},
+    {TENSOR_ATTN_Q_NORM,      "attn_q_norm",           false},
+    {TENSOR_ATTN_K_NORM,      "attn_k_norm",           false},
     {TENSOR_POST_ATTN_NORM,   "post_attention_norm",   false},
     {TENSOR_POST_ATTN_NORM,   "ffn_norm",              false},
     {TENSOR_FFN_GATE,         "ffn_gate",              true},
