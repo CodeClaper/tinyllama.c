@@ -15,12 +15,20 @@ typedef struct {
     float *q;               /* [n_head * head_dim] query buffer             */
     float *k;               /* [n_kv_head * head_dim] key buffer            */
     float *v;               /* [n_kv_head * head_dim] value buffer          */
-    float *qkv_fused;       /* [q_dim + 2*kv_dim] fused QKV buffer          */
+    float *qkv_fused;       /* [max_fused] fused QKV buffer                 */
     float *scores;          /* [ctx_size] attention scores (per head)       */
     float *hb;              /* [ffn_hidden] FFN hidden buffer               */
     float *hb2;             /* [ffn_hidden] FFN hidden buffer 2             */
     u32    ffn_hidden;
     float  rope_theta;      /* RoPE frequency base                          */
+
+    /* SSM (Gated DeltaNet) per-layer state. */
+    float **ssm_state;      /* [n_layer][n_groups * d_state * d_state]      */
+    float **conv_state;     /* [n_layer][(conv_kernel-1) * fused_dim]       */
+    u32    ssm_groups;      /* n_groups (16 for Qwen3.5-0.8B)               */
+    u32    ssm_dim;         /* d_state  (128 for Qwen3.5-0.8B)              */
+    u32    ssm_fused;       /* fused QKV output width (6144)                */
+    u32    conv_kernel;     /* conv1d kernel size (4)                       */
 } Qwen3Workspace;
 
 /* ---- Arch ops --------------------------------------------------- */
@@ -82,6 +90,113 @@ static void qwen_k_norm(float *k, u32 n_kv_head, u32 head_dim,
     for (u32 h = 0; h < n_kv_head; h++) {
         float *hk = k + (u64)h * head_dim;
         rms_norm_inplace(hk, norm_weight, head_dim, eps);
+    }
+}
+
+/* L2-normalize each row of a [n_rows, dim] matrix in-place.
+ * Used for Q and K in the Gated DeltaNet recurrence. */
+static void l2_norm_rows(float *x, u32 n_rows, u32 dim, float eps) {
+    for (u32 r = 0; r < n_rows; r++) {
+        float *row = x + (u64)r * dim;
+        float ss = 0.0f;
+        for (u32 i = 0; i < dim; i++)
+            ss += row[i] * row[i];
+        float inv = 1.0f / sqrtf(ss + eps);
+        for (u32 i = 0; i < dim; i++)
+            row[i] *= inv;
+    }
+}
+
+/* Depthwise causal Conv1d step for single-token inference.
+ * Processes fused QKV output (channels) through a depthwise conv
+ * with kernel_size taps, maintaining a ring buffer of previous inputs.
+ * weight – [kernel_size * channels] dequantised weight, row-major:
+ *          weight[k * channels + c] for kernel tap k, channel c.
+ * state  – [(kernel_size-1) * channels] ring buffer (oldest first).
+ * On return, state is shifted and the new input is stored. */
+static void causal_conv1d_step(float *output, const float *input,
+                               const float *weight, float *state,
+                               u32 channels, u32 kernel_size) {
+    /* The weight is [kernel_size, channels] — tap 0 is the current input.
+     * State is stored [oldest, ..., newest] = [x[t-(K-1)], ..., x[t-1]]
+     * at positions [0, ..., K-2].  Map weight tap k (lag k) to
+     * state position (K-1-k).
+     *
+     * NOTE: if the GGUF file stores the weight as [channels, kernel_size]
+     * (PyTorch convention), the access pattern would be weight[c*K + k].
+     * We try the [kernel_size, channels] layout first; swap if needed. */
+    for (u32 c = 0; c < channels; c++) {
+        float sum = input[c] * weight[0 * channels + c];
+        for (u32 k = 1; k < kernel_size; k++) {
+            u32 s_idx = (kernel_size - 1 - k) * channels + c;
+            sum += state[s_idx] * weight[k * channels + c];
+        }
+        output[c] = sum;
+    }
+    /* Shift state: drop oldest (index 0), shift remaining left,
+     * store current input at the end. */
+    if (kernel_size > 1) {
+        u32 shift_len = (kernel_size - 2) * channels;
+        if (shift_len > 0)
+            memmove(state, state + channels, shift_len * sizeof(float));
+        memcpy(state + shift_len, input, channels * sizeof(float));
+    }
+}
+
+/* Single-step Gated DeltaNet recurrence.
+ * Q, K, V     – [n_groups * d_ssm] each
+ * state       – [n_groups * d_ssm * d_ssm] recurrent state (updated in-place)
+ * g           – [n_groups] decay gate, pre-computed as exp(g_raw)
+ * beta        – [n_groups] update gate, pre-computed as sigmoid(beta_raw)
+ * kv_mem      – [n_groups * d_ssm] scratch buffer
+ * output      – [n_groups * d_ssm] result */
+static void gated_delta_step(const float *Q, const float *K, const float *V,
+                             float *state, const float *g, const float *beta,
+                             float *kv_mem, float *output,
+                             u32 n_groups, u32 d_ssm) {
+    u64 d2 = (u64)d_ssm * d_ssm;
+    for (u32 grp = 0; grp < n_groups; grp++) {
+        const float *Qg = Q + (u64)grp * d_ssm;
+        const float *Kg = K + (u64)grp * d_ssm;
+        const float *Vg = V + (u64)grp * d_ssm;
+        float *Sg       = state + (u64)grp * d2;
+        float *mem      = kv_mem + (u64)grp * d_ssm;
+
+        float decay = g[grp];
+        float upd   = beta[grp];
+
+        /* 1. Decay: S *= decay */
+        for (u64 i = 0; i < d2; i++)
+            Sg[i] *= decay;
+
+        /* 2. kv_mem = S^T @ K  →  mem[j] = sum_i Sg[i][j] * Kg[i] */
+        memset(mem, 0, d_ssm * sizeof(float));
+        for (u32 i = 0; i < d_ssm; i++) {
+            float ki = Kg[i];
+            float *row = Sg + (u64)i * d_ssm; /* Sg[i][:] */
+            for (u32 j = 0; j < d_ssm; j++)
+                mem[j] += row[j] * ki;
+        }
+
+        /* 3. Compute delta vector: delta[j] = (Vg[j] - mem[j]) * beta */
+        float delta_j[d_ssm];
+        for (u32 j = 0; j < d_ssm; j++)
+            delta_j[j] = (Vg[j] - mem[j]) * upd;
+
+        /* 4. S += K @ delta^T (outer product)
+         * 5. output = S^T @ Q (readout) */
+        float out_j[d_ssm];
+        memset(out_j, 0, d_ssm * sizeof(float));
+        for (u32 i = 0; i < d_ssm; i++) {
+            float qi = Qg[i];
+            float ki = Kg[i];
+            float *row = Sg + (u64)i * d_ssm;
+            for (u32 j = 0; j < d_ssm; j++) {
+                row[j] += ki * delta_j[j];         /* 4. S[i][j] += K[i] * delta[j] */
+                out_j[j] += row[j] * qi;            /* 5. readout */
+            }
+        }
+        memcpy(output + (u64)grp * d_ssm, out_j, d_ssm * sizeof(float));
     }
 }
 
@@ -151,6 +266,48 @@ static bool qwen3_init(Session *s) {
             model_get_f32(s->en->model, k, &ws->rope_theta);
     }
 
+    /* ---- SSM (Gated DeltaNet) state setup ---- */
+    ws->ssm_groups  = 16;
+    ws->ssm_dim     = 128;
+    ws->ssm_fused   = max_fused;  /* full fused QKV output width (6144) */
+    ws->conv_kernel = 4;
+    {
+        const char *pfx = s->en->model->arch_name[0]
+                          ? s->en->model->arch_name : "qwen3";
+        char kk[96];
+        i32 v32 = 0;
+        if (snprintf(kk, sizeof(kk), "%s.ssm.group_count", pfx) > 0
+            && model_get_i32(s->en->model, kk, &v32))
+            ws->ssm_groups = (u32)v32;
+        if (snprintf(kk, sizeof(kk), "%s.ssm.state_size", pfx) > 0
+            && model_get_i32(s->en->model, kk, &v32))
+            ws->ssm_dim = (u32)v32;
+        if (snprintf(kk, sizeof(kk), "%s.ssm.conv_kernel", pfx) > 0
+            && model_get_i32(s->en->model, kk, &v32))
+            ws->conv_kernel = (u32)v32;
+    }
+
+    /* Allocate per-layer SSM state for Gated DeltaNet layers.
+     * Only layers with ssm_conv1d tensors use this state. */
+    ws->ssm_state  = scalloc((u64)c->n_layer, sizeof(float *));
+    ws->conv_state = scalloc((u64)c->n_layer, sizeof(float *));
+    {
+        u64 state_sz  = (u64)ws->ssm_groups * ws->ssm_dim * ws->ssm_dim;
+        u64 conv_sz   = (u64)(ws->conv_kernel - 1) * ws->ssm_fused;
+        u32 n_ssm     = 0;
+        for (u32 i = 0; i < c->n_layer; i++) {
+            if (w->layers[i].tensors[TENSOR_SSM_CONV1D]) {
+                ws->ssm_state[i]  = scalloc(state_sz, sizeof(float));
+                ws->conv_state[i] = scalloc(conv_sz, sizeof(float));
+                n_ssm++;
+            }
+        }
+        slog(INFO, "Qwen3 SSM: groups=%u dim=%u fused=%u conv_k=%u layers=%u "
+             "(state_per_layer=%.1f MB)",
+             ws->ssm_groups, ws->ssm_dim, ws->ssm_fused, ws->conv_kernel, n_ssm,
+             (double)(state_sz + conv_sz) * sizeof(float) / 1048576.0);
+    }
+
     slog(INFO, "Qwen3 init: n_embd=%u n_head=%u n_kv_head=%u head_dim=%u kv_head_dim=%u "
          "n_layer=%u n_vocab=%u ctx_size=%u",
          c->n_embd, c->n_head, c->n_kv_head, q_head_dim, kv_head_dim,
@@ -207,9 +364,143 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
         TensorInfo *t_q   = lw->tensors[TENSOR_ATTN_Q];
         TensorInfo *t_k   = lw->tensors[TENSOR_ATTN_K];
         TensorInfo *t_v   = lw->tensors[TENSOR_ATTN_V];
+        TensorInfo *t_ssm_conv = lw->tensors[TENSOR_SSM_CONV1D];
         u32 fused_total   = 0;
 
-        if (t_qkv) {
+        if (t_ssm_conv) {
+            /* ======== SSM (Gated DeltaNet) pathway ======== */
+
+            /* Fused QKV projection → qkv_fused [ssm_fused = 6144]. */
+            bool qkv_trans = (t_qkv->dim[0] == n_embd);
+            fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
+            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb,
+                             fused_total, n_embd, qkv_trans, s->pthreads))
+                return false;
+
+            /* Depthwise causal Conv1d (in-place on qkv_fused). */
+            {
+                u32 cch = ws->ssm_fused;   /* 6144 */
+                u32 ck  = ws->conv_kernel; /* 4 */
+                float *cw = smalloc((u64)ck * cch * sizeof(float));
+                tensor_get_f32_batch(t_ssm_conv, base, 0, (u64)ck * cch, cw);
+                causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw,
+                                   ws->conv_state[l], cch, ck);
+                sfree(cw);
+            }
+
+            /* Split conv output: Q, K, V  [n_groups * d_ssm = 2048 each]. */
+            u32 n_g = ws->ssm_groups;
+            u32 d_s = ws->ssm_dim;
+            u32 qkv_d = n_g * d_s;  /* 2048 */
+            float *q_d = ws->qkv_fused;
+            float *k_d = ws->qkv_fused + qkv_d;
+            float *v_d = ws->qkv_fused + qkv_d * 2;
+
+            /* L2-normalise Q and K (per group / row). */
+            l2_norm_rows(q_d, n_g, d_s, 1e-6f);
+            l2_norm_rows(k_d, n_g, d_s, 1e-6f);
+
+            /* Scale Q by 1/sqrt(d_ssm) (reference: Gated DeltaNet). */
+            {
+                float q_scale = 1.0f / sqrtf((float)d_s);
+                for (u32 i = 0; i < qkv_d; i++)
+                    q_d[i] *= q_scale;
+            }
+
+            /* Compute g (decay) and beta (update) from residual. */
+            float g_stack[16], beta_stack[16];
+            float *gv = n_g <= 16 ? g_stack : smalloc((u64)n_g * sizeof(float));
+            float *bv = n_g <= 16 ? beta_stack : smalloc((u64)n_g * sizeof(float));
+            {
+                TensorInfo *ta = lw->tensors[TENSOR_SSM_ALPHA];
+                TensorInfo *tb = lw->tensors[TENSOR_SSM_BETA];
+                TensorInfo *tA = lw->tensors[TENSOR_SSM_A];
+                TensorInfo *td = lw->tensors[TENSOR_SSM_DT_BIAS];
+
+                float *alpha = smalloc((u64)n_g * sizeof(float));
+                float *abuf = smalloc((u64)n_g * sizeof(float));
+                tensor_get_f32_batch(td, base, 0, n_g, abuf); /* dt_bias */
+                tensor_get_f32_batch(tA, base, 0, n_g, gv);   /* A_log */
+
+                if (!mat_vec_mul(alpha, ta, base, ws->xb, n_g, n_embd,
+                                 ta->dim[0] == n_embd, s->pthreads)) {
+                    sfree(alpha); sfree(abuf);
+                    if (gv != g_stack) sfree(gv);
+                    if (bv != beta_stack) sfree(bv);
+                    return false;
+                }
+                /* g = -exp(A_log) * softplus(alpha + dt_bias) */
+                for (u32 i = 0; i < n_g; i++) {
+                    float sp = alpha[i] + abuf[i];
+                    sp = (sp > 20.0f) ? sp : log1pf(expf(sp));
+                    gv[i] = -expf(gv[i]) * sp;
+                }
+                sfree(alpha); sfree(abuf);
+
+                if (!mat_vec_mul(bv, tb, base, ws->xb, n_g, n_embd,
+                                 tb->dim[0] == n_embd, s->pthreads)) {
+                    if (gv != g_stack) sfree(gv);
+                    if (bv != beta_stack) sfree(bv);
+                    return false;
+                }
+                /* beta = sigmoid */
+                for (u32 i = 0; i < n_g; i++)
+                    bv[i] = 1.0f / (1.0f + expf(-bv[i]));
+
+                /* Convert g to multiplicative decay: g = exp(g). */
+                for (u32 i = 0; i < n_g; i++)
+                    gv[i] = expf(gv[i]);
+            }
+
+            /* Gated DeltaNet recurrence → hb2 [qkv_d = 2048]. */
+            {
+                float *mem = smalloc((u64)qkv_d * sizeof(float));
+                gated_delta_step(q_d, k_d, v_d, ws->ssm_state[l],
+                                 gv, bv, mem, ws->hb2, n_g, d_s);
+                sfree(mem);
+            }
+            if (gv != g_stack) sfree(gv);
+            if (bv != beta_stack) sfree(bv);
+
+            /* Output gating: gate = silu(attn_gate @ xb). */
+            TensorInfo *t_g = lw->tensors[TENSOR_ATTN_GATE];
+            if (t_g) {
+                if (!mat_vec_mul(ws->qkv_fused, t_g, base, ws->xb,
+                                 qkv_d, n_embd,
+                                 t_g->dim[0] == n_embd, s->pthreads))
+                    return false;
+                silu(ws->qkv_fused, (int)qkv_d);
+                for (u32 i = 0; i < qkv_d; i++)
+                    ws->hb2[i] *= ws->qkv_fused[i];
+            }
+
+            /* Apply SSM norm (per-group RMS norm on delta output). */
+            {
+                TensorInfo *t_sn = lw->tensors[TENSOR_SSM_NORM];
+                if (t_sn) {
+                    float *snw = smalloc((u64)d_s * sizeof(float));
+                    tensor_get_f32_batch(t_sn, base, 0, d_s, snw);
+                    float *dp = ws->hb2;
+                    for (u32 g = 0; g < n_g; g++)
+                        rms_norm_inplace(dp + (u64)g * d_s, snw, d_s, eps);
+                    sfree(snw);
+                }
+            }
+
+            /* Output projection: ssm_out @ delta_out → xb2 [n_embd]. */
+            {
+                TensorInfo *t_so = lw->tensors[TENSOR_SSM_OUT];
+                if (t_so) {
+                    if (!mat_vec_mul(ws->xb2, t_so, base, ws->hb2,
+                                     n_embd, qkv_d,
+                                     t_so->dim[0] == qkv_d, s->pthreads))
+                        return false;
+                } else {
+                    memcpy(ws->xb2, ws->hb2, n_embd * sizeof(float));
+                }
+            }
+
+        } else if (t_qkv) {
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
             if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans, s->pthreads)) return false;
@@ -345,9 +636,23 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
 
         /* ---- 2f. Attention output projection ---- */
         {
-            TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
+            TensorInfo *t_out  = lw->tensors[TENSOR_ATTN_OUT];
+            TensorInfo *t_gate = lw->tensors[TENSOR_ATTN_GATE];
+
+            /* Qwen3.5 gating: project residual → gate, apply SiLU,
+             * then multiply element-wise with attention output. */
+            if (t_gate) {
+                if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, q_dim, n_embd,
+                                 t_gate->dim[0] == n_embd, s->pthreads)) return false;
+                silu(ws->hb, (int)q_dim);
+                for (u32 i = 0; i < q_dim; i++)
+                    attn_out[i] *= ws->hb[i];
+            }
+
             if (t_out) {
                 if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
+                    /* Gated output weight (Qwen2.5): 2*n_embd outputs,
+                     * split into gate (first n_embd) and value. */
                     for (u32 i = 0; i < 2 * n_embd; i++) {
                         u64 off = (u64)i * q_dim;
                         float sum = 0.0f;
@@ -359,7 +664,9 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
                     for (u32 i = 0; i < n_embd; i++)
                         ws->xb2[i] = ws->hb2[i] * ws->hb2[i + n_embd];
                 } else {
-                    if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
+                    if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim,
+                                     (n_embd != q_dim) && t_out->dim[0] == q_dim,
+                                     s->pthreads)) return false;
                 }
             } else {
                 if (q_dim == n_embd) {
@@ -576,6 +883,157 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                 tensor_get_f32_batch(tb_v, base, 0, n_v, v_bias);
             }
 
+            TensorInfo *t_ssm_conv_pf = lw->tensors[TENSOR_SSM_CONV1D];
+            if (t_ssm_conv_pf) {
+                /* ======== Prefill SSM (Gated DeltaNet) ========
+                 * The recurrence is inherently sequential, so we
+                 * process tokens one-by-one even during prefill. */
+                u32 n_g = ws->ssm_groups;
+                u32 d_s = ws->ssm_dim;
+                u32 qkv_d = n_g * d_s;  /* 2048 */
+                u32 f_dim = ws->ssm_fused;
+                u32 ck    = ws->conv_kernel;
+
+                /* Dequantise conv weight once for all tokens. */
+                float *cw = smalloc((u64)ck * f_dim * sizeof(float));
+                tensor_get_f32_batch(t_ssm_conv_pf, base, 0, (u64)ck * f_dim, cw);
+
+                /* Dequantise SSM params once. */
+                TensorInfo *ta  = lw->tensors[TENSOR_SSM_ALPHA];
+                TensorInfo *tb  = lw->tensors[TENSOR_SSM_BETA];
+                TensorInfo *tA  = lw->tensors[TENSOR_SSM_A];
+                TensorInfo *tdt = lw->tensors[TENSOR_SSM_DT_BIAS];
+                TensorInfo *t_gate_pf = lw->tensors[TENSOR_ATTN_GATE];
+                TensorInfo *t_so_pf   = lw->tensors[TENSOR_SSM_OUT];
+
+                float *dt_bi = smalloc((u64)n_g * sizeof(float));
+                float *a_log = smalloc((u64)n_g * sizeof(float));
+                tensor_get_f32_batch(tdt, base, 0, n_g, dt_bi);
+                tensor_get_f32_batch(tA,  base, 0, n_g, a_log);
+
+                for (u32 p = 0; p < n_tokens; p++) {
+                    float *xp = norm_buf + (u64)p * n_embd;
+
+                    /* Fused QKV projection. */
+                    bool qkv_tr = (t_qkv->dim[0] == n_embd);
+                    u32 ft = (u32)(qkv_tr ? t_qkv->dim[1] : t_qkv->dim[0]);
+                    if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, xp,
+                                     ft, n_embd, qkv_tr, s->pthreads)) {
+                        sfree(cw); sfree(dt_bi); sfree(a_log); goto fail;
+                    }
+
+                    /* Conv1d (in-place). */
+                    causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw,
+                                       ws->conv_state[l], f_dim, ck);
+
+                    /* Split Q, K, V. */
+                    float *qd = ws->qkv_fused;
+                    float *kd = ws->qkv_fused + qkv_d;
+                    float *vd = ws->qkv_fused + qkv_d * 2;
+
+                    /* L2-norm Q, K. */
+                    l2_norm_rows(qd, n_g, d_s, 1e-6f);
+                    l2_norm_rows(kd, n_g, d_s, 1e-6f);
+                    /* Q *= 1/sqrt(d_ssm) */
+                    {
+                        float qs = 1.0f / sqrtf((float)d_s);
+                        for (u32 i = 0; i < qkv_d; i++)
+                            qd[i] *= qs;
+                    }
+
+                    /* Compute g, beta. */
+                    float g_stk[16], b_stk[16];
+                    float *gp = n_g <= 16 ? g_stk : smalloc((u64)n_g * sizeof(float));
+                    float *bp = n_g <= 16 ? b_stk : smalloc((u64)n_g * sizeof(float));
+                    {
+                        float *al = smalloc((u64)n_g * sizeof(float));
+                        if (!mat_vec_mul(al, ta, base, xp, n_g, n_embd,
+                                         ta->dim[0] == n_embd, s->pthreads)) {
+                            sfree(al); sfree(cw); sfree(dt_bi); sfree(a_log);
+                            if (gp != g_stk) sfree(gp);
+                            if (bp != b_stk) sfree(bp);
+                            goto fail;
+                        }
+                        for (u32 i = 0; i < n_g; i++) {
+                            float sp = al[i] + dt_bi[i];
+                            sp = (sp > 20.0f) ? sp : log1pf(expf(sp));
+                            gp[i] = -expf(a_log[i]) * sp;
+                            gp[i] = expf(gp[i]); /* multiplicative form */
+                        }
+                        sfree(al);
+                    }
+                    {
+                        if (!mat_vec_mul(bp, tb, base, xp, n_g, n_embd,
+                                         tb->dim[0] == n_embd, s->pthreads)) {
+                            sfree(cw); sfree(dt_bi); sfree(a_log);
+                            if (gp != g_stk) sfree(gp);
+                            if (bp != b_stk) sfree(bp);
+                            goto fail;
+                        }
+                        for (u32 i = 0; i < n_g; i++)
+                            bp[i] = 1.0f / (1.0f + expf(-bp[i]));
+                    }
+
+                    /* Delta recurrence → hb2. */
+                    {
+                        float *mem = smalloc((u64)qkv_d * sizeof(float));
+                        gated_delta_step(qd, kd, vd, ws->ssm_state[l],
+                                         gp, bp, mem, ws->hb2, n_g, d_s);
+                        sfree(mem);
+                    }
+                    if (gp != g_stk) sfree(gp);
+                    if (bp != b_stk) sfree(bp);
+
+                    /* Apply SSM norm. */
+                    {
+                        TensorInfo *t_sn_pf = lw->tensors[TENSOR_SSM_NORM];
+                        if (t_sn_pf) {
+                            float *snw = smalloc((u64)d_s * sizeof(float));
+                            tensor_get_f32_batch(t_sn_pf, base, 0, d_s, snw);
+                            float *dp = ws->hb2;
+                            for (u32 g = 0; g < n_g; g++)
+                                rms_norm_inplace(dp + (u64)g * d_s, snw, d_s, eps);
+                            sfree(snw);
+                        }
+                    }
+
+                    /* Gate. */
+                    if (t_gate_pf) {
+                        if (!mat_vec_mul(ws->hb, t_gate_pf, base, xp,
+                                         qkv_d, n_embd,
+                                         t_gate_pf->dim[0] == n_embd, s->pthreads)) {
+                            sfree(cw); sfree(dt_bi); sfree(a_log); goto fail;
+                        }
+                        silu(ws->hb, (int)qkv_d);
+                        for (u32 i = 0; i < qkv_d; i++)
+                            ws->hb2[i] *= ws->hb[i];
+                    }
+
+                    /* Output projection → norm_buf[p]. */
+                    float *yp = norm_buf + (u64)p * n_embd;
+                    if (t_so_pf) {
+                        if (!mat_vec_mul(yp, t_so_pf, base, ws->hb2,
+                                         n_embd, qkv_d,
+                                         t_so_pf->dim[0] == qkv_d, s->pthreads)) {
+                            sfree(cw); sfree(dt_bi); sfree(a_log); goto fail;
+                        }
+                    } else {
+                        memcpy(yp, ws->hb2, n_embd * sizeof(float));
+                    }
+                }
+                sfree(cw); sfree(dt_bi); sfree(a_log);
+                akc->n = cache_start + n_tokens;
+
+                /* Release bias buffers (unused in SSM path). */
+                if (q_bias != q_bias_stack) sfree(q_bias);
+                if (k_bias != k_bias_stack) sfree(k_bias);
+                if (v_bias != v_bias_stack) sfree(v_bias);
+
+                /* Skip the remaining attention code (2c, 2d) for this layer.
+                 * The SSM output is already in norm_buf. */
+                goto ssm_layer_done;
+            }
+
             if (t_qkv) {
                 /* Fused QKV: one mat_mat_mul, then split per token. */
                 qkv_trans   = (t_qkv->dim[0] == n_embd);
@@ -758,34 +1216,60 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
         }
 
         /* ---- 2d. Batched attention output projection ---- */
-        if (t_out) {
-            if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
+        {
+            TensorInfo *t_gate_attn = lw->tensors[TENSOR_ATTN_GATE];
+
+            /* Qwen3.5 gating: project residual → gate, apply SiLU,
+             * then multiply element-wise with attention output. */
+            if (t_gate_attn) {
+                /* gate_buf has n_tokens * ffn_hidden elements (3584 per token),
+                 * large enough for q_dim = 2048 per token. */
+                if (!mat_mat_mul(gate_buf, t_gate_attn, base, norm_buf, n_tokens,
+                                 q_dim, n_embd,
+                                 t_gate_attn->dim[0] == n_embd, s->pthreads)) goto fail;
                 for (u32 p = 0; p < n_tokens; p++) {
-                    float *y_row = norm_buf + (u64)p * n_embd;
-                    const float *x_row = attn_buf + (u64)p * q_dim;
-                    float *tmp = gate_buf + (u64)p * 2 * n_embd;
-                    for (u32 i = 0; i < 2 * n_embd; i++) {
-                        u64 off = (u64)i * q_dim;
-                        float sum = 0.0f;
-                        for (u32 j = 0; j < q_dim; j++)
-                            sum += tensor_get_f32(t_out, base, off + j) * x_row[j];
-                        tmp[i] = sum;
-                    }
-                    silu(tmp, (int)n_embd);
-                    for (u32 i = 0; i < n_embd; i++)
-                        y_row[i] = tmp[i] * tmp[i + n_embd];
+                    float *gp = gate_buf + (u64)p * q_dim;
+                    float *ap = attn_buf + (u64)p * q_dim;
+                    silu(gp, (int)q_dim);
+                    for (u32 i = 0; i < q_dim; i++)
+                        ap[i] *= gp[i];
                 }
-            } else if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
-        } else {
-            /* No output projection: copy attn_buf → norm_buf (if dims match). */
-            if (q_dim == n_embd) {
-                memcpy(norm_buf, attn_buf, row_q * sizeof(float));
+            }
+
+            if (t_out) {
+                if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
+                    /* Gated output weight: 2*n_embd outputs,
+                     * split into gate (first n_embd) and value. */
+                    for (u32 p = 0; p < n_tokens; p++) {
+                        float *y_row = norm_buf + (u64)p * n_embd;
+                        const float *x_row = attn_buf + (u64)p * q_dim;
+                        float *tmp = gate_buf + (u64)p * 2 * n_embd;
+                        for (u32 i = 0; i < 2 * n_embd; i++) {
+                            u64 off = (u64)i * q_dim;
+                            float sum = 0.0f;
+                            for (u32 j = 0; j < q_dim; j++)
+                                sum += tensor_get_f32(t_out, base, off + j) * x_row[j];
+                            tmp[i] = sum;
+                        }
+                        silu(tmp, (int)n_embd);
+                        for (u32 i = 0; i < n_embd; i++)
+                            y_row[i] = tmp[i] * tmp[i + n_embd];
+                    }
+                } else if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens,
+                                        n_embd, q_dim,
+                                        (n_embd != q_dim) && t_out->dim[0] == q_dim,
+                                        s->pthreads)) { goto fail; }
             } else {
-                for (u32 p = 0; p < n_tokens; p++)
-                    memcpy(norm_buf + (u64)p * n_embd, attn_buf + (u64)p * q_dim, n_embd * sizeof(float));
+                if (q_dim == n_embd) {
+                    memcpy(norm_buf, attn_buf, row_q * sizeof(float));
+                } else {
+                    for (u32 p = 0; p < n_tokens; p++)
+                        memcpy(norm_buf + (u64)p * n_embd, attn_buf + (u64)p * q_dim, n_embd * sizeof(float));
+                }
             }
         }
 
+        ssm_layer_done:
         /* ---- 2e. Residual ---- */
         for (u32 p = 0; p < n_tokens; p++) {
             float *xp = xs + (u64)p * n_embd;
@@ -867,6 +1351,19 @@ static void qwen3_reset(Session *s) {
     for (u32 i = 0; i < kc->n_layer; i++)
         kc->std[i].n = 0;
     s->n_tokens = 0;
+
+    /* Zero SSM recurrent state and conv state. */
+    Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
+    if (ws && ws->ssm_state) {
+        u64 state_sz = (u64)ws->ssm_groups * ws->ssm_dim * ws->ssm_dim;
+        u64 conv_sz  = (u64)(ws->conv_kernel - 1) * ws->ssm_fused;
+        for (u32 i = 0; i < s->cfg.n_layer; i++) {
+            if (ws->ssm_state[i])
+                memset(ws->ssm_state[i], 0, state_sz * sizeof(float));
+            if (ws->conv_state[i])
+                memset(ws->conv_state[i], 0, conv_sz * sizeof(float));
+        }
+    }
 }
 
 static void qwen3_free(Session *s) {
@@ -887,9 +1384,18 @@ static void qwen3_free(Session *s) {
     Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
     if (ws) {
         sfree(ws->x); sfree(ws->xb); sfree(ws->xb2);
-        sfree(ws->q); sfree(ws->k); sfree(ws->v); 
-        sfree(ws->qkv_fused); sfree(ws->scores); 
-        sfree(ws->hb); sfree(ws->hb2); sfree(ws);
+        sfree(ws->q); sfree(ws->k); sfree(ws->v);
+        sfree(ws->qkv_fused); sfree(ws->scores);
+        sfree(ws->hb); sfree(ws->hb2);
+        if (ws->ssm_state) {
+            for (u32 i = 0; i < s->cfg.n_layer; i++) {
+                sfree(ws->ssm_state[i]);
+                sfree(ws->conv_state[i]);
+            }
+            sfree(ws->ssm_state);
+            sfree(ws->conv_state);
+        }
+        sfree(ws);
         s->arch_data = NULL;
     }
 }
