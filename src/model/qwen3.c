@@ -227,7 +227,8 @@ static bool qwen3_init(Session *s) {
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
     /* Scan all layers for max fused QKV width (covers SSM layers
-     * whose fused output can be much wider than standard attention). */
+     * whose fused output can be much wider than standard attention,
+     * as well as Q-norm layers that use qkv_fused as temp storage). */
     Weights *w = s->en->weights;
     for (u32 i = 0; i < c->n_layer; i++) {
         TensorInfo *t_qkv = w->layers[i].tensors[TENSOR_ATTN_QKV];
@@ -235,6 +236,12 @@ static bool qwen3_init(Session *s) {
             u64 total = t_qkv->dim[0] > t_qkv->dim[1]
                       ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
             if (total > max_fused) max_fused = (u32)total;
+        }
+        TensorInfo *t_q = w->layers[i].tensors[TENSOR_ATTN_Q];
+        if (t_q && t_q->ndim >= 2) {
+            u32 q_sz = t_q->dim[0] > t_q->dim[1]
+                     ? (u32)t_q->dim[0] : (u32)t_q->dim[1];
+            if (q_sz > max_fused) max_fused = q_sz;
         }
     }
 
@@ -259,14 +266,21 @@ static bool qwen3_init(Session *s) {
     ws->hb  = scalloc((u64)ws->ffn_hidden, sizeof(float));
     ws->hb2 = scalloc((u64)ws->ffn_hidden, sizeof(float));
 
-    /* Read rope theta from metadata (default 1e6 for Qwen2). */
+    /* Read rope theta from metadata (default 1e6 for Qwen2).
+     * Try arch_name prefix first, then generic "qwen3" prefix. */
     ws->rope_theta = 1000000.0f;
     {
+        float tmp = 0.0f;
         const char *pfx = s->en->model->arch_name[0]
                           ? s->en->model->arch_name : "qwen3";
         char k[96];
-        if (snprintf(k, sizeof(k), "%s.rope.freq_base", pfx) > 0)
-            model_get_f32(s->en->model, k, &ws->rope_theta);
+        if (snprintf(k, sizeof(k), "%s.rope.freq_base", pfx) > 0
+            && model_get_f32(s->en->model, k, &tmp))
+            ws->rope_theta = tmp;
+        else if (strcmp(pfx, "qwen3") != 0
+                 && snprintf(k, sizeof(k), "qwen3.rope.freq_base") > 0
+                 && model_get_f32(s->en->model, k, &tmp))
+            ws->rope_theta = tmp;
     }
 
     /* ---- SSM (Gated DeltaNet) state setup ---- */
@@ -277,17 +291,23 @@ static bool qwen3_init(Session *s) {
     {
         const char *pfx = s->en->model->arch_name[0]
                           ? s->en->model->arch_name : "qwen3";
-        char kk[96];
         i32 v32 = 0;
-        if (snprintf(kk, sizeof(kk), "%s.ssm.group_count", pfx) > 0
-            && model_get_i32(s->en->model, kk, &v32))
-            ws->ssm_groups = (u32)v32;
-        if (snprintf(kk, sizeof(kk), "%s.ssm.state_size", pfx) > 0
-            && model_get_i32(s->en->model, kk, &v32))
-            ws->ssm_dim = (u32)v32;
-        if (snprintf(kk, sizeof(kk), "%s.ssm.conv_kernel", pfx) > 0
-            && model_get_i32(s->en->model, kk, &v32))
-            ws->conv_kernel = (u32)v32;
+        #define TRY_SSM_I32(suffix, field) do {                         \
+            char _k[96];                                                \
+            int _n = snprintf(_k, sizeof(_k), "%s.ssm.%s", pfx, suffix);\
+            if (_n > 0 && (size_t)_n < sizeof(_k)                      \
+                && model_get_i32(s->en->model, _k, &v32))               \
+                field = (u32)v32;                                       \
+            else if (strcmp(pfx, "qwen3") != 0                          \
+                     && snprintf(_k, sizeof(_k), "qwen3.ssm.%s",       \
+                                 suffix) > 0                            \
+                     && model_get_i32(s->en->model, _k, &v32))          \
+                field = (u32)v32;                                       \
+        } while(0)
+        TRY_SSM_I32("group_count",  ws->ssm_groups);
+        TRY_SSM_I32("state_size",   ws->ssm_dim);
+        TRY_SSM_I32("conv_kernel",  ws->conv_kernel);
+        #undef TRY_SSM_I32
     }
 
     /* Allocate per-layer SSM state for Gated DeltaNet layers.
@@ -386,8 +406,7 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
                 u32 ck  = ws->conv_kernel; /* 4 */
                 float *cw = smalloc((u64)ck * cch * sizeof(float));
                 tensor_get_f32_batch(t_ssm_conv, base, 0, (u64)ck * cch, cw);
-                causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw,
-                                   ws->conv_state[l], cch, ck);
+                causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw, ws->conv_state[l], cch, ck);
                 sfree(cw);
             }
 
@@ -465,19 +484,9 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
             if (gv != g_stack) sfree(gv);
             if (bv != beta_stack) sfree(bv);
 
-            /* Output gating: gate = silu(attn_gate @ xb). */
-            TensorInfo *t_g = lw->tensors[TENSOR_ATTN_GATE];
-            if (t_g) {
-                if (!mat_vec_mul(ws->qkv_fused, t_g, base, ws->xb,
-                                 qkv_d, n_embd,
-                                 t_g->dim[0] == n_embd, s->pthreads))
-                    return false;
-                silu(ws->qkv_fused, (int)qkv_d);
-                for (u32 i = 0; i < qkv_d; i++)
-                    ws->hb2[i] *= ws->qkv_fused[i];
-            }
-
-            /* Apply SSM norm (per-group RMS norm on delta output). */
+            /* Apply SSM norm FIRST (per-group RMS norm on delta output),
+             * THEN apply output gating.  This matches the Qwen3.5
+             * reference implementation. */
             {
                 TensorInfo *t_sn = lw->tensors[TENSOR_SSM_NORM];
                 if (t_sn) {
@@ -488,6 +497,18 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
                         rms_norm_inplace(dp + (u64)g * d_s, snw, d_s, eps);
                     sfree(snw);
                 }
+            }
+
+            /* Output gating: gate = silu(attn_gate @ xb). */
+            TensorInfo *t_g = lw->tensors[TENSOR_ATTN_GATE];
+            if (t_g) {
+                if (!mat_vec_mul(ws->qkv_fused, t_g, base, ws->xb,
+                                 qkv_d, n_embd,
+                                 t_g->dim[0] == n_embd, s->pthreads))
+                    return false;
+                silu(ws->qkv_fused, (int)qkv_d);
+                for (u32 i = 0; i < qkv_d; i++)
+                    ws->hb2[i] *= ws->qkv_fused[i];
             }
 
             /* Output projection: ssm_out @ delta_out → xb2 [n_embd]. */
