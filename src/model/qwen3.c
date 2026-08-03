@@ -583,8 +583,8 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
         }
 
         /* ---- 2c. RoPE ---- */
-        rope_neox(ws->q, n_head, q_head_dim, pos, ws->rope_theta);
-        rope_neox(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+        rope_partial(ws->q, n_head, q_head_dim, c->rope_dim, pos, ws->rope_theta);
+        rope_partial(ws->k, n_kv_head, kv_head_dim, c->rope_dim, pos, ws->rope_theta);
         if (l == 0) {
             DBG_VEC("q_rope", ws->q, q_head_dim);
             DBG_VEC("k_rope", ws->k, kv_head_dim);
@@ -1061,8 +1061,8 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                         for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
                     }
 
-                    rope_neox(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
-                    rope_neox(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+                    rope_partial(qbuf + (u64)p * q_dim, n_head, q_head_dim, c->rope_dim, pos, ws->rope_theta);
+                    rope_partial(ws->k, n_kv_head, kv_head_dim, c->rope_dim, pos, ws->rope_theta);
 
                     {
                         u32 hs = akc->cap * kv_head_dim;
@@ -1156,8 +1156,8 @@ static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) 
                             for (u32 i = 0; i < n_v; i++) ws->v[i] += v_bias[i];
                         }
 
-                        rope_neox(qbuf + (u64)p * q_dim, n_head, q_head_dim, pos, ws->rope_theta);
-                        rope_neox(ws->k, n_kv_head, kv_head_dim, pos, ws->rope_theta);
+                        rope_partial(qbuf + (u64)p * q_dim, n_head, q_head_dim, c->rope_dim, pos, ws->rope_theta);
+                        rope_partial(ws->k, n_kv_head, kv_head_dim, c->rope_dim, pos, ws->rope_theta);
 
                         {
                             u32 hs = akc->cap * kv_head_dim;

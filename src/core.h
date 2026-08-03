@@ -20,6 +20,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
 bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X, u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool);
 void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
 void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
+void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, float theta_base);
 void silu(float *x, int n);
 void softmax(float *x, u32 n);
 float softplus(float x);

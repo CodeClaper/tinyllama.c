@@ -425,9 +425,29 @@ void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base) {
 void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base) {
     u32 half = head_dim / 2;
     for (u32 h = 0; h < n_heads; h++) {
-        float *bh = buf + h * head_dim;
+        float *bh = buf + (u64)h * head_dim;
         for (u32 i = 0; i < half; i++) {
             float theta = 1.0f / powf(theta_base, (float)(2 * i) / (float)head_dim);
+            float c     = cosf((float)pos * theta);
+            float s     = sinf((float)pos * theta);
+            float a     = bh[i], b = bh[i + half];
+            bh[i]        = a * c - b * s;
+            bh[i + half] = a * s + b * c;
+        }
+    }
+}
+
+/* Partial RoPE: rotates only the first rope_dim dimensions of each head.
+ * head_dim is the full head dimension (stride between heads),
+ * rope_dim is how many dims to rotate (64 of 256 for Qwen3.5).
+ * The remaining (head_dim - rope_dim) dimensions are left unchanged. */
+void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, float theta_base) {
+    u32 half    = head_dim / 2;       /* pair stride (full head)     */
+    u32 n_pairs = rope_dim / 2;       /* how many pairs to rotate    */
+    for (u32 h = 0; h < n_heads; h++) {
+        float *bh = buf + (u64)h * head_dim;
+        for (u32 i = 0; i < n_pairs; i++) {
+            float theta = 1.0f / powf(theta_base, (float)(2 * i) / (float)rope_dim);
             float c     = cosf((float)pos * theta);
             float s     = sinf((float)pos * theta);
             float a     = bh[i], b = bh[i + half];
@@ -1518,6 +1538,11 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 
     if (cfg->kv_head_dim == 0) cfg->kv_head_dim = cfg->head_dim;
 
+    /* Partial RoPE dimension (Qwen3.5 uses 64 of 256 head dims). */
+    TRY_I32("rope.dimension_count",      rope_dim);
+    /* Default to head_dim (full RoPE) when not specified. */
+    if (cfg->rope_dim == 0) cfg->rope_dim = cfg->head_dim;
+
     /* ---- DeepSeek MLA ---- */
     TRY_I32("attention.kv_lora_rank",     kv_lora_rank);
     TRY_I32("attention.qk_nope_head_dim", qk_nope_head_dim);
@@ -1525,9 +1550,10 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 
     #undef TRY_I32
 
-    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u kv_head_dim=%u n_layer=%u n_vocab=%u",
+    slog(INFO, "ArchConfig: arch=%s n_embd=%u n_head=%u n_kv_head=%u head_dim=%u kv_head_dim=%u rope_dim=%u n_layer=%u n_vocab=%u",
          arch_key_prefix(en->model->arch), cfg->n_embd, cfg->n_head,
-         cfg->n_kv_head, cfg->head_dim, cfg->kv_head_dim, cfg->n_layer, cfg->n_vocab);
+         cfg->n_kv_head, cfg->head_dim, cfg->kv_head_dim, cfg->rope_dim,
+         cfg->n_layer, cfg->n_vocab);
 
     if (cfg->kv_lora_rank)
         slog(INFO, "ArchConfig MLA: kv_lora_rank=%u qk_nope_head_dim=%u qk_rope_head_dim=%u",

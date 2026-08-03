@@ -226,6 +226,7 @@ typedef struct {
     u32 n_kv_head;        /* attention.head_count_kv (1 = MHA)     */
     u32 head_dim;         /* attention head dimension (Q)          */
     u32 kv_head_dim;      /* K/V per-head dimension                */
+    u32 rope_dim;         /* partial RoPE dimension (0 = full)     */
     u32 n_embd;           /* embedding_length                     */
     u32 n_layer;          /* block_count                          */
     u32 n_vocab;          /* vocabulary size                      */
