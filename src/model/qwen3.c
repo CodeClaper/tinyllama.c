@@ -226,13 +226,16 @@ static bool qwen3_init(Session *s) {
     s->tokens = scalloc((u64)s->ctx_size, sizeof(u32));
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
-    /* Also support fused QKV (e.g. Qwen2.5); check layer 0 tensor size. */
+    /* Scan all layers for max fused QKV width (covers SSM layers
+     * whose fused output can be much wider than standard attention). */
     Weights *w = s->en->weights;
-    TensorInfo *t_qkv = w->layers[0].tensors[TENSOR_ATTN_QKV];
-    if (t_qkv && t_qkv->ndim >= 2) {
-        u64 total = t_qkv->dim[0] > t_qkv->dim[1]
-                  ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
-        if (total > max_fused) max_fused = (u32)total;
+    for (u32 i = 0; i < c->n_layer; i++) {
+        TensorInfo *t_qkv = w->layers[i].tensors[TENSOR_ATTN_QKV];
+        if (t_qkv && t_qkv->ndim >= 2) {
+            u64 total = t_qkv->dim[0] > t_qkv->dim[1]
+                      ? (u32)t_qkv->dim[0] : (u32)t_qkv->dim[1];
+            if (total > max_fused) max_fused = (u32)total;
+        }
     }
 
     /* Allocate workspace buffers. */
@@ -500,6 +503,15 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
                 }
             }
 
+            /* SSM residual and skip standard attention pathway. */
+            for (u32 i = 0; i < n_embd; i++)
+                ws->x[i] += ws->xb2[i];
+            if (l == 0) {
+                DBG_VEC("ssm_out(xb2)", ws->xb2, n_embd);
+                DBG_VEC("x_after_ssm_residual", ws->x, n_embd);
+            }
+            goto ssm_attn_done;
+
         } else if (t_qkv) {
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
@@ -685,6 +697,7 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
             DBG_VEC("x_after_attn_residual", ws->x, n_embd);
         }
 
+        ssm_attn_done:
         /* ---- 2h. Pre-FFN norm ---- */
         {
             TensorInfo *ti = lw->tensors[TENSOR_POST_ATTN_NORM];
