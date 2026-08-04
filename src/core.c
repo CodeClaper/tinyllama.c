@@ -477,9 +477,11 @@ void softmax(float *x, u32 n) {
         x[i] /= sum;
 }
 
-/* Softplus: y = log(1 + exp(x)). */
+/* Softplus: y = log(1 + exp(x)), numerically stable.
+ * For x > 20, log(1 + e^x) ≈ x, so return x directly to avoid
+ * expf overflow (which would otherwise produce +inf). */
 float softplus(float x) {
-    return logf(1.0f + expf(x));
+    return (x > 20.0f) ? x : log1pf(expf(x));
 }
 
 

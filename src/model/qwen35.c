@@ -452,11 +452,8 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                     return false;
                 }
                 /* g = -exp(A_log) * softplus(alpha + dt_bias) */
-                for (u32 i = 0; i < n_g; i++) {
-                    float sp = alpha[i] + abuf[i];
-                    sp = (sp > 20.0f) ? sp : log1pf(expf(sp));
-                    gv[i] = -expf(gv[i]) * sp;
-                }
+                for (u32 i = 0; i < n_g; i++)
+                    gv[i] = -expf(gv[i]) * softplus(alpha[i] + abuf[i]);
                 sfree(alpha); sfree(abuf);
 
                 if (!mat_vec_mul(bv, tb, base, ws->xb, n_g, n_embd,
@@ -989,9 +986,7 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                             goto fail;
                         }
                         for (u32 i = 0; i < n_g; i++) {
-                            float sp = al[i] + dt_bi[i];
-                            sp = (sp > 20.0f) ? sp : log1pf(expf(sp));
-                            gp[i] = -expf(a_log[i]) * sp;
+                            gp[i] = -expf(a_log[i]) * softplus(al[i] + dt_bi[i]);
                             gp[i] = expf(gp[i]); /* multiplicative form */
                         }
                         sfree(al);
