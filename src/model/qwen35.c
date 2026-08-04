@@ -419,8 +419,8 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
             float *v_d = ws->qkv_fused + qkv_d * 2;
 
             /* L2-normalise Q and K (per group / row). */
-            l2_norm_rows(q_d, n_g, d_s, 1e-6f);
-            l2_norm_rows(k_d, n_g, d_s, 1e-6f);
+            l2_norm_rows(q_d, n_g, d_s, DEFAULT_EPS);
+            l2_norm_rows(k_d, n_g, d_s, DEFAULT_EPS);
 
             /* Scale Q by 1/sqrt(d_ssm) (reference: Gated DeltaNet). */
             {
@@ -966,8 +966,8 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                     float *vd = ws->qkv_fused + qkv_d * 2;
 
                     /* L2-norm Q, K. */
-                    l2_norm_rows(qd, n_g, d_s, 1e-6f);
-                    l2_norm_rows(kd, n_g, d_s, 1e-6f);
+                    l2_norm_rows(qd, n_g, d_s, DEFAULT_EPS);
+                    l2_norm_rows(kd, n_g, d_s, DEFAULT_EPS);
                     /* Q *= 1/sqrt(d_ssm) */
                     {
                         float qs = 1.0f / sqrtf((float)d_s);
