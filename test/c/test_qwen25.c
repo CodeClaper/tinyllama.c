@@ -3,9 +3,9 @@
 #include "minunit.h"
 #include "../../src/model/model.h"
 
-/* Helper: call qwen2_ops.decode and null-terminate, return the decoded length. */
+/* Helper: call qwen25_ops.decode and null-terminate, return the decoded length. */
 static int decode(const u8 *raw, int raw_len, char *out, int max_len) {
-    return qwen2_ops.decode(raw, raw_len, out, max_len);
+    return qwen25_ops.decode(raw, raw_len, out, max_len);
 }
 
 /* Standard GPT-2 byte-level encode tables: maps raw byte -> UTF-8 encoded
@@ -49,7 +49,7 @@ static const u8 enc_continuation[256] = {
     0xb0,0xb1,0xb2,0xb3,0xb4,0xb5,0xb6,0xb7,0xb8,0xb9,0xba,0xbb,0xbc,0xbd,0xbe,0xbf,
 };
 
-/* Helper: GPT-2 byte-level encode a raw byte sequence (inverse of qwen2_decode).
+/* Helper: GPT-2 byte-level encode a raw byte sequence (inverse of qwen25_decode).
  * Uses the standard bytes_to_unicode() mapping from the original GPT-2 code,
  * validated against HuggingFace tokenizers.ByteLevel (256/256 match).
  * Returns the number of encoded bytes written to out. */

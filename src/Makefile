@@ -13,12 +13,12 @@ endif
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
-       model/llama.o model/qwen2.o model/qwen3.o model/deepseek.o model/falcon.o \
+       model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
               tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
-              model/llama.o model/qwen2.o model/qwen3.o model/deepseek.o model/falcon.o \
+              model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               cpu/quants_cpu.o
 
 all: server chat bench
@@ -77,11 +77,11 @@ pthreads.o: pthreads.c pthreads.h slog.h
 model/llama.o: model/llama.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/llama.c -o $@
 
-model/qwen2.o: model/qwen2.c model/model.h def.h
-	$(CC) $(CFLAGS) -c model/qwen2.c -o $@
+model/qwen25.o: model/qwen25.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/qwen25.c -o $@
 
-model/qwen3.o: model/qwen3.c model/model.h def.h
-	$(CC) $(CFLAGS) -c model/qwen3.c -o $@
+model/qwen35.o: model/qwen35.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/qwen35.c -o $@
 
 model/deepseek.o: model/deepseek.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/deepseek.c -o $@

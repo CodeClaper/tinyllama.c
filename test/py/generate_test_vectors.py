@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate GPT-2 byte-level encoding test vectors for qwen2_decode validation.
+Generate GPT-2 byte-level encoding test vectors for qwen25_decode validation.
 
 Usage:
   python3 generate_test_vectors.py              # print comparison report
@@ -12,7 +12,7 @@ Ground truth: the standard GPT-2 bytes_to_unicode() mapping from the original
 OpenAI GPT-2 code, also used by HuggingFace tokenizers and tiktoken.
 
 This script also compares the C code's simplified range-based mapping and
-reports any discrepancies.  The C code's qwen2_decode / gpt2_encode_bytes
+reports any discrepancies.  The C code's qwen25_decode / gpt2_encode_bytes
 differs from the standard for 35 byte values in ranges 0x7F-0xA0, 0xAD.
 """
 

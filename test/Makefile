@@ -7,7 +7,7 @@ endif
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
-all: test_pthreads test_utils test_qwen2
+all: test_pthreads test_utils test_qwen25
 
 test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -27,11 +27,11 @@ mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h
 test_utils: c/test_utils.c utils.o slog.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
-qwen2.o: $(SRC_DIR)/model/qwen2.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen2.c -o $@
+qwen25.o: $(SRC_DIR)/model/qwen25.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen25.c -o $@
 
-qwen3.o: $(SRC_DIR)/model/qwen3.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen3.c -o $@
+qwen35.o: $(SRC_DIR)/model/qwen35.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen35.c -o $@
 
 core.o: $(SRC_DIR)/core.c $(SRC_DIR)/core.h $(SRC_DIR)/def.h $(SRC_DIR)/model/model.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/core.c -o $@
@@ -51,15 +51,15 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen2: c/test_qwen2.c qwen2.o qwen3.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
 
-check: test_pthreads test_utils test_qwen2
+check: test_pthreads test_utils test_qwen25
 	./test_pthreads
 	./test_utils
-	./test_qwen2
+	./test_qwen25
 
 clean:
-	rm -f test_pthreads test_qwen2 *.o
+	rm -f test_pthreads test_qwen25 *.o

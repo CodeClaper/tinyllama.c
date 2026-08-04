@@ -21,7 +21,7 @@ typedef struct {
     float *hb2;             /* [ffn_hidden] FFN hidden buffer 2             */
     u32    ffn_hidden;
     float  rope_theta;      /* RoPE frequency base                          */
-} Qwen2Workspace;
+} Qwen25Workspace;
 
 /* ---- Arch ops --------------------------------------------------- */
 
@@ -40,7 +40,7 @@ static inline void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
     if (buf != stack_buf) sfree(buf);
 }
 
-static bool qwen2_init(Session *s) {
+static bool qwen25_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
     u32 q_head_dim  = c->head_dim;
@@ -76,7 +76,7 @@ static bool qwen2_init(Session *s) {
     }
 
     /* Allocate workspace buffers. */
-    Qwen2Workspace *ws = scalloc(1, sizeof(Qwen2Workspace));
+    Qwen25Workspace *ws = scalloc(1, sizeof(Qwen25Workspace));
     ws->x         = scalloc((u64)c->n_embd, sizeof(float));
     ws->xb        = scalloc((u64)c->n_embd, sizeof(float));
     ws->xb2       = scalloc((u64)c->n_embd, sizeof(float));
@@ -116,8 +116,8 @@ static bool qwen2_init(Session *s) {
     return true;
 }
 
-static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
-    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
+static bool qwen25_forward_one(Session *s, u32 token, float *logits) {
+    Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
     const u8       *base = s->en->model->map;
@@ -333,12 +333,12 @@ static bool qwen2_forward_one(Session *s, u32 token, float *logits) {
  * For batched paths, weight matrices are read once and reused across
  * all batch elements, converting memory-bandwidth-bound GEMV into
  * compute-bound GEMM.                                                */
-static bool qwen2_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+static bool qwen25_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
-    if (n_tokens == 1) return qwen2_forward_one(s, tokens[0], logits);
+    if (n_tokens == 1) return qwen25_forward_one(s, tokens[0], logits);
     slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
 
-    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
+    Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
     const u8       *base = s->en->model->map;
@@ -685,14 +685,14 @@ fail:
     return false;
 }
 
-static void qwen2_reset(Session *s) {
+static void qwen25_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++)
         kc->std[i].n = 0;
     s->n_tokens = 0;
 }
 
-static void qwen2_free(Session *s) {
+static void qwen25_free(Session *s) {
     KvCache *kc = &s->cache;
     if (kc->std) {
         for (u32 i = 0; i < kc->n_layer; i++) {
@@ -707,7 +707,7 @@ static void qwen2_free(Session *s) {
     s->tokens = NULL;
     s->logits = NULL;
 
-    Qwen2Workspace *ws = (Qwen2Workspace *)s->arch_data;
+    Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     if (ws) {
         sfree(ws->x);
         sfree(ws->xb);
@@ -724,7 +724,7 @@ static void qwen2_free(Session *s) {
     }
 }
 
-static int qwen2_decode(const u8 *raw, int raw_len, char *out, int max_len) {
+static int qwen25_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     int w = 0;
     for (int b = 0; b < raw_len && w < max_len; b++) {
         unsigned char c = raw[b];
@@ -765,10 +765,10 @@ static int qwen2_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     return w;
 }
 
-const ArchOps qwen2_ops = {
-    .init    = qwen2_init,
-    .free    = qwen2_free,
-    .forward = qwen2_forward,
-    .reset   = qwen2_reset,
-    .decode  = qwen2_decode,
+const ArchOps qwen25_ops = {
+    .init    = qwen25_init,
+    .free    = qwen25_free,
+    .forward = qwen25_forward,
+    .reset   = qwen25_reset,
+    .decode  = qwen25_decode,
 };

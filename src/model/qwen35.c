@@ -29,7 +29,7 @@ typedef struct {
     u32    ssm_dim;         /* d_state  (128 for Qwen3.5-0.8B)              */
     u32    ssm_fused;       /* fused QKV output width (6144)                */
     u32    conv_kernel;     /* conv1d kernel size (4)                       */
-} Qwen3Workspace;
+} Qwen35Workspace;
 
 /* ---- Arch ops --------------------------------------------------- */
 
@@ -200,7 +200,7 @@ static void gated_delta_step(const float *Q, const float *K, const float *V,
     }
 }
 
-static bool qwen3_init(Session *s) {
+static bool qwen35_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
     u32 q_head_dim  = c->head_dim;
@@ -246,7 +246,7 @@ static bool qwen3_init(Session *s) {
     }
 
     /* Allocate workspace buffers. */
-    Qwen3Workspace *ws = scalloc(1, sizeof(Qwen3Workspace));
+    Qwen35Workspace *ws = scalloc(1, sizeof(Qwen35Workspace));
     ws->x         = scalloc((u64)c->n_embd, sizeof(float));
     ws->xb        = scalloc((u64)c->n_embd, sizeof(float));
     ws->xb2       = scalloc((u64)c->n_embd, sizeof(float));
@@ -341,8 +341,8 @@ static bool qwen3_init(Session *s) {
     return true;
 }
 
-static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
-    Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
+static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
+    Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
     const u8       *base = s->en->model->map;
@@ -774,12 +774,12 @@ static bool qwen3_forward_one(Session *s, u32 token, float *logits) {
     return true;
 }
 
-static bool qwen3_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
-    if (n_tokens == 1) return qwen3_forward_one(s, tokens[0], logits);
+    if (n_tokens == 1) return qwen35_forward_one(s, tokens[0], logits);
     slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
 
-    Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
+    Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
     const u8       *base = s->en->model->map;
@@ -1380,14 +1380,14 @@ fail:
     return false;
 }
 
-static void qwen3_reset(Session *s) {
+static void qwen35_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++)
         kc->std[i].n = 0;
     s->n_tokens = 0;
 
     /* Zero SSM recurrent state and conv state. */
-    Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
+    Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     if (ws && ws->ssm_state) {
         u64 state_sz = (u64)ws->ssm_groups * ws->ssm_dim * ws->ssm_dim;
         u64 conv_sz  = (u64)(ws->conv_kernel - 1) * ws->ssm_fused;
@@ -1400,7 +1400,7 @@ static void qwen3_reset(Session *s) {
     }
 }
 
-static void qwen3_free(Session *s) {
+static void qwen35_free(Session *s) {
     KvCache *kc = &s->cache;
     if (kc->std) {
         for (u32 i = 0; i < kc->n_layer; i++) {
@@ -1415,7 +1415,7 @@ static void qwen3_free(Session *s) {
     s->tokens = NULL;
     s->logits = NULL;
 
-    Qwen3Workspace *ws = (Qwen3Workspace *)s->arch_data;
+    Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     if (ws) {
         sfree(ws->x); sfree(ws->xb); sfree(ws->xb2);
         sfree(ws->q); sfree(ws->k); sfree(ws->v);
@@ -1434,7 +1434,7 @@ static void qwen3_free(Session *s) {
     }
 }
 
-static int qwen3_decode(const u8 *raw, int raw_len, char *out, int max_len) {
+static int qwen35_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     int w = 0;
     for (int b = 0; b < raw_len && w < max_len; b++) {
         unsigned char c = raw[b];
@@ -1471,10 +1471,10 @@ static int qwen3_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     return w;
 }
 
-const ArchOps qwen3_ops = {
-    .init    = qwen3_init,
-    .free    = qwen3_free,
-    .forward = qwen3_forward,
-    .reset   = qwen3_reset,
-    .decode  = qwen3_decode,
+const ArchOps qwen35_ops = {
+    .init    = qwen35_init,
+    .free    = qwen35_free,
+    .forward = qwen35_forward,
+    .reset   = qwen35_reset,
+    .decode  = qwen35_decode,
 };

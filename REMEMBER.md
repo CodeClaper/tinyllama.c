@@ -2,7 +2,7 @@
 
 ## Critical (massive speedup)
 
-1. **Zero multi-threaded compute** — `pthreads_t` pool allocated but never used in forward passes (`qwen2_forward`/`qwen2_forward_one`). Every GEMM/GEMV and attention loop runs single-threaded. ll.cpp parallelizes across rows in every mat_mul and across heads in attention.
+1. **Zero multi-threaded compute** — `pthreads_t` pool allocated but never used in forward passes (`qwen25_forward`/`qwen25_forward_one`). Every GEMM/GEMV and attention loop runs single-threaded. ll.cpp parallelizes across rows in every mat_mul and across heads in attention.
 
 2. **Transposed `mat_vec_mul` is O(n²) dequant calls** (`core.c:190-196`): Calls `tensor_get_f32()` per element when weights are non-contiguous. Should batch-dequantize columns into a buffer then dot-product.
 
@@ -10,7 +10,7 @@
 
 ## High
 
-4. **Attention is entirely scalar** (`qwen2.c:230-245`, `556-568`):
+4. **Attention is entirely scalar** (`qwen25.c:230-245`, `556-568`):
    - Q·K^T scores use nested scalar loops instead of SIMD fused dot products
    - Softmax + V-weighted sum is scalar — no SIMD reduction
    - Prefill attention re-reads KV cache from scratch per query position (O(batch × seq_len × head_dim) with no tiling)
@@ -21,7 +21,7 @@
 
 ## Medium
 
-7. **Attention output buffering** (`qwen2.c:207-212`, `474-481`): KV cache write uses one `memcpy` per head. Fuse RoPE + KV write into one loop to avoid redundant passes.
+7. **Attention output buffering** (`qwen25.c:207-212`, `474-481`): KV cache write uses one `memcpy` per head. Fuse RoPE + KV write into one loop to avoid redundant passes.
 
 8. **No AVX2/AVX-512** — x86 path uses SSE only (128-bit). ll.cpp uses AVX2 (256-bit) baseline with AVX-512 kernels. 2×+ throughput left on table for modern x86.
 

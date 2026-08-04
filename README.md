@@ -187,7 +187,8 @@ Benchmark results on a consumer desktop:
   - model/            — Architecture-specific forward passes
     - model.h
     - llama.c         — LLaMA architecture
-    - qwen2.c         — Qwen2 architecture
+    - qwen25.c        — Qwen2.5 architecture
+    - qwen35.c        — Qwen3.5 architecture
     - deepseek.c      — DeepSeek architecture
     - falcon.c        — Falcon architecture
   - cpu/              — CPU-optimized kernels
@@ -204,7 +205,7 @@ Benchmark results on a consumer desktop:
   - c/                — Test sources
     - minunit.h
     - test_pthreads.c — Thread pool tests
-    - test_qwen2.c    — Qwen2 integration tests
+    - test_qwen25.c   — Qwen2 integration tests
     - test_utils.c    — Utility function tests
   - py/               — Test utilities
     - generate_test_vectors.py

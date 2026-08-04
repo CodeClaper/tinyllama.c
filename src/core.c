@@ -1584,8 +1584,8 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     /* Bind the right ops table. */
     switch (en->model->arch) {
         case ARCH_LLAMA:    s->ops = llama_ops;    break;
-        case ARCH_QWEN2:    s->ops = qwen2_ops;    break;
-        case ARCH_QWEN3:    s->ops = qwen3_ops;    break;
+        case ARCH_QWEN2:    s->ops = qwen25_ops;   break;
+        case ARCH_QWEN3:    s->ops = qwen35_ops;   break;
         case ARCH_DEEPSEEK: s->ops = deepseek_ops; break;
         case ARCH_FALCON:   s->ops = falcon_ops;   break;
         default:
