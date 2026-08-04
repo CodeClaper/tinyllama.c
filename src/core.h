@@ -24,6 +24,7 @@ void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, 
 void silu(float *x, int n);
 void softmax(float *x, u32 n);
 float softplus(float x);
+float sigmoid(float x);
 bool model_get_i32(Model *m, const char *key, i32 *out);
 bool model_get_f32(Model *m, const char *key, float *out);
 Model *model_load(const char *path);

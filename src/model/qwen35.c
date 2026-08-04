@@ -464,7 +464,7 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                 }
                 /* beta = sigmoid */
                 for (u32 i = 0; i < n_g; i++)
-                    bv[i] = 1.0f / (1.0f + expf(-bv[i]));
+                    bv[i] = sigmoid(bv[i]);
 
                 /* Convert g to multiplicative decay: g = exp(g). */
                 for (u32 i = 0; i < n_g; i++)
@@ -1000,7 +1000,7 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                             goto fail;
                         }
                         for (u32 i = 0; i < n_g; i++)
-                            bp[i] = 1.0f / (1.0f + expf(-bp[i]));
+                            bp[i] = sigmoid(bp[i]);
                     }
 
                     /* Delta recurrence → hb2. */

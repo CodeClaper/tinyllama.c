@@ -484,6 +484,12 @@ float softplus(float x) {
     return (x > 20.0f) ? x : log1pf(expf(x));
 }
 
+/* Sigmoid: y = 1 / (1 + exp(-x)).  Naturally stable: for x << -88,
+ * expf(-x) overflows to +inf and the result saturates to 0. */
+float sigmoid(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
 
 typedef struct {
     u8 *base;
