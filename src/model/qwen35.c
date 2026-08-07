@@ -295,11 +295,11 @@ static bool qwen35_init(Session *s) {
         #define TRY_SSM_I32(suffix, field) do {                         \
             char _k[96];                                                \
             int _n = snprintf(_k, sizeof(_k), "%s.ssm.%s", pfx, suffix);\
-            if (_n > 0 && (size_t)_n < sizeof(_k)                      \
+            if (_n > 0 && (size_t)_n < sizeof(_k)                       \
                 && model_get_i32(s->en->model, _k, &v32))               \
                 field = (u32)v32;                                       \
             else if (strcmp(pfx, "qwen3") != 0                          \
-                     && snprintf(_k, sizeof(_k), "qwen3.ssm.%s",       \
+                     && snprintf(_k, sizeof(_k), "qwen3.ssm.%s",        \
                                  suffix) > 0                            \
                      && model_get_i32(s->en->model, _k, &v32))          \
                 field = (u32)v32;                                       \
