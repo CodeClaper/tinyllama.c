@@ -997,18 +997,12 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                                      ft, n_embd, qkv_tr, s->pthreads)) {
                         sfree(cw); sfree(dt_bi); sfree(a_log); goto fail;
                     }
-                    if (l == 0 && p == n_tokens - 1) {
-                        DBG_VEC("tl_qkv", ws->qkv_fused, 10);
-                    }
 
                     /* Conv1d (in-place). */
                     causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw,
                                        ws->conv_state[l], f_dim, ck);
                     /* SiLU on the conv output (reference: conv → silu → split). */
                     silu(ws->qkv_fused, (int)f_dim);
-                    if (l == 0 && p == n_tokens - 1) {
-                        DBG_VEC("tl_conv_silu", ws->qkv_fused, 10);
-                    }
 
                     /* Split Q, K, V. */
                     float *qd = ws->qkv_fused;
@@ -1416,7 +1410,6 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
             for (u32 i = 0; i < n_embd; i++)
                 xp[i] += dp[i];
         }
-        DBG_VEC("prefill_x_after_layer", xs + (u64)(n_tokens - 1) * n_embd, 10);
     }
 
     /* ---- 3. Final RMS norm on the LAST position only ---- */
@@ -1439,7 +1432,6 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) goto fail;
-        DBG_VEC("logits(prefill)", dst, 10);
     }
 
     /* ---- 5. Update session state ---- */
