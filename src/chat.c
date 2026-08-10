@@ -233,6 +233,11 @@ int main(int argc, char *argv[]) {
         }
 
         /* Forward pass. */
+#ifdef DEBUG
+        fprintf(stderr, "prompt_tokens(%d):", n_prompt);
+        for (int i = 0; i < n_prompt; i++) fprintf(stderr, " %u", prompt_tokens[i]);
+        fprintf(stderr, "\n");
+#endif
         if (!session->ops.forward(session, prompt_tokens, n_prompt, session->logits))
             fatal("Forward pass failed");
 

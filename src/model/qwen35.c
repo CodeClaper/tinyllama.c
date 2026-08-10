@@ -110,26 +110,39 @@ static void l2_norm_rows(float *x, u32 n_rows, u32 dim, float eps) {
 /* Depthwise causal Conv1d step for single-token inference.
  * Processes fused QKV output (channels) through a depthwise conv
  * with kernel_size taps, maintaining a ring buffer of previous inputs.
- * weight – [kernel_size * channels] dequantised weight, row-major:
- *          weight[k * channels + c] for kernel tap k, channel c.
+ * weight – [channels * kernel_size] dequantised weight (GGUF layout,
+ *          PyTorch Conv1d convention), weight[c * kernel_size + k] for
+ *          channel c, tap k.
+ *          Tap k multiplies the input from k taps ago: tap 0 is the
+ *          OLDEST input (x[t-(K-1)]), tap K-1 is the current input,
+ *          matching ggml_ssm_conv and the reference implementation.
  * state  – [(kernel_size-1) * channels] ring buffer (oldest first).
  * On return, state is shifted and the new input is stored. */
 static void causal_conv1d_step(float *output, const float *input,
                                const float *weight, float *state,
                                u32 channels, u32 kernel_size) {
-    /* The weight is [kernel_size, channels] — tap 0 is the current input.
-     * State is stored [oldest, ..., newest] = [x[t-(K-1)], ..., x[t-1]]
-     * at positions [0, ..., K-2].  Map weight tap k (lag k) to
-     * state position (K-1-k).
-     *
-     * NOTE: if the GGUF file stores the weight as [channels, kernel_size]
-     * (PyTorch convention), the access pattern would be weight[c*K + k].
-     * We try the [kernel_size, channels] layout first; swap if needed. */
+    /* Callers run this in-place (output == input), which clobbers the
+     * raw inputs before the state update below.  The state must hold
+     * the RAW pre-conv inputs — storing the conv outputs there instead
+     * corrupts every subsequent token's window and silently diverges
+     * the whole recurrence.  Save a copy only when aliased. */
+    float *saved = NULL;
+    if (input == output) {
+        saved = smalloc((u64)channels * sizeof(float));
+        memcpy(saved, input, (u64)channels * sizeof(float));
+    }
+    const float *raw = saved ? saved : input;
+
+    /* State is stored [oldest, ..., newest] = [x[t-(K-1)], ..., x[t-1]]
+     * at positions [0, ..., K-2].  Weight tap k (GGUF convention)
+     * multiplies the input at lag (K-1-k): state position k for
+     * k < K-1, and the current input for k == K-1. */
     for (u32 c = 0; c < channels; c++) {
-        float sum = input[c] * weight[0 * channels + c];
-        for (u32 k = 1; k < kernel_size; k++) {
-            u32 s_idx = (kernel_size - 1 - k) * channels + c;
-            sum += state[s_idx] * weight[k * channels + c];
+        float sum = 0.0f;
+        for (u32 k = 0; k < kernel_size; k++) {
+            float x = (k == kernel_size - 1) ? raw[c]
+                                             : state[k * channels + c];
+            sum += x * weight[c * kernel_size + k];
         }
         output[c] = sum;
     }
@@ -139,8 +152,9 @@ static void causal_conv1d_step(float *output, const float *input,
         u32 shift_len = (kernel_size - 2) * channels;
         if (shift_len > 0)
             memmove(state, state + channels, shift_len * sizeof(float));
-        memcpy(state + shift_len, input, channels * sizeof(float));
+        memcpy(state + shift_len, raw, channels * sizeof(float));
     }
+    if (saved) sfree(saved);
 }
 
 /* Single-step Gated DeltaNet recurrence.
@@ -410,6 +424,9 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                 sfree(cw);
             }
 
+            /* SiLU on the conv output (reference: conv → silu → split). */
+            silu(ws->qkv_fused, (int)ws->ssm_fused);
+
             /* Split conv output: Q, K, V  [n_groups * d_ssm = 2048 each]. */
             u32 n_g = ws->ssm_groups;
             u32 d_s = ws->ssm_dim;
@@ -442,7 +459,7 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                 float *alpha = smalloc((u64)n_g * sizeof(float));
                 float *abuf = smalloc((u64)n_g * sizeof(float));
                 tensor_get_f32_batch(td, base, 0, n_g, abuf); /* dt_bias */
-                tensor_get_f32_batch(tA, base, 0, n_g, gv);   /* A_log */
+                tensor_get_f32_batch(tA, base, 0, n_g, gv);   /* ssm.a = -exp(A_log) */
 
                 if (!mat_vec_mul(alpha, ta, base, ws->xb, n_g, n_embd,
                                  ta->dim[0] == n_embd, s->pthreads)) {
@@ -451,9 +468,11 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                     if (bv != beta_stack) sfree(bv);
                     return false;
                 }
-                /* g = -exp(A_log) * softplus(alpha + dt_bias) */
+                /* ssm.a already stores -exp(A_log) in the GGUF
+                 * (converter: A_log → -exp(A_log)), so the decay gate
+                 * is g = ssm.a * softplus(alpha + dt_bias). */
                 for (u32 i = 0; i < n_g; i++)
-                    gv[i] = -expf(gv[i]) * softplus(alpha[i] + abuf[i]);
+                    gv[i] = gv[i] * softplus(alpha[i] + abuf[i]);
                 sfree(alpha); sfree(abuf);
 
                 if (!mat_vec_mul(bv, tb, base, ws->xb, n_g, n_embd,
@@ -542,9 +561,10 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
             TensorInfo *t_k_norm = lw->tensors[TENSOR_ATTN_K_NORM];
 
             /* Q projection with optional Q-norm (Qwen3.5).
-             * Q-norm mode: Q weight produces n_head * 2 * head_dim outputs;
-             * after per-head RMS-norm we keep the first head_dim half,
-             * yielding the standard q_dim = n_head * head_dim. */
+             * Q-norm mode: Q weight produces n_head * 2 * head_dim outputs
+             * (fused Q + gate).  Only the first head_dim half of each head
+             * is RMS-normed and kept as Q; the second half is the raw
+             * gate, consumed later (sigmoid) in the output projection. */
             if (t_q_norm) {
                 u32 q_proj_dim = (t_q->dim[0] == n_embd)
                                  ? (u32)t_q->dim[1] : (u32)t_q->dim[0];
@@ -558,14 +578,14 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                     TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
                     if (tb_q) bias_add(ws->qkv_fused, tb_q, base, q_proj_dim);
                 }
-                /* Dequantise norm weight once, then apply per head. */
+                /* Dequantise norm weight once, then apply per head.
+                 * The gate half is NOT normed (matches the reference). */
                 {
                     float *nw = smalloc((u64)q_head_dim * sizeof(float));
                     tensor_get_f32_batch(t_q_norm, base, 0, q_head_dim, nw);
                     for (u32 h = 0; h < n_head; h++) {
                         float *hsrc = ws->qkv_fused + (u64)h * stride;
                         rms_norm_inplace(hsrc, nw, q_head_dim, eps);
-                        rms_norm_inplace(hsrc + q_head_dim, nw, q_head_dim, eps);
                         memcpy(ws->q + (u64)h * q_head_dim, hsrc,
                                q_head_dim * sizeof(float));
                     }
@@ -677,6 +697,31 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
                 silu(ws->hb, (int)q_dim);
                 for (u32 i = 0; i < q_dim; i++)
                     attn_out[i] *= ws->hb[i];
+            }
+
+            /* Qwen3.5 fused QG mode: the second half of the fused
+             * Q projection (still in qkv_fused) is the attention gate.
+             * Gate = sigmoid(gate_proj), multiplied onto the attention
+             * output before the out projection (reference: gate_reshaped
+             * → sigmoid → mul on attn output).  The Q half was already
+             * separated and normed in 2b; qkv_fused is untouched since. */
+            {
+                TensorInfo *t_q_norm = lw->tensors[TENSOR_ATTN_Q_NORM];
+                TensorInfo *t_q2     = lw->tensors[TENSOR_ATTN_Q];
+                if (t_q_norm && t_q2) {
+                    u32 q_proj_dim = (t_q2->dim[0] == n_embd)
+                                     ? (u32)t_q2->dim[1] : (u32)t_q2->dim[0];
+                    if (q_proj_dim == 2 * q_dim) {
+                        u32 stride = 2 * q_head_dim;
+                        for (u32 h = 0; h < n_head; h++) {
+                            float *gate = ws->qkv_fused
+                                          + (u64)h * stride + q_head_dim;
+                            float *oh = attn_out + (u64)h * q_head_dim;
+                            for (u32 d = 0; d < q_head_dim; d++)
+                                oh[d] *= sigmoid(gate[d]);
+                        }
+                    }
+                }
             }
 
             if (t_out) {
@@ -952,10 +997,18 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                                      ft, n_embd, qkv_tr, s->pthreads)) {
                         sfree(cw); sfree(dt_bi); sfree(a_log); goto fail;
                     }
+                    if (l == 0 && p == n_tokens - 1) {
+                        DBG_VEC("tl_qkv", ws->qkv_fused, 10);
+                    }
 
                     /* Conv1d (in-place). */
                     causal_conv1d_step(ws->qkv_fused, ws->qkv_fused, cw,
                                        ws->conv_state[l], f_dim, ck);
+                    /* SiLU on the conv output (reference: conv → silu → split). */
+                    silu(ws->qkv_fused, (int)f_dim);
+                    if (l == 0 && p == n_tokens - 1) {
+                        DBG_VEC("tl_conv_silu", ws->qkv_fused, 10);
+                    }
 
                     /* Split Q, K, V. */
                     float *qd = ws->qkv_fused;
@@ -985,8 +1038,11 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                             if (bp != b_stk) sfree(bp);
                             goto fail;
                         }
+                        /* ssm.a already stores -exp(A_log) in the GGUF
+                         * (converter: A_log → -exp(A_log)), so the decay
+                         * gate is g = ssm.a * softplus(alpha + dt_bias). */
                         for (u32 i = 0; i < n_g; i++) {
-                            gp[i] = -expf(a_log[i]) * softplus(al[i] + dt_bi[i]);
+                            gp[i] = a_log[i] * softplus(al[i] + dt_bi[i]);
                             gp[i] = expf(gp[i]); /* multiplicative form */
                         }
                         sfree(al);
@@ -1129,10 +1185,11 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                             for (u32 i = 0; i < n_q; i++)
                                 src[i] += q_bias[i];
                         }
+                        /* Only the Q half is normed; the gate half of the
+                         * fused projection is left raw (sigmoid later). */
                         for (u32 h = 0; h < n_head; h++) {
                             float *hsrc = src + (u64)h * stride;
                             rms_norm_inplace(hsrc, qnw, q_head_dim, eps);
-                            rms_norm_inplace(hsrc + q_head_dim, qnw, q_head_dim, eps);
                             memcpy(dst + (u64)h * q_head_dim, hsrc,
                                    q_head_dim * sizeof(float));
                         }
@@ -1265,6 +1322,29 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                 }
             }
 
+            /* Qwen3.5 fused QG mode: gate = sigmoid of the raw second
+             * half of the fused Q projection (still in qkv_buf). */
+            {
+                TensorInfo *t_q_norm = lw->tensors[TENSOR_ATTN_Q_NORM];
+                if (t_q_norm && t_q) {
+                    u32 q_proj_dim = (t_q->dim[0] == n_embd)
+                                     ? (u32)t_q->dim[1] : (u32)t_q->dim[0];
+                    if (q_proj_dim == 2 * q_dim) {
+                        u32 stride = 2 * q_head_dim;
+                        for (u32 p = 0; p < n_tokens; p++) {
+                            float *src = qkv_buf + (u64)p * q_proj_dim;
+                            float *ap  = attn_buf + (u64)p * q_dim;
+                            for (u32 h = 0; h < n_head; h++) {
+                                float *gate = src + (u64)h * stride + q_head_dim;
+                                float *oh   = ap + (u64)h * q_head_dim;
+                                for (u32 d = 0; d < q_head_dim; d++)
+                                    oh[d] *= sigmoid(gate[d]);
+                            }
+                        }
+                    }
+                }
+            }
+
             if (t_out) {
                 if (t_out->ndim >= 2 && t_out->dim[0] == 2 * n_embd && t_out->dim[1] == q_dim) {
                     /* Gated output weight: 2*n_embd outputs,
@@ -1336,6 +1416,7 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
             for (u32 i = 0; i < n_embd; i++)
                 xp[i] += dp[i];
         }
+        DBG_VEC("prefill_x_after_layer", xs + (u64)(n_tokens - 1) * n_embd, 10);
     }
 
     /* ---- 3. Final RMS norm on the LAST position only ---- */
@@ -1358,6 +1439,7 @@ static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) goto fail;
+        DBG_VEC("logits(prefill)", dst, 10);
     }
 
     /* ---- 5. Update session state ---- */
