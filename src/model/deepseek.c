@@ -41,14 +41,20 @@ static bool deepseek_init(Session *s) {
     return true;
 }
 
-static bool deepseek_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+static bool deepseek_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     UNUSED(s);
     UNUSED(tokens);
     UNUSED(n_tokens);
     UNUSED(logits);
-    /* TODO: implement DeepSeek forward pass with MLA attention
-     *       and output head-chain (hc_base / hc_fn / hc_scale). */
-    slog(WARN, "deepseek_forward is not yet implemented");
+    slog(WARN, "deepseek_prefill is not yet implemented");
+    return false;
+}
+
+static bool deepseek_generate(Session *s, u32 token, float *logits) {
+    UNUSED(s);
+    UNUSED(token);
+    UNUSED(logits);
+    slog(WARN, "deepseek_generate is not yet implemented");
     return false;
 }
 
@@ -86,6 +92,7 @@ static void deepseek_free(Session *s) {
 const ArchOps deepseek_ops = {
     .init    = deepseek_init,
     .free    = deepseek_free,
-    .forward = deepseek_forward,
+    .prefill = deepseek_prefill,
+    .generate = deepseek_generate,
     .reset   = deepseek_reset,
 };

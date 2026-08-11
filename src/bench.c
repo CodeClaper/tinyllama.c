@@ -187,7 +187,7 @@ int main(int argc, char *argv[]) {
 
         /* --- Prefill --- */
         double t0 = time_sec();
-        if (!session->ops.forward(session, prompt_tokens, (u32)n_prompt, session->logits))
+        if (!session->ops.prefill(session, prompt_tokens, (u32)n_prompt, session->logits))
             slog(ERROR, "Forward pass failed at prefill");
         double t1 = time_sec();
         prefill_times[r] = (t1 - t0) * 1000.0; /* ms */
@@ -225,7 +225,7 @@ int main(int argc, char *argv[]) {
             }
 
             n_gen++;
-            if (!session->ops.forward(session, &next_token, 1, session->logits))
+            if (!session->ops.generate(session, next_token, session->logits))
                 break;
 
             if (opts.temperature > 0.0f)

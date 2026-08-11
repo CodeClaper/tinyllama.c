@@ -355,7 +355,7 @@ static bool qwen35_init(Session *s) {
     return true;
 }
 
-static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
+static bool qwen35_generate(Session *s, u32 token, float *logits) {
     Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
@@ -816,9 +816,9 @@ static bool qwen35_forward_one(Session *s, u32 token, float *logits) {
     return true;
 }
 
-static bool qwen35_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
-    if (n_tokens == 1) return qwen35_forward_one(s, tokens[0], logits);
+    if (n_tokens == 1) return qwen35_generate(s, tokens[0], logits);
     slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
 
     Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
@@ -1543,7 +1543,8 @@ static int qwen35_decode(const u8 *raw, int raw_len, char *out, int max_len) {
 const ArchOps qwen35_ops = {
     .init    = qwen35_init,
     .free    = qwen35_free,
-    .forward = qwen35_forward,
+    .prefill = qwen35_prefill,
+    .generate = qwen35_generate,
     .reset   = qwen35_reset,
     .decode  = qwen35_decode,
 };

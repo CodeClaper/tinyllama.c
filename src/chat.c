@@ -233,7 +233,7 @@ int main(int argc, char *argv[]) {
         }
 
         /* Forward pass. */
-        if (!session->ops.forward(session, prompt_tokens, n_prompt, session->logits))
+        if (!session->ops.prefill(session, prompt_tokens, n_prompt, session->logits))
             fatal("Forward pass failed");
 
         /* Sample first token. */
@@ -261,7 +261,7 @@ int main(int argc, char *argv[]) {
                 fflush(stdout);
             }
             n_gen++;
-            if (!session->ops.forward(session, &next_token, 1, session->logits))
+            if (!session->ops.generate(session, next_token, session->logits))
                 break;
             if (co.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,

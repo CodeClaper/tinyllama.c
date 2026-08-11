@@ -116,7 +116,7 @@ static bool qwen25_init(Session *s) {
     return true;
 }
 
-static bool qwen25_forward_one(Session *s, u32 token, float *logits) {
+static bool qwen25_generate(Session *s, u32 token, float *logits) {
     Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
@@ -333,9 +333,9 @@ static bool qwen25_forward_one(Session *s, u32 token, float *logits) {
  * For batched paths, weight matrices are read once and reused across
  * all batch elements, converting memory-bandwidth-bound GEMV into
  * compute-bound GEMM.                                                */
-static bool qwen25_forward(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
+static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
-    if (n_tokens == 1) return qwen25_forward_one(s, tokens[0], logits);
+    if (n_tokens == 1) return qwen25_generate(s, tokens[0], logits);
     slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
 
     Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
@@ -768,7 +768,8 @@ static int qwen25_decode(const u8 *raw, int raw_len, char *out, int max_len) {
 const ArchOps qwen25_ops = {
     .init    = qwen25_init,
     .free    = qwen25_free,
-    .forward = qwen25_forward,
+    .prefill = qwen25_prefill,
+    .generate = qwen25_generate,
     .reset   = qwen25_reset,
     .decode  = qwen25_decode,
 };
