@@ -819,7 +819,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
 static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen35_generate(s, tokens[0], logits);
-    slog(INFO, "prefill: n_tokens=%u tokens=", n_tokens);
 
     Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
