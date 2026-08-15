@@ -1414,12 +1414,7 @@ static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
     /* ---- 3. Final RMS norm on the LAST position only ---- */
     {
         TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
-        if (!t_norm) {
-            t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
-            slog(INFO, "FALLBACK final_norm: using TENSOR_POST_ATTN_NORM from layer %u", n_layer - 1);
-        } else {
-            slog(INFO, "final_norm: using TENSOR_OUTPUT_NORM");
-        }
+        if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
         rms_norm(ws->xb, last_x, t_norm, base, n_embd, eps);
         DBG_VEC("final_norm(xb)", ws->xb, n_embd);
