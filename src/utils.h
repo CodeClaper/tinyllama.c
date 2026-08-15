@@ -5,6 +5,12 @@
 #ifdef DEBUG
 #define Assert(condition) assert(condition)
 #define AssertFalse(condition) assert(!(condition))
+#else
+#define Assert(condition) ((void)true)
+#define AssertFalse(condition) ((void)false)
+#endif
+
+#ifdef DEBUG_VEC
 #define DBG_VEC(label, vec, n) do { \
     printf("  [C] %-30s: ", label); \
     for (u32 _i = 0; _i < (n) && _i < 10; _i++) \
@@ -12,8 +18,6 @@
     printf("\n"); \
 } while(0)
 #else
-#define Assert(condition) ((void)true)
-#define AssertFalse(condition) ((void)false)
 #define DBG_VEC(label, vec, n) ((void)0)
 #endif
 

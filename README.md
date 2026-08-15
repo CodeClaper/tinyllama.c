@@ -48,6 +48,9 @@ make
 # Debug build (release flags + -g -DDEBUG; enables asserts, runs at near-release speed)
 DEBUG=1 make
 
+# Trace build (enables DBG_VEC tensor-print macro in model code)
+DEBUG_VEC=1 make
+
 # AddressSanitizer build (on top of release or DEBUG flags; ~2-4x slower, use for memory debugging)
 SAN=1 make
 

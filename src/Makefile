@@ -5,6 +5,9 @@ LDADDCFLAGS = -lm -flto=auto -pthread
 ifdef DEBUG
 	CFLAGS += -g -Wall -gdwarf-2 -g3 -D DEBUG
 endif
+ifdef DEBUG_VEC
+	CFLAGS += -D DEBUG_VEC
+endif
 ifdef SAN
 	CFLAGS += -fsanitize=address
 	LDADDCFLAGS += -fsanitize=address
