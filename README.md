@@ -45,8 +45,11 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 # Release build (O3, march=native, LTO) — produces server, chat, and bench
 make
 
-# Debug build (O0, debug symbols, -DDEBUG)
+# Debug build (release flags + -g -DDEBUG; enables asserts, runs at near-release speed)
 DEBUG=1 make
+
+# AddressSanitizer build (on top of release or DEBUG flags; ~2-4x slower, use for memory debugging)
+SAN=1 make
 
 # Run tests
 make check

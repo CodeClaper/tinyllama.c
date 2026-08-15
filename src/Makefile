@@ -1,11 +1,13 @@
 CC = gcc
 ARCH ?= $(shell uname -m)
+CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
+LDADDCFLAGS = -lm -flto=auto -pthread
 ifdef DEBUG
-	CFLAGS = -O3 -g -Wall -gdwarf-2 -g3 -D DEBUG -pthread -fsanitize=address
-	LDADDCFLAGS = -lm -pthread -fsanitize=address
-else
-	CFLAGS = -O3 -march=native -ffast-math -flto=auto -pthread
-	LDADDCFLAGS = -lm -flto=auto -pthread
+	CFLAGS += -g -Wall -gdwarf-2 -g3 -D DEBUG
+endif
+ifdef SAN
+	CFLAGS += -fsanitize=address
+	LDADDCFLAGS += -fsanitize=address
 endif
 ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
 	CFLAGS += -msse4.1

@@ -8,8 +8,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Release build
 make
 
-# Debug build (with -O0 -g -Wall -DDEBUG)
+# Debug build (release flags + -g -Wall -gdwarf-2 -g3 -DDEBUG; enables asserts)
 DEBUG=1 make
+
+# AddressSanitizer build (on top of release or DEBUG flags; ~2-4x slower)
+SAN=1 make
 
 # Run tests
 make check
