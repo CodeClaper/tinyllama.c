@@ -9,6 +9,7 @@
 #include "slog.h"
 #include "utils.h"
 #include "mm.h"
+#include "mctx.h"
 #include "core.h"
 #include "tokenizer.h"
 #include "sampler.h"
@@ -129,6 +130,9 @@ static int decode_token(Session *s, Vocab *v, u32 id, char *buf, int max_len) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Initialize the memory-context subsystem. */
+    MemoryContextInit();
+
     if (argc < 2) usage(stderr, 3);
 
     BenchOptions opts = parse_options(argc, argv);

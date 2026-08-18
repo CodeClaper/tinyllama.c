@@ -20,6 +20,7 @@
 #include "slog.h"
 #include "utils.h"
 #include "mm.h"
+#include "mctx.h"
 #include "core.h"
 #include "tokenizer.h"
 #include "sampler.h"
@@ -386,6 +387,9 @@ static void server_resource_close(Server *server) {
 }
 
 int main(int argc, char *argv[]) {
+    /* 0. Initialize the memory-context subsystem. */
+    MemoryContextInit();
+
     /* 1. Parse server options. */
     if (argc < 2) usage(stderr, 2);
     signal(SIGPIPE, SIG_IGN);

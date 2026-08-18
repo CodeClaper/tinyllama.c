@@ -35,5 +35,5 @@ char *sstrdup(char *s) {
 }
 
 void sfree(void *p) {
-    if (p) free(p);
+    if (p) MemoryContextFree(p);
 }
