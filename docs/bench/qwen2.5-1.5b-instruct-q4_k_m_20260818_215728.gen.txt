@@ -1,0 +1,6 @@
+Sir Isaac Newton was an English mathematician, physicist, astronomer, and philosopher who lived from 1642 to 1726. He is best known for his contributions to the field of physics, where he formulated three fundamental laws that describe the motion of objects.
+
+Newton's three laws are:
+
+1. Law of Inertia: An object at rest stays at rest, and an object in motion will continue moving with constant velocity unless acted upon by a net external force.
+2. Newton's Second Law: The acceleration of an object due to an external force is directly proportional to the magnitude of the applied force, and invers

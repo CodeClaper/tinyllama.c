@@ -1,0 +1,39 @@
+[2026-08-18 21:56:37.214169][7893][INFO]:	Loading model: /home/zc/Work/model/qwen2.5-1.5b-instruct-q3_k_m.gguf
+[2026-08-18 21:56:37.226933][7893][INFO]:	Loaded model (qwen2)
+[2026-08-18 21:56:37.227110][7893][INFO]:	ArchConfig: arch=qwen2 n_embd=1536 n_head=12 n_kv_head=2 head_dim=128 kv_head_dim=128 rope_dim=128 n_layer=28 n_vocab=151936
+[2026-08-18 21:56:37.227263][7893][INFO]:	Qwen2 init: n_embd=1536 n_head=12 n_kv_head=2 head_dim=128 kv_head_dim=128 n_layer=28 n_vocab=151936 ctx_size=4096
+[2026-08-18 21:56:37.227268][7893][INFO]:	Qwen2 init: rope_theta=1000000.000000
+[2026-08-18 21:56:37.227270][7893][INFO]:	Session created: ctx_size=4096 n_layer=28 n_embd=1536 n_head=12 head_dim=128
+[2026-08-18 21:56:37.227272][7893][INFO]:	Tokenizing input...
+[2026-08-18 21:56:37.227287][7893][INFO]:	Prompt tokens: 14
+[2026-08-18 21:56:37.227310][7893][INFO]:	Running benchmark: 1 iterations, 128 tokens each
+..................................................................................................................[1/1] TTFT: 466.2 ms | Prefill: 466.2 ms | Generate: 35026.1 ms (114 tokens, 3.3 tok/s)    
+
+
+===== TinyLLaMA Benchmark =====
+Model:              /home/zc/Work/model/qwen2.5-1.5b-instruct-q3_k_m.gguf
+Architecture:       qwen2
+Context Size:       4096
+Threads:            12
+Prompt Tokens:      14
+Target Tokens:      128
+Repeats:            1
+Temperature:        0.80
+Top-k:              40
+Top-p:              0.90
+Min-p:              0.05
+Repeat Penalty:     1.10
+Repeat Last N:      64
+Frequency Penalty:  0.00
+Presence Penalty:   0.00
+────────────────────────────────────────────────────────────────────────────────────────────────
+[1/1] TTFT:    466.2 ms | Prefill:    466.2 ms (   30.0 tok/s) | Generate:  35026.1 ms (114 tok,     3.3 tok/s)
+────────────────────────────────────────────────────────────────────────────────────────────────
+Avg TTFT:          466.2 ms
+Avg Prefill:       466.2 ms (   30.0 tok/s)
+Avg Generate:    35026.1 ms (    3.3 tok/s)
+Min/Max TTFT:     466.2 / 466.2 ms
+Min/Max Generate: 35026.1 / 35026.1 ms
+Peak Memory:    936 MB
+════════════════════════════════════════════════════════════════════════════════════════════════
+[2026-08-18 21:57:12.733210][7893][INFO]:	Output written to /home/zc/Work/c/tinyllama.c/docs/bench/qwen2.5-1.5b-instruct-q3_k_m_20260818_215637.gen.txt
