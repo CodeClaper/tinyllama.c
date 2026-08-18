@@ -7,6 +7,8 @@
 #define MAX_DIMS 8
 #define VOCAB_ID_NONE ((u32)-1)
 #define DEFAULT_EPS (1e-6f)
+#define INT64CONST(x)  (x##L)
+#define UINT64CONST(x) (x##UL)
 
 typedef uint8_t     u8;
 typedef uint16_t    u16;

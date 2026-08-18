@@ -17,12 +17,12 @@ ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
 endif
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
+       tokenizer.o sampler.o pthreads.o kvcache.o rax.o mctx.o asctx.o bit.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
-              tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
+              tokenizer.o sampler.o pthreads.o kvcache.o rax.o mctx.o asctx.o bit.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               cpu/quants_cpu.o
 
@@ -102,6 +102,15 @@ kvcache.o: kvcache.c kvcache.h def.h
 
 rax.o: rax.c rax.h
 	$(CC) $(CFLAGS) -c rax.c -o $@
+
+mctx.o: mctx.c mctx.h def.h
+	$(CC) $(CFLAGS) -c mctx.c -o $@
+
+asctx.o: asctx.c asctx.h def.h
+	$(CC) $(CFLAGS) -c asctx.c -o $@
+
+bit.o: bit.c bit.h def.h
+	$(CC) $(CFLAGS) -c bit.c -o $@
 
 .PHONY: clean all
 
