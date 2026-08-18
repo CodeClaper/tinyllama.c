@@ -65,8 +65,25 @@ echo "Model:  ${MODEL}"
 echo "Args:   $*"
 echo "Result: ${RESULT}"
 echo
+echo "Benchmarking... "
+printf ''
 
-"${BENCH_BIN}" -m "${MODEL}" "$@" >"${RESULT}" 2>&1 || {
+spinner() {
+    local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local pid=$1
+    local i=0
+    while kill -0 "${pid}" 2>/dev/null; do
+        printf '\b%s' "${chars:$i:1}"
+        i=$(( (i + 1) % ${#chars} ))
+        sleep 0.1
+    done
+    printf '\b \b'
+}
+
+"${BENCH_BIN}" -m "${MODEL}" "$@" >"${RESULT}" 2>&1 &
+bench_pid=$!
+spinner "${bench_pid}"
+wait "${bench_pid}" || {
     echo "error: benchmark failed (exit $?)" >&2
     exit 1
 }
