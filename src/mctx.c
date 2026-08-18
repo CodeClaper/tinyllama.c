@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,21 +120,17 @@ static void MemoryContextDeleteOnly(MemoryContext context) {
 /* Delete the MemoryContext. */
 void MemoryContextDelete(MemoryContext context) {
     Assert(context);
-
     MemoryContext curcontext;
-    
     curcontext = context;
+
     for(;;) {
         MemoryContext parentcontext;
-        while (curcontext->firstChild != NULL)
+        while (curcontext->firstChild != NULL)  {
             curcontext = curcontext->firstChild;
-
+        }
         parentcontext = curcontext->parent;
         MemoryContextDeleteOnly(curcontext);
-
-        if (context == curcontext)
-            break;
-
+        if (context == curcontext) break;
         curcontext = parentcontext;
     }
 }
@@ -155,11 +152,18 @@ void *MemoryContextAlloc(size_t size) {
     return context->context_methods->alloc(context, size);
 }
 
-
 /* Free from MemoryContext. */
 void MemoryContextFree(void *ptr) {
     MemoryContext context = CURRENT_MEMORY_CONTEXT;
     context->context_methods->free(ptr);
+}
+
+/* Calloc from MemoryContext. */
+void *MemoryContextCalloc(size_t n, size_t s) {
+    size_t size = n * s;
+    void *p = MemoryContextAlloc(size);
+    memset(p, 0, size);
+    return p;
 }
 
 /* Realloc from MemoryContext. */

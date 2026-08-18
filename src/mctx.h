@@ -40,6 +40,7 @@ void MemoryContextReset(MemoryContext context);
 void MemoryContextDelete(MemoryContext node);
 void *MemoryContextSwitchTo(MemoryContext currentConext);
 void *MemoryContextAlloc(size_t size);
+void *MemoryContextCalloc(size_t n, size_t s);
 void MemoryContextFree(void *ptr);
 void *MemoryContextRealloc(void *pointer, size_t size);
 char *MemoryContextStrdup(char *str);

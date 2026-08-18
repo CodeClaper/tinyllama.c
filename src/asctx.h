@@ -86,6 +86,9 @@ typedef struct AllocChunkData {
 /* The implement MemoryContextCreate in AllocSetContext. */
 MemoryContext AllocSetMemoryContextCreate(MemoryContext parent, char *name, uint32_t max_block_size);
 
+/* Calloc from MemoryContext. */
+void *MemoryContextCalloc(size_t n, size_t s);
+
 /* Allocate from AllocSetContext. */
 void *AllocSetAlloc(MemoryContext context, size_t size);
 
