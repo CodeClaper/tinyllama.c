@@ -203,7 +203,7 @@ Benchmark results on a consumer desktop:
     - quants_x86.c    — x86 SIMD optimizations
     - quants_arm.c    — ARM NEON optimizations
   - gpu/              — GPU-optimized kernels
-    - quants_gpu.c    — GPU quantized kernel
+    - quants_gpu.cu   — CUDA batch dequantization backend
     - quants_gpu.h
 
 - test/               — Unit tests

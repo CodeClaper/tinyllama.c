@@ -16,15 +16,30 @@ ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
 	CFLAGS += -msse4.1
 endif
 
+# CUDA GPU backend (optional).  Build with: GPU=1 make
+ifdef GPU
+	NVCC ?= $(shell command -v nvcc 2>/dev/null)
+	ifeq ($(NVCC),)
+		$(error GPU=1 requested but nvcc was not found in PATH)
+	endif
+	CUDA_HOME ?= $(abspath $(NVCC)/../..)
+	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
+	NVCCFLAGS = -O3 -arch=native
+	GPU_OBJS = gpu/quants_gpu.o
+	LDADDCFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
+else
+	GPU_OBJS =
+endif
+
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-       cpu/quants_cpu.o
+       cpu/quants_cpu.o $(GPU_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
               tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-              cpu/quants_cpu.o
+              cpu/quants_cpu.o $(GPU_OBJS)
 
 all: server chat bench
 
@@ -97,6 +112,9 @@ model/falcon.o: model/falcon.c model/model.h def.h
 cpu/quants_cpu.o: cpu/quants_cpu.c cpu/quants_arm.c cpu/quants_x86.c cpu/quants_cpu.h def.h quants.h
 	$(CC) $(CFLAGS) -c cpu/quants_cpu.c -o $@
 
+gpu/quants_gpu.o: gpu/quants_gpu.cu gpu/quants_gpu.h def.h
+	$(NVCC) $(NVCCFLAGS) -c gpu/quants_gpu.cu -o $@
+
 kvcache.o: kvcache.c kvcache.h def.h
 	$(CC) $(CFLAGS) -c kvcache.c -o $@
 
@@ -106,4 +124,4 @@ rax.o: rax.c rax.h
 .PHONY: clean all
 
 clean:
-	rm -f *.o model/*.o cpu/*.o server bench rax.o
+	rm -f *.o model/*.o cpu/*.o gpu/*.o server bench rax.o
