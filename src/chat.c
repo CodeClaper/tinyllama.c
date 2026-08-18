@@ -7,7 +7,6 @@
 #include "def.h"
 #include "utils.h"
 #include "mm.h"
-#include "mctx.h"
 #include "core.h"
 #include "tokenizer.h"
 #include "sampler.h"
@@ -170,9 +169,6 @@ static double time_sec(void) {
 }
 
 int main(int argc, char *argv[]) {
-    /* Initialize the memory-context subsystem. */
-    MemoryContextInit();
-
     /* Suppress INFO logs during chat to keep output clean. */
     slog_set_level(WARN);
 

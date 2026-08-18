@@ -9,7 +9,7 @@ SRC_DIR  = ../src
 
 all: test_pthreads test_utils test_qwen25
 
-test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o mctx.o asctx.o bit.o
+test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
 
 pthreads.o: $(SRC_DIR)/pthreads.c $(SRC_DIR)/pthreads.h $(SRC_DIR)/slog.h
@@ -24,16 +24,7 @@ utils.o: $(SRC_DIR)/utils.c $(SRC_DIR)/utils.h $(SRC_DIR)/def.h
 mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/mm.c -o $@
 
-mctx.o: $(SRC_DIR)/mctx.c $(SRC_DIR)/mctx.h $(SRC_DIR)/asctx.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/mctx.c -o $@
-
-asctx.o: $(SRC_DIR)/asctx.c $(SRC_DIR)/asctx.h $(SRC_DIR)/mctx.h $(SRC_DIR)/bit.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/asctx.c -o $@
-
-bit.o: $(SRC_DIR)/bit.c $(SRC_DIR)/bit.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/bit.c -o $@
-
-test_utils: c/test_utils.c utils.o slog.o mm.o mctx.o asctx.o bit.o
+test_utils: c/test_utils.c utils.o slog.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 qwen25.o: $(SRC_DIR)/model/qwen25.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
@@ -60,7 +51,7 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o mctx.o asctx.o bit.o slog.o utils.o
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
