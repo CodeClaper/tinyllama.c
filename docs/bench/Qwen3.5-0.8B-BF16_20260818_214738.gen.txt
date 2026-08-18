@@ -1,0 +1,10 @@
+<think>
+
+</think>
+
+**Sir Isaac Newton** (1642–1727) was an English scientist and mathematician, best known for his groundbreaking work on **classical mechanics**. His contributions fundamentally reshaped our understanding of the physical world and are considered the pillars of modern physics.
+
+Here is a breakdown of his key achievements:
+
+### 1. Principia Mathematica (1687)
+This was Newton's magnum opus, a comprehensive collection of mathematical principles that defined the laws of **classical mechanics** in the context of an Aristotelian universe governed by celestial bodies. It established three
