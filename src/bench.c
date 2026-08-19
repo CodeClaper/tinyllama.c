@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
 #include <unistd.h>
 #include <sys/resource.h>
 #include "def.h"
@@ -12,6 +11,9 @@
 #include "core.h"
 #include "tokenizer.h"
 #include "sampler.h"
+#ifdef GPU_BUILD
+#include "gpu/quants_gpu.h"
+#endif
 
 typedef struct {
     EngineOptons engine;
@@ -273,6 +275,11 @@ int main(int argc, char *argv[]) {
     printf("\n===== TinyLLaMA Benchmark =====\n");
     printf("Model:              %s\n", opts.engine.model_path);
     printf("Architecture:       %s\n", engine->model->arch_name);
+#ifdef GPU_BUILD
+    printf("Device:             %s\n", gpu_available() ? "CUDA" : "CPU");
+#else
+    printf("Device:             CPU\n");
+#endif
     printf("Context Size:       %d\n", opts.ctx_size);
     printf("Threads:            %d\n", opts.nthread);
     printf("Prompt Tokens:      %d\n", n_prompt);
