@@ -410,8 +410,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             /* Fused QKV projection → qkv_fused [ssm_fused = 6144]. */
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb,
-                             fused_total, n_embd, qkv_trans, s->pthreads))
+            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans, s->pthreads))
                 return false;
 
             /* Depthwise causal Conv1d (in-place on qkv_fused). */
@@ -456,13 +455,12 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                 TensorInfo *tA = lw->tensors[TENSOR_SSM_A];
                 TensorInfo *td = lw->tensors[TENSOR_SSM_DT_BIAS];
 
-                float *alpha = smalloc((u64)n_g * sizeof(float));
-                float *abuf = smalloc((u64)n_g * sizeof(float));
+                float *alpha   = smalloc((u64)n_g * sizeof(float));
+                float *abuf    = smalloc((u64)n_g * sizeof(float));
                 tensor_get_f32_batch(td, base, 0, n_g, abuf); /* dt_bias */
                 tensor_get_f32_batch(tA, base, 0, n_g, gv);   /* ssm.a = -exp(A_log) */
 
-                if (!mat_vec_mul(alpha, ta, base, ws->xb, n_g, n_embd,
-                                 ta->dim[0] == n_embd, s->pthreads)) {
+                if (!mat_vec_mul(alpha, ta, base, ws->xb, n_g, n_embd, ta->dim[0] == n_embd, s->pthreads)) {
                     sfree(alpha); sfree(abuf);
                     if (gv != g_stack) sfree(gv);
                     if (bv != beta_stack) sfree(bv);
@@ -475,8 +473,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                     gv[i] = gv[i] * softplus(alpha[i] + abuf[i]);
                 sfree(alpha); sfree(abuf);
 
-                if (!mat_vec_mul(bv, tb, base, ws->xb, n_g, n_embd,
-                                 tb->dim[0] == n_embd, s->pthreads)) {
+                if (!mat_vec_mul(bv, tb, base, ws->xb, n_g, n_embd, tb->dim[0] == n_embd, s->pthreads)) {
                     if (gv != g_stack) sfree(gv);
                     if (bv != beta_stack) sfree(bv);
                     return false;
@@ -493,8 +490,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             /* Gated DeltaNet recurrence → hb2 [qkv_d = 2048]. */
             {
                 float *mem = smalloc((u64)qkv_d * sizeof(float));
-                gated_delta_step(q_d, k_d, v_d, ws->ssm_state[l],
-                                 gv, bv, mem, ws->hb2, n_g, d_s);
+                gated_delta_step(q_d, k_d, v_d, ws->ssm_state[l], gv, bv, mem, ws->hb2, n_g, d_s);
                 sfree(mem);
             }
             if (gv != g_stack) sfree(gv);
@@ -518,10 +514,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             /* Output gating: gate = silu(attn_gate @ xb). */
             TensorInfo *t_g = lw->tensors[TENSOR_ATTN_GATE];
             if (t_g) {
-                if (!mat_vec_mul(ws->qkv_fused, t_g, base, ws->xb,
-                                 qkv_d, n_embd,
-                                 t_g->dim[0] == n_embd, s->pthreads))
-                    return false;
+                if (!mat_vec_mul(ws->qkv_fused, t_g, base, ws->xb, qkv_d, n_embd, t_g->dim[0] == n_embd, s->pthreads)) return false;
                 silu(ws->qkv_fused, (int)qkv_d);
                 for (u32 i = 0; i < qkv_d; i++)
                     ws->hb2[i] *= ws->qkv_fused[i];
@@ -531,9 +524,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             {
                 TensorInfo *t_so = lw->tensors[TENSOR_SSM_OUT];
                 if (t_so) {
-                    if (!mat_vec_mul(ws->xb2, t_so, base, ws->hb2,
-                                     n_embd, qkv_d,
-                                     t_so->dim[0] == qkv_d, s->pthreads))
+                    if (!mat_vec_mul(ws->xb2, t_so, base, ws->hb2, n_embd, qkv_d, t_so->dim[0] == qkv_d, s->pthreads))
                         return false;
                 } else {
                     memcpy(ws->xb2, ws->hb2, n_embd * sizeof(float));
@@ -592,8 +583,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                     sfree(nw);
                 }
             } else {
-                if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim, n_embd,
-                    (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
+                if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
                 {
                     TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
                     if (tb_q) bias_add(ws->q, tb_q, base, q_dim);
@@ -602,8 +592,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
 
             /* K projection with optional K-norm (Qwen3.5). */
             {
-                if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd,
-                                 t_k->dim[0] == n_embd, s->pthreads)) return false;
+                if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) return false;
                 TensorInfo *tb_k = lw->tensors[TENSOR_ATTN_K_BIAS];
                 if (tb_k) bias_add(ws->k, tb_k, base, kv_dim);
                 if (t_k_norm) {
@@ -616,8 +605,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
 
             /* V projection (no norm). */
             {
-                if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd,
-                                 t_v->dim[0] == n_embd, s->pthreads)) return false;
+                if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) return false;
                 TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
                 if (tb_v) bias_add(ws->v, tb_v, base, kv_dim);
             }
@@ -692,8 +680,7 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             /* Qwen3.5 gating: project residual → gate, apply SiLU,
              * then multiply element-wise with attention output. */
             if (t_gate) {
-                if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, q_dim, n_embd,
-                                 t_gate->dim[0] == n_embd, s->pthreads)) return false;
+                if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, q_dim, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) return false;
                 silu(ws->hb, (int)q_dim);
                 for (u32 i = 0; i < q_dim; i++)
                     attn_out[i] *= ws->hb[i];
@@ -709,13 +696,11 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                 TensorInfo *t_q_norm = lw->tensors[TENSOR_ATTN_Q_NORM];
                 TensorInfo *t_q2     = lw->tensors[TENSOR_ATTN_Q];
                 if (t_q_norm && t_q2) {
-                    u32 q_proj_dim = (t_q2->dim[0] == n_embd)
-                                     ? (u32)t_q2->dim[1] : (u32)t_q2->dim[0];
+                    u32 q_proj_dim = (t_q2->dim[0] == n_embd) ? (u32)t_q2->dim[1] : (u32)t_q2->dim[0];
                     if (q_proj_dim == 2 * q_dim) {
                         u32 stride = 2 * q_head_dim;
                         for (u32 h = 0; h < n_head; h++) {
-                            float *gate = ws->qkv_fused
-                                          + (u64)h * stride + q_head_dim;
+                            float *gate = ws->qkv_fused + (u64)h * stride + q_head_dim;
                             float *oh = attn_out + (u64)h * q_head_dim;
                             for (u32 d = 0; d < q_head_dim; d++)
                                 oh[d] *= sigmoid(gate[d]);
@@ -739,16 +724,12 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                     for (u32 i = 0; i < n_embd; i++)
                         ws->xb2[i] = ws->hb2[i] * ws->hb2[i + n_embd];
                 } else {
-                    if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim,
-                                     (n_embd != q_dim) && t_out->dim[0] == q_dim,
-                                     s->pthreads)) return false;
+                    if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) 
+                        return false;
                 }
             } else {
-                if (q_dim == n_embd) {
-                    memcpy(ws->xb2, attn_out, q_dim * sizeof(float));
-                } else {
-                    memcpy(ws->xb2, attn_out, n_embd * sizeof(float));
-                }
+                if (q_dim == n_embd) memcpy(ws->xb2, attn_out, q_dim * sizeof(float));
+                else memcpy(ws->xb2, attn_out, n_embd * sizeof(float));
             }
         }
 
