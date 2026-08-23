@@ -592,23 +592,15 @@ int gpu_available(void) {
     return 1;
 }
 
-static int gpu_load_tables(void) {
-    if (g_tables_loaded) return 0;
-    cudaError_t err;
-    err = cudaMemcpyToSymbol(d_iq2_xxs_grid, iq2_xxs_grid, IQ2_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
-    err = cudaMemcpyToSymbol(d_iq2_xs_grid,  iq2_xs_grid,  IQ2_XS_SIZE  * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
-    err = cudaMemcpyToSymbol(d_iq3_xxs_grid, iq3_xxs_grid, IQ3_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
-    err = cudaMemcpyToSymbol(d_iq1_s_grid,   iq1_s_grid,   IQ1_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
-    err = cudaMemcpyToSymbol(d_iq4_nl_values, iq4_nl_values, IQ4_NL_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
-    err = cudaMemcpyToSymbol(d_iq3_s_grid,   iq3_s_grid,   IQ3_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) return -1;
+static void gpu_load_tables(void) {
+    if (g_tables_loaded) return;
+    CHECK(cudaMemcpyToSymbol(d_iq2_xxs_grid, iq2_xxs_grid, IQ2_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq2_xs_grid,  iq2_xs_grid,  IQ2_XS_SIZE  * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq3_xxs_grid, iq3_xxs_grid, IQ3_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq1_s_grid,   iq1_s_grid,   IQ1_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq4_nl_values, iq4_nl_values, IQ4_NL_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq3_s_grid,   iq3_s_grid,   IQ3_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
     g_tables_loaded = 1;
-    return 0;
 }
 
 /* Block geometry per GGUF type — must match the gguf_types[] table in core.c. */
@@ -672,10 +664,11 @@ int gpu_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out
     if (!ti || !base || !out || nb == 0) return 0;
     if (i0 + nb > ti->n_element) return -1;
 
-    if (!gpu_available() || gpu_load_tables() != 0) {
+    if (!gpu_available()) {
         scalar_dequant_range(ti, base, i0, nb, out);
         return 0;
     }
+    gpu_load_tables();
 
     u64 be, bb;
     if (gpu_geom(ti->type, &be, &bb) != 0) {
@@ -697,25 +690,19 @@ int gpu_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out
      * this is a no-op there. */
     bytes = ti->bytes - (start_i / be) * bb;
 
-    cudaError_t err;
     u8  *d_data = NULL;
     float *d_out = NULL;
-    err = cudaMalloc(&d_data, bytes);
-    if (err != cudaSuccess) return -1;
-    err = cudaMalloc(&d_out, nb * sizeof(float));
-    if (err != cudaSuccess) { cudaFree(d_data); return -1; }
-    err = cudaMemcpy(d_data, src, bytes, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { cudaFree(d_out); cudaFree(d_data); return -1; }
+    CHECK(cudaMalloc(&d_data, bytes));
+    CHECK(cudaMalloc(&d_out, nb * sizeof(float)));
+    CHECK(cudaMemcpy(d_data, src, bytes, cudaMemcpyHostToDevice));
 
     unsigned blocks = gpu_block_count(nb);
     dequant_range_kernel<<<blocks, GPU_THREADS>>>(ti->type, d_data, start_i, i0, nb, d_out);
-    err = cudaGetLastError();
-    if (err != cudaSuccess) { cudaFree(d_out); cudaFree(d_data); return -1; }
+    CHECK(cudaGetLastError());
 
-    err = cudaMemcpy(out, d_out, nb * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK(cudaMemcpy(out, d_out, nb * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_out);
     cudaFree(d_data);
-    if (err != cudaSuccess) return -1;
     return 0;
 }
 
@@ -727,8 +714,9 @@ float gpu_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x
     if (!ti || !base || !x || n == 0) return 0.0f;
     if (i + n > ti->n_element) return 0.0f;
 
-    if (!gpu_available() || gpu_load_tables() != 0)
+    if (!gpu_available())
         return scalar_dot(ti, base, i, n, x);
+    gpu_load_tables();
 
     u64 be, bb;
     if (gpu_geom(ti->type, &be, &bb) != 0)
@@ -741,32 +729,24 @@ float gpu_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x
     const u8 *src = base + ti->offset + (start_i / be) * bb;
 
     unsigned blocks = gpu_block_count(n);
-    cudaError_t err;
     u8   *d_data    = NULL;
     float *d_x      = NULL;
     float *d_partial = NULL;
-    err = cudaMalloc(&d_data, bytes);
-    if (err != cudaSuccess) return 0.0f;
-    err = cudaMalloc(&d_x, n * sizeof(float));
-    if (err != cudaSuccess) { cudaFree(d_data); return 0.0f; }
-    err = cudaMalloc(&d_partial, blocks * sizeof(float));
-    if (err != cudaSuccess) { cudaFree(d_x); cudaFree(d_data); return 0.0f; }
-    err = cudaMemcpy(d_data, src, bytes, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { cudaFree(d_partial); cudaFree(d_x); cudaFree(d_data); return 0.0f; }
-    err = cudaMemcpy(d_x, x, n * sizeof(float), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { cudaFree(d_partial); cudaFree(d_x); cudaFree(d_data); return 0.0f; }
+    CHECK(cudaMalloc(&d_data, bytes));
+    CHECK(cudaMalloc(&d_x, n * sizeof(float)));
+    CHECK(cudaMalloc(&d_partial, blocks * sizeof(float)));
+    CHECK(cudaMemcpy(d_data, src, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(d_x, x, n * sizeof(float), cudaMemcpyHostToDevice));
 
     dequant_dot_kernel<<<blocks, GPU_THREADS>>>(ti->type, d_data, start_i, i, n, d_x, d_partial);
-    err = cudaGetLastError();
-    if (err != cudaSuccess) { cudaFree(d_partial); cudaFree(d_x); cudaFree(d_data); return 0.0f; }
+    CHECK(cudaGetLastError());
 
     float *partial = (float *)malloc(blocks * sizeof(float));
     if (!partial) { cudaFree(d_partial); cudaFree(d_x); cudaFree(d_data); return 0.0f; }
-    err = cudaMemcpy(partial, d_partial, blocks * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK(cudaMemcpy(partial, d_partial, blocks * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_partial);
     cudaFree(d_x);
     cudaFree(d_data);
-    if (err != cudaSuccess) { free(partial); return 0.0f; }
 
     double sum = 0.0;
     for (unsigned b = 0; b < blocks; b++)
@@ -782,23 +762,19 @@ float gpu_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x
 /* Host-side dispatch: one kernel instantiation per quant type, so the
  * device-side switch is compiled away.  Table indexed by GGUF type
  * value; NULL slots (type 4/5 don't exist) mean "fall back to CPU". */
-typedef int (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
-                                u64 rows, u64 cols, u64 batch, bool trans);
+typedef void (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
+                                 u64 rows, u64 cols, u64 batch, bool trans);
 
 template<int TYPE>
-static int matmul_launch(const u8 *w, const float *x, float *y,
-                         u64 rows, u64 cols, u64 batch, bool trans) {
+static void matmul_launch(const u8 *w, const float *x, float *y,
+                          u64 rows, u64 cols, u64 batch, bool trans) {
     dim3 block(256);
-    dim3 grid(trans ? (unsigned)((rows + 255) / 256)
-                    : (unsigned)((rows + 7) / 8),
-               (unsigned)batch);
-    if (trans)
-        matmul_kernel_trans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
-    else
-        matmul_kernel_nontrans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
-    /* Also clears the sticky error so a failed launch does not poison
-     * later calls. */
-    return cudaGetLastError() == cudaSuccess ? 0 : -1;
+    dim3 grid(trans ? (unsigned)((rows + 255) / 256) : (unsigned)((rows + 7) / 8), (unsigned)batch);
+    if (trans) matmul_kernel_trans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
+    else matmul_kernel_nontrans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
+    /* CHECK also clears the sticky error flag, so a failed launch
+     * cannot poison a later cudaGetLastError(). */
+    CHECK(cudaGetLastError());
 }
 
 #define GPU_TYPE_LIST(X) \
@@ -827,9 +803,8 @@ static void gpu_dispatch_init(void) {
 /* Device weight cache: (base, ti) identifies a tensor unambiguously
  * (base is the mmap base — per-model identity; ti the flat tensor
  * array element).  Uploaded lazily on first use; never evicted —
- * weights are read-only and the model is loaded once.  A hard
- * failure (device memory exhausted) latches a broken flag so we do
- * not keep failing per tensor; every later call falls back to CPU.
+ * weights are read-only and the model is loaded once.  A failed
+ * upload is fatal (CHECK) rather than a silent fallback to CPU.
  *
  * A content snapshot guards the pointer key: if a caller reuses a
  * freed (base, ti) identity for a new tensor (the unit tests hit this
@@ -844,22 +819,16 @@ static u64         g_cache_elems[GPU_CACHE_MAX];
 static u64         g_cache_bytes[GPU_CACHE_MAX];
 static u32         g_cache_type[GPU_CACHE_MAX];
 static u64         g_cache_off[GPU_CACHE_MAX];
-static int         g_cache_n      = 0;
-static int         g_cache_broken = 0;
+static int         g_cache_n = 0;
 
 static u8 *gpu_cache_upload(TensorInfo *ti, const u8 *base) {
     u8 *d = NULL;
-    if (cudaMalloc(&d, ti->bytes) != cudaSuccess) { g_cache_broken = 1; return NULL; }
-    if (cudaMemcpy(d, base + ti->offset, ti->bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-        cudaFree(d);
-        g_cache_broken = 1;
-        return NULL;
-    }
+    CHECK(cudaMalloc(&d, ti->bytes));
+    CHECK(cudaMemcpy(d, base + ti->offset, ti->bytes, cudaMemcpyHostToDevice));
     return d;
 }
 
 static u8 *gpu_cache_get(TensorInfo *ti, const u8 *base) {
-    if (g_cache_broken) return NULL;
     for (int i = 0; i < g_cache_n; i++) {
         if (g_cache_base[i] != base || g_cache_ti[i] != ti) continue;
         if (g_cache_elems[i] == ti->n_element && g_cache_bytes[i] == ti->bytes &&
@@ -876,7 +845,7 @@ static u8 *gpu_cache_get(TensorInfo *ti, const u8 *base) {
         g_cache_off[i]   = ti->offset;
         return d;
     }
-    if (g_cache_n >= GPU_CACHE_MAX || ti->bytes == 0) { g_cache_broken = 1; return NULL; }
+    if (g_cache_n >= GPU_CACHE_MAX || ti->bytes == 0) return NULL;
     u8 *d = gpu_cache_upload(ti, base);
     if (!d) return NULL;
     g_cache_base[g_cache_n] = base;
@@ -891,7 +860,8 @@ static u8 *gpu_cache_get(TensorInfo *ti, const u8 *base) {
 }
 
 static int gpu_matmul_prep(TensorInfo *ti, const u8 *base, u8 **d_w_out) {
-    if (!gpu_available() || gpu_load_tables() != 0) return -1;
+    if (!gpu_available()) return -1;
+    gpu_load_tables();
     gpu_dispatch_init();
     if (ti->type >= 31 || !gpu_matmul_dispatch[ti->type]) return -1;
     u8 *d_w = gpu_cache_get(ti, base);
@@ -908,20 +878,15 @@ int gpu_matvec(TensorInfo *ti, const u8 *base, const float *x, float *y,
     u8 *d_w;
     if (gpu_matmul_prep(ti, base, &d_w) != 0) return -1;
 
-    cudaError_t err;
     float *d_x = NULL, *d_y = NULL;
-    if ((err = cudaMalloc(&d_x, cols * sizeof(float))) != cudaSuccess) return -1;
-    if ((err = cudaMalloc(&d_y, rows * sizeof(float))) != cudaSuccess) { cudaFree(d_x); return -1; }
-    if ((err = cudaMemcpy(d_x, x, cols * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) goto fail;
-    if (gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans) != 0) goto fail;
-    err = cudaMemcpy(y, d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK(cudaMalloc(&d_x, cols * sizeof(float)));
+    CHECK(cudaMalloc(&d_y, rows * sizeof(float)));
+    CHECK(cudaMemcpy(d_x, x, cols * sizeof(float), cudaMemcpyHostToDevice));
+    gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans);
+    CHECK(cudaMemcpy(y, d_y, rows * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_x);
     cudaFree(d_y);
-    return err == cudaSuccess ? 0 : -1;
-fail:
-    cudaFree(d_x);
-    cudaFree(d_y);
-    return -1;
+    return 0;
 }
 
 int gpu_matmat(TensorInfo *ti, const u8 *base, const float *X, float *Y,
@@ -932,28 +897,19 @@ int gpu_matmat(TensorInfo *ti, const u8 *base, const float *X, float *Y,
     u8 *d_w;
     if (gpu_matmul_prep(ti, base, &d_w) != 0) return -1;
 
-    cudaError_t err;
     float *d_x = NULL, *d_y = NULL;
-    if ((err = cudaMalloc(&d_x, batch * cols * sizeof(float))) != cudaSuccess)
-        return -1;
-    if ((err = cudaMalloc(&d_y, batch * rows * sizeof(float))) != cudaSuccess) {
-        cudaFree(d_x); return -1;
-    }
-    if ((err = cudaMemcpy(d_x, X, batch * cols * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) goto fail;
-    if (gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, batch, trans) != 0) goto fail;
-    err = cudaMemcpy(Y, d_y, batch * rows * sizeof(float), cudaMemcpyDeviceToHost);
+    CHECK(cudaMalloc(&d_x, batch * cols * sizeof(float)));
+    CHECK(cudaMalloc(&d_y, batch * rows * sizeof(float)));
+    CHECK(cudaMemcpy(d_x, X, batch * cols * sizeof(float), cudaMemcpyHostToDevice));
+    gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, batch, trans);
+    CHECK(cudaMemcpy(Y, d_y, batch * rows * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_x);
     cudaFree(d_y);
-    return err == cudaSuccess ? 0 : -1;
-fail:
-    cudaFree(d_x);
-    cudaFree(d_y);
-    return -1;
+    return 0;
 }
 
 void gpu_shutdown(void) {
     for (int i = 0; i < g_cache_n; i++)
         if (g_cache_dev[i]) cudaFree(g_cache_dev[i]);
-    g_cache_n     = 0;
-    g_cache_broken = 0;
+    g_cache_n = 0;
 }
