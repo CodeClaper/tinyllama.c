@@ -1,6 +1,7 @@
 #ifndef __QUANTS_GPU_H__
 #define __QUANTS_GPU_H__
 
+#include <stdbool.h>
 #include "../def.h"
 
 /*
@@ -33,6 +34,31 @@ int gpu_dequant_tensor(TensorInfo *ti, const u8 *base, float *out);
 
 /* Fused dequant + dot product: sum_{j=0}^{n-1} w[i+j] * x[j]. */
 float gpu_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x);
+
+/* ---- Persistent-weight matmul backend (decode hot path) ----
+ *
+ * Weight tensors are uploaded to device memory once on first use and
+ * cached for the lifetime of the process; every call is one kernel
+ * launch + a small x/y round trip.  All index math matches the CPU
+ * scalar reference (flat element indices, no per-row padding), so
+ * results are bit-comparable to gguf_dequant().
+ *
+ * On any failure these return nonzero and leave y/Y untouched — the
+ * caller falls back to the CPU path.  A hard failure (e.g. device
+ * memory exhaustion) latches a broken flag and disables the GPU path
+ * for the rest of the run. */
+#define GPU_MAT_MIN_OPS 65536u /* below this many MACs, stay on CPU */
+
+/* y = W @ x (trans=false) or y = W^T @ x (trans=true), W = tensor ti.
+ * rows/cols must match ti's dims (mat_vec_mul's validation). */
+int gpu_matvec(TensorInfo *ti, const u8 *base, const float *x, float *y, u64 rows, u64 cols, bool trans);
+
+/* Y[b] = W @ X[b] for b in [0,batch).  X is [batch x cols], Y is
+ * [batch x rows].  A single launch covers all batches. */
+int gpu_matmat(TensorInfo *ti, const u8 *base, const float *X, float *Y, u64 batch, u64 rows, u64 cols, bool trans);
+
+/* Free all cached device weight buffers.  Call once at teardown. */
+void gpu_shutdown(void);
 
 #ifdef __cplusplus
 }

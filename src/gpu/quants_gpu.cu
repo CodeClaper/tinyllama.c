@@ -100,8 +100,7 @@ __device__ static inline double ld_f64(const u8 *p) {
     return __longlong_as_double((long long)ld_u64(p));
 }
 
-__device__ static inline void q4k_scale_min(const u8 *s, u32 sb,
-                                            u8 *scale, u8 *min) {
+__device__ static inline void q4k_scale_min(const u8 *s, u32 sb, u8 *scale, u8 *min) {
     u8 d  = s[sb & 3];
     u8 m  = s[4 + (sb & 3)];
     u8 md = s[8 + (sb & 3)];
@@ -444,6 +443,43 @@ __device__ static inline float dequant_one(u32 type, const u8 *data, u64 i) {
     }
 }
 
+/* Compile-time twin of dequant_one(): instantiated once per quant
+ * type, so each matmul kernel instantiation gets a straight-line
+ * per-element decode (no runtime switch in the inner loop). */
+template<int TYPE>
+__device__ static inline float dequant_one_t(const u8 *data, u64 i) {
+    if constexpr (TYPE == GGUF_TYPE_F32)          return dequant_f32(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_F16)     return dequant_f16(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_BF16)    return dequant_bf16(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_F64)     return dequant_f64(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_I8)      return dequant_i8(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_I16)     return dequant_i16(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_I32)     return dequant_i32(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_I64)     return dequant_i64(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q8_0)    return dequant_q8_0(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q8_1)    return dequant_q8_1(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q4_0)    return dequant_q4_0(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q4_1)    return dequant_q4_1(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q5_0)    return dequant_q5_0(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q5_1)    return dequant_q5_1(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q8_K)    return dequant_q8_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q6_K)    return dequant_q6_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q5_K)    return dequant_q5_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q4_K)    return dequant_q4_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q3_K)    return dequant_q3_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_Q2_K)    return dequant_q2_k(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ2_XXS) return dequant_iq2_xxs(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ2_XS)  return dequant_iq2_xs(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ3_XXS) return dequant_iq3_xxs(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ1_S)   return dequant_iq1_s(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ4_NL)  return dequant_iq4_nl(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ1_M)   return dequant_iq1_m(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ3_S)   return dequant_iq3_s(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ2_S)   return dequant_iq2_s(data, i);
+    else if constexpr (TYPE == GGUF_TYPE_IQ4_XS)  return dequant_iq4_xs(data, i);
+    else return 0.0f;
+}
+
 /* ================================================================
  * Kernels
  * ================================================================ */
@@ -485,6 +521,57 @@ __global__ void dequant_dot_kernel(u32 type, const u8 * __restrict__ data,
 }
 
 /* ================================================================
+ * Persistent-weight matmul kernels
+ *
+ * w points at the device copy of the whole tensor; all indices are
+ * FLAT element indices (i = r*cols + c / c*rows + r), identical to
+ * the scalar reference gguf_dequant().  GGUF quantized tensors have
+ * no per-row padding — block boundaries may fall mid-row — so the
+ * dequant helpers must derive the block from the flat index, never
+ * from a precomputed row pointer.
+ * ================================================================ */
+
+/* Non-transposed: y[b*rows + r] = sum_c w[r*cols + c] * x[b*cols + c].
+ * One warp per output row; lanes stride c by 32 so each iteration
+ * covers exactly one quant block (QK=32 types) — coalesced loads.
+ * Grid = (ceil(rows/8), batch); r is warp-uniform so the bounds
+ * check exits whole warps (shuffle mask stays full). */
+template<int TYPE>
+__global__ void matmul_kernel_nontrans(const u8 * __restrict__ w,
+                                       const float * __restrict__ x,
+                                       float * __restrict__ y,
+                                       u64 rows, u64 cols, u64 batch) {
+    u64 r = (u64)blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const float *xr = x + (u64)blockIdx.y * cols;
+    float sum = 0.0f;
+    for (u64 c = threadIdx.x & 31; c < cols; c += 32)
+        sum += dequant_one_t<TYPE>(w, r * cols + c) * xr[c];
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, o);
+    if ((threadIdx.x & 31) == 0) y[(u64)blockIdx.y * rows + r] = sum;
+}
+
+/* Transposed: y[b*rows + idx] = sum_c w[c*rows + idx] * x[b*cols + c].
+ * One thread per output element; 256 threads cover 256 outputs, so per
+ * c the 32 lanes of a warp read the same quant block (QK=32 types:
+ * block headers broadcast, elements gathered within the block). */
+template<int TYPE>
+__global__ void matmul_kernel_trans(const u8 * __restrict__ w,
+                                    const float * __restrict__ x,
+                                    float * __restrict__ y,
+                                    u64 rows, u64 cols, u64 batch) {
+    u64 idx = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows) return;
+    const float *xr = x + (u64)blockIdx.y * cols;
+    float sum = 0.0f;
+    for (u64 c = 0; c < cols; c++)
+        sum += dequant_one_t<TYPE>(w, c * rows + idx) * xr[c];
+    y[(u64)blockIdx.y * rows + idx] = sum;
+}
+
+/* ================================================================
  * Host-side plumbing
  * ================================================================ */
 
@@ -494,11 +581,14 @@ __global__ void dequant_dot_kernel(u32 type, const u8 * __restrict__ data,
 static int g_tables_loaded = 0;
 
 int gpu_available(void) {
+    static int cached = -1; /* memoized: checked on every matmul call */
+    if (cached >= 0) return cached;
     int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess) return 0;
-    if (count <= 0) return 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess) { cached = 0; return 0; }
+    if (count <= 0) { cached = 0; return 0; }
     cudaDeviceProp prop;
-    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) return 0;
+    if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) { cached = 0; return 0; }
+    cached = 1;
     return 1;
 }
 
@@ -598,6 +688,14 @@ int gpu_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out
     u64 n_blocks  = (end_i - start_i + be - 1) / be;
     u64 bytes     = n_blocks * bb;
     const u8 *src = base + ti->offset + (start_i / be) * bb;
+    /* Copy through the tensor's declared end, not just the decoded
+     * blocks: some IQ decoders read a few bytes past the last block
+     * (block-relative offsets spilling beyond the block end), so the
+     * device buffer must include the tensor's tail to keep those reads
+     * deterministic.  The unit-test tensors carry a padding tail inside
+     * ti->bytes; production tensors have ti->bytes == n_blocks*bb, so
+     * this is a no-op there. */
+    bytes = ti->bytes - (start_i / be) * bb;
 
     cudaError_t err;
     u8  *d_data = NULL;
@@ -675,4 +773,187 @@ float gpu_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x
         sum += (double)partial[b];
     free(partial);
     return (float)sum;
+}
+
+/* ================================================================
+ * Persistent-weight matmul backend
+ * ================================================================ */
+
+/* Host-side dispatch: one kernel instantiation per quant type, so the
+ * device-side switch is compiled away.  Table indexed by GGUF type
+ * value; NULL slots (type 4/5 don't exist) mean "fall back to CPU". */
+typedef int (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
+                                u64 rows, u64 cols, u64 batch, bool trans);
+
+template<int TYPE>
+static int matmul_launch(const u8 *w, const float *x, float *y,
+                         u64 rows, u64 cols, u64 batch, bool trans) {
+    dim3 block(256);
+    dim3 grid(trans ? (unsigned)((rows + 255) / 256)
+                    : (unsigned)((rows + 7) / 8),
+               (unsigned)batch);
+    if (trans)
+        matmul_kernel_trans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
+    else
+        matmul_kernel_nontrans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
+    /* Also clears the sticky error so a failed launch does not poison
+     * later calls. */
+    return cudaGetLastError() == cudaSuccess ? 0 : -1;
+}
+
+#define GPU_TYPE_LIST(X) \
+    X(F32) X(F16) X(Q4_0) X(Q4_1) \
+    X(Q5_0) X(Q5_1) X(Q8_0) X(Q8_1) \
+    X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) \
+    X(Q6_K) X(Q8_K) X(IQ2_XXS) X(IQ2_XS) \
+    X(IQ3_XXS) X(IQ1_S) X(IQ4_NL) X(IQ3_S) \
+    X(IQ2_S) X(IQ4_XS) X(I8) X(I16) \
+    X(I32) X(I64) X(F64) X(IQ1_M) \
+    X(BF16)
+
+/* Built at first use — GCC's C++ frontend rejects designated
+ * initializers carrying template addresses, so a runtime fill. */
+static matmul_launch_fn gpu_matmul_dispatch[31];
+
+static void gpu_dispatch_init(void) {
+    static int done = 0;
+    if (done) return;
+#define GPU_DISPATCH_X(T) gpu_matmul_dispatch[GGUF_TYPE_##T] = matmul_launch<GGUF_TYPE_##T>;
+    GPU_TYPE_LIST(GPU_DISPATCH_X)
+#undef GPU_DISPATCH_X
+    done = 1;
+}
+
+/* Device weight cache: (base, ti) identifies a tensor unambiguously
+ * (base is the mmap base — per-model identity; ti the flat tensor
+ * array element).  Uploaded lazily on first use; never evicted —
+ * weights are read-only and the model is loaded once.  A hard
+ * failure (device memory exhausted) latches a broken flag so we do
+ * not keep failing per tensor; every later call falls back to CPU.
+ *
+ * A content snapshot guards the pointer key: if a caller reuses a
+ * freed (base, ti) identity for a new tensor (the unit tests hit this
+ * via malloc address reuse), the stale device copy is replaced rather
+ * than served.  The engine never aliases identities, so the snapshot
+ * always matches there and the replace path is never taken. */
+#define GPU_CACHE_MAX 4096
+static const u8   *g_cache_base[GPU_CACHE_MAX];
+static TensorInfo *g_cache_ti[GPU_CACHE_MAX];
+static u8         *g_cache_dev[GPU_CACHE_MAX];
+static u64         g_cache_elems[GPU_CACHE_MAX];
+static u64         g_cache_bytes[GPU_CACHE_MAX];
+static u32         g_cache_type[GPU_CACHE_MAX];
+static u64         g_cache_off[GPU_CACHE_MAX];
+static int         g_cache_n      = 0;
+static int         g_cache_broken = 0;
+
+static u8 *gpu_cache_upload(TensorInfo *ti, const u8 *base) {
+    u8 *d = NULL;
+    if (cudaMalloc(&d, ti->bytes) != cudaSuccess) { g_cache_broken = 1; return NULL; }
+    if (cudaMemcpy(d, base + ti->offset, ti->bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(d);
+        g_cache_broken = 1;
+        return NULL;
+    }
+    return d;
+}
+
+static u8 *gpu_cache_get(TensorInfo *ti, const u8 *base) {
+    if (g_cache_broken) return NULL;
+    for (int i = 0; i < g_cache_n; i++) {
+        if (g_cache_base[i] != base || g_cache_ti[i] != ti) continue;
+        if (g_cache_elems[i] == ti->n_element && g_cache_bytes[i] == ti->bytes &&
+            g_cache_type[i] == ti->type && g_cache_off[i] == ti->offset)
+            return g_cache_dev[i]; /* same identity, same content */
+        /* Same pointers, different content: replace the dead copy. */
+        cudaFree(g_cache_dev[i]);
+        u8 *d = gpu_cache_upload(ti, base);
+        if (!d) return NULL;
+        g_cache_dev[i]   = d;
+        g_cache_elems[i] = ti->n_element;
+        g_cache_bytes[i] = ti->bytes;
+        g_cache_type[i]  = ti->type;
+        g_cache_off[i]   = ti->offset;
+        return d;
+    }
+    if (g_cache_n >= GPU_CACHE_MAX || ti->bytes == 0) { g_cache_broken = 1; return NULL; }
+    u8 *d = gpu_cache_upload(ti, base);
+    if (!d) return NULL;
+    g_cache_base[g_cache_n] = base;
+    g_cache_ti[g_cache_n]   = ti;
+    g_cache_dev[g_cache_n]  = d;
+    g_cache_elems[g_cache_n] = ti->n_element;
+    g_cache_bytes[g_cache_n] = ti->bytes;
+    g_cache_type[g_cache_n]  = ti->type;
+    g_cache_off[g_cache_n]   = ti->offset;
+    g_cache_n++;
+    return d;
+}
+
+static int gpu_matmul_prep(TensorInfo *ti, const u8 *base, u8 **d_w_out) {
+    if (!gpu_available() || gpu_load_tables() != 0) return -1;
+    gpu_dispatch_init();
+    if (ti->type >= 31 || !gpu_matmul_dispatch[ti->type]) return -1;
+    u8 *d_w = gpu_cache_get(ti, base);
+    if (!d_w) return -1;
+    *d_w_out = d_w;
+    return 0;
+}
+
+int gpu_matvec(TensorInfo *ti, const u8 *base, const float *x, float *y,
+               u64 rows, u64 cols, bool trans) {
+    if (!ti || !base || !x || !y || rows == 0 || cols == 0) return -1;
+    if (rows * cols > ti->n_element) return -1; /* dim sanity (CPU checks dims) */
+
+    u8 *d_w;
+    if (gpu_matmul_prep(ti, base, &d_w) != 0) return -1;
+
+    cudaError_t err;
+    float *d_x = NULL, *d_y = NULL;
+    if ((err = cudaMalloc(&d_x, cols * sizeof(float))) != cudaSuccess) return -1;
+    if ((err = cudaMalloc(&d_y, rows * sizeof(float))) != cudaSuccess) { cudaFree(d_x); return -1; }
+    if ((err = cudaMemcpy(d_x, x, cols * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) goto fail;
+    if (gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans) != 0) goto fail;
+    err = cudaMemcpy(y, d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    return err == cudaSuccess ? 0 : -1;
+fail:
+    cudaFree(d_x);
+    cudaFree(d_y);
+    return -1;
+}
+
+int gpu_matmat(TensorInfo *ti, const u8 *base, const float *X, float *Y,
+               u64 batch, u64 rows, u64 cols, bool trans) {
+    if (!ti || !base || !X || !Y || batch == 0 || rows == 0 || cols == 0) return -1;
+    if (rows * cols > ti->n_element) return -1;
+
+    u8 *d_w;
+    if (gpu_matmul_prep(ti, base, &d_w) != 0) return -1;
+
+    cudaError_t err;
+    float *d_x = NULL, *d_y = NULL;
+    if ((err = cudaMalloc(&d_x, batch * cols * sizeof(float))) != cudaSuccess)
+        return -1;
+    if ((err = cudaMalloc(&d_y, batch * rows * sizeof(float))) != cudaSuccess) {
+        cudaFree(d_x); return -1;
+    }
+    if ((err = cudaMemcpy(d_x, X, batch * cols * sizeof(float), cudaMemcpyHostToDevice)) != cudaSuccess) goto fail;
+    if (gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, batch, trans) != 0) goto fail;
+    err = cudaMemcpy(Y, d_y, batch * rows * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    return err == cudaSuccess ? 0 : -1;
+fail:
+    cudaFree(d_x);
+    cudaFree(d_y);
+    return -1;
+}
+
+void gpu_shutdown(void) {
+    for (int i = 0; i < g_cache_n; i++)
+        if (g_cache_dev[i]) cudaFree(g_cache_dev[i]);
+    g_cache_n     = 0;
+    g_cache_broken = 0;
 }

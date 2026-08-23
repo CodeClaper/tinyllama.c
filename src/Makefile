@@ -24,7 +24,7 @@ ifdef GPU
 	endif
 	CUDA_HOME ?= $(abspath $(NVCC)/../..)
 	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
-	NVCCFLAGS = -O3 -arch=native
+	NVCCFLAGS = -O3 -arch=native --std=c++17
 	CFLAGS += -D GPU_BUILD
 	GPU_OBJS = gpu/quants_gpu.o
 	LDADDCFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++

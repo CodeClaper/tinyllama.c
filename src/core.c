@@ -14,6 +14,9 @@
 #include <sys/file.h>
 #include "core.h"
 #include "cpu/quants_cpu.h"
+#ifdef GPU_BUILD
+#include "gpu/quants_gpu.h"
+#endif
 #include "pthreads.h"
 #include "mm.h"
 #include "slog.h"
@@ -209,16 +212,29 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     u64 tc = tw->dim[tw->ndim - 1]; /* fastest-varying = column count */
     u64 tr = tw->dim[0];            /* slowest-varying = row count     */
 
+    /* Orientation validation, checked once for both paths. */
+    if (trans ? (tr != cols || tc != rows)
+              : (tr != rows || tc != cols)) {
+        slog(WARN, trans ? "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]"
+                         : "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
+             (unsigned long)rows, (unsigned long)cols,
+             (unsigned long)(trans ? tc : tr), (unsigned long)(trans ? tr : tc));
+        return false;
+    }
+
+#ifdef GPU_BUILD
+    /* GPU matvec: persistent weights + one kernel per call.  Falls
+     * through to the CPU path whenever the GPU path is unavailable,
+     * below the size threshold, or fails (y is untouched on failure). */
+    if (rows * cols >= GPU_MAT_MIN_OPS && gpu_available()) {
+        if (gpu_matvec(tw, base, x, y, rows, cols, trans) == 0)
+            return true;
+    }
+#endif
+
     if (trans) {
         /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
-         * tr (=dim[0]) must equal cols, tc (=dim[1]) must equal rows.
          * Strided access — need a gather buffer. */
-        if (tr != cols || tc != rows) {
-            slog(WARN, "mat_vec_mul trans: dim mismatch cfg=[%lu,%lu] tensor^T=[%lu,%lu]",
-                 (unsigned long)rows, (unsigned long)cols,
-                 (unsigned long)tc, (unsigned long)tr);
-            return false;
-        }
         #define MATVEC_STACK 4096
         float  stack_buf[MATVEC_STACK];
         float *w_row = cols <= MATVEC_STACK ? stack_buf : smalloc(cols * sizeof(float));
@@ -237,12 +253,6 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     } else {
         /* Standard: W stored as [rows × cols], compute y = W @ x.
          * Contiguous rows — fused dequant + dot. */
-        if (tr != rows || tc != cols) {
-            slog(WARN, "mat_vec_mul: dim mismatch cfg=[%lu,%lu] tensor=[%lu,%lu]",
-                 (unsigned long)rows, (unsigned long)cols,
-                 (unsigned long)tr, (unsigned long)tc);
-            return false;
-        }
 
         /* For Q8_0 / Q8_K: if dotprod available, quantise x to i8
          * once, then use vdotq_s32 (1 insn / 4 MACs). */
@@ -348,6 +358,14 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             return false;
         }
     }
+
+#ifdef GPU_BUILD
+    /* GPU matmat: same fall-through contract as mat_vec_mul. */
+    if (batch * rows * cols >= GPU_MAT_MIN_OPS && gpu_available()) {
+        if (gpu_matmat(tw, base, X, Y, batch, rows, cols, trans) == 0)
+            return true;
+    }
+#endif
 
     /* Parallel path: dispatch rows across the thread pool. */
     if (pool && pool->nthreads > 1 && rows > 1) {
@@ -1472,6 +1490,9 @@ void engine_summary(Engine *en) {
 
 void engine_close(Engine *en) {
     if (!en) return;
+#ifdef GPU_BUILD
+    gpu_shutdown(); /* free cached device weight buffers */
+#endif
     vocab_free(en->vocab);
     model_close(en->model);
 }

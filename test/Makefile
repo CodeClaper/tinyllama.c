@@ -7,7 +7,23 @@ endif
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
 
-all: test_pthreads test_utils test_qwen25
+# CUDA GPU backend test (optional).  Build with: GPU=1 make
+GPU_TESTS =
+ifdef GPU
+	NVCC ?= $(shell command -v nvcc 2>/dev/null)
+	ifeq ($(NVCC),)
+		$(error GPU=1 requested but nvcc was not found in PATH)
+	endif
+	CUDA_HOME ?= $(abspath $(NVCC)/../..)
+	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
+	NVCCFLAGS = -O3 -arch=native --std=c++17
+	CFLAGS += -D GPU_BUILD
+	LDFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
+	GPU_TESTS += test_gpu
+	GPU_LINK  += gpu_quants_gpu.o
+endif
+
+all: test_pthreads test_utils test_qwen25 $(GPU_TESTS)
 
 test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -51,15 +67,24 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o slog.o utils.o $(GPU_LINK)
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
+
+gpu_quants_gpu.o: $(SRC_DIR)/gpu/quants_gpu.cu $(SRC_DIR)/gpu/quants_gpu.h $(SRC_DIR)/def.h
+	$(NVCC) $(NVCCFLAGS) -c $(SRC_DIR)/gpu/quants_gpu.cu -o $@
+
+test_gpu: c/test_gpu.c gpu_quants_gpu.o quants.o slog.o utils.o mm.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
 
-check: test_pthreads test_utils test_qwen25
+check: test_pthreads test_utils test_qwen25 $(GPU_TESTS)
 	./test_pthreads
 	./test_utils
 	./test_qwen25
+ifdef GPU
+	./test_gpu
+endif
 
 clean:
-	rm -f test_pthreads test_qwen25 *.o
+	rm -f test_pthreads test_qwen25 gpu_quants_gpu.o test_gpu *.o
