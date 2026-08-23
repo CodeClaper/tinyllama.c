@@ -801,10 +801,10 @@ static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen35_generate(s, tokens[0], logits);
 
-    Qwen35Workspace *ws = (Qwen35Workspace *)s->arch_data;
-    ArchConfig     *c  = &s->cfg;
-    Weights        *w  = s->en->weights;
-    const u8       *base = s->en->model->map;
+    Qwen35Workspace *ws   = (Qwen35Workspace *)s->arch_data;
+    ArchConfig      *c    = &s->cfg;
+    Weights         *w    = s->en->weights;
+    const u8        *base = s->en->model->map;
 
     u32 n_head      = c->n_head;
     u32 n_kv_head   = c->n_kv_head;
@@ -842,10 +842,10 @@ static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         }
     }
 
-    u64 row_x  = (u64)n_tokens * n_embd;
-    u64 row_q  = (u64)n_tokens * q_dim;
-    u64 row_kv = (u64)n_tokens * max_fused;
-    u64 row_fh = (u64)n_tokens * ws->ffn_hidden;
+    u64 row_x   = (u64)n_tokens * n_embd;
+    u64 row_q   = (u64)n_tokens * q_dim;
+    u64 row_kv  = (u64)n_tokens * max_fused;
+    u64 row_fh  = (u64)n_tokens * ws->ffn_hidden;
     u64 row_max = row_x > row_q ? row_x : row_q;
 
     /* ---- Temporary buffers ---- */
