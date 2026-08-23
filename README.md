@@ -21,6 +21,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
   - Falcon
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
 - epoll-based event loop for HTTP serving
+- Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
 - CPU backends with x86 and ARM optimizations
 
 ## Supported Models
@@ -37,6 +38,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 
 - **Compiler:** GCC
 - **Libraries:** libm (math), pthreads, Linux kernel (eventfd, epoll)
+- **Optional:** CUDA toolkit (nvcc) for the GPU backend
 - **OS:** Linux only (uses `eventfd`, `epoll`, `mmap`)
 
 ## Build
@@ -53,6 +55,9 @@ DEBUG_VEC=1 make
 
 # AddressSanitizer build (on top of release or DEBUG flags; ~2-4x slower, use for memory debugging)
 SAN=1 make
+
+# CUDA GPU build (requires nvcc; falls back to CPU per-op when the GPU path is unavailable)
+GPU=1 make
 
 # Run tests
 make check
@@ -146,17 +151,22 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 ./src/bench -m model.gguf -i "Explain quantum computing." -r 10 -o output.txt
 ```
 
-The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage.
+The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage. A GPU build prints the active device (`CUDA` or `CPU`).
 
 ## Benchmark
 
-Benchmark results on a consumer desktop:
+Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tokens, 35 generated tokens). Offloading matmuls to the GPU speeds up generation roughly 4-6x over CPU-only:
 
-| Model | Quant | Peak Mem | TTFT | Prefill | Generate | tok/s |
-|---|---|---|---|---|---|---|
-| Qwen2.5 1.5B Instruct | Q4_K_M | 1103 MB | 287.8 ms | 287.8 ms (45.2 tok/s) | 6691.7 ms | 5.2 |
+| Model | Device | Quant | Peak Mem | TTFT | Prefill | Generate | tok/s |
+|---|---|---|---|---|---|---|---|
+| Qwen2.5 1.5B Instruct | CPU | Q4_K_M | 976 MB | 356.5 ms | 356.5 ms (36.5 tok/s) | 7193.6 ms | 4.9 |
+| Qwen2.5 1.5B Instruct | CUDA | Q4_K_M | 1157 MB | 738.8 ms | 738.8 ms (17.6 tok/s) | 1763.9 ms | 19.8 |
+| Qwen2.5 1.5B Instruct | CPU | Q3_K_M | 822 MB | 427.4 ms | 427.4 ms (30.4 tok/s) | 11327.3 ms | 3.1 |
+| Qwen2.5 1.5B Instruct | CUDA | Q3_K_M | 1002 MB | 741.0 ms | 741.0 ms (17.5 tok/s) | 1746.6 ms | 20.0 |
+| Qwen3.5 0.8B | CPU | BF16 | 1502 MB | 844.3 ms | 844.3 ms (15.4 tok/s) | 7461.0 ms | 4.7 |
+| Qwen3.5 0.8B | CUDA | BF16 | 1681 MB | 595.1 ms | 595.1 ms (21.8 tok/s) | 1677.3 ms | 20.9 |
 
-> 12 threads, context 4096, 13 prompt tokens, 35 generated tokens
+> CUDA row built with `GPU=1 make`; matmuls above a size threshold run on the GPU, smaller ones fall back to CPU. Note the GPU path trades slower prefill (fixed kernel-launch overhead per op) for a large generation throughput win.
 
 ## Project Structure
 
@@ -203,7 +213,7 @@ Benchmark results on a consumer desktop:
     - quants_x86.c    — x86 SIMD optimizations
     - quants_arm.c    — ARM NEON optimizations
   - gpu/              — GPU-optimized kernels
-    - quants_gpu.cu   — CUDA batch dequantization backend
+    - quants_gpu.cu   — CUDA persistent-weight dequant + matmul/matvec backend
     - quants_gpu.h
 
 - test/               — Unit tests
