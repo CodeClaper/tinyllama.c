@@ -115,8 +115,7 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
 void tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
     if (i0 + nb > ti->n_element || nb == 0) {
         char name[128];
-        snprintf(name, sizeof(name), "%.*s",
-                 ti->key.len < 127 ? ti->key.len : 127, ti->key.content);
+        snprintf(name, sizeof(name), "%.*s", ti->key.len < 127 ? ti->key.len : 127, ti->key.content);
         slog(WARN, "tensor_get_f32_batch OOB: tensor='%s' n_element=%llu "
              "range=[%llu,%llu) type=%u",
              name, (unsigned long long)ti->n_element,
@@ -142,8 +141,7 @@ void tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float 
 void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps) {
     u64 tn = tw->dim[0]; /* 1-D weight tensor */
     if ((u64)n > tn) {
-        slog(WARN, "rms_norm: n=%d > tensor dim=%llu, clamping", n,
-             (unsigned long long)tn);
+        slog(WARN, "rms_norm: n=%d > tensor dim=%llu, clamping", n, (unsigned long long)tn);
         n = (int)tn;
     }
     float ss = 0.0f;
@@ -445,10 +443,10 @@ void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base)
     for (u32 h = 0; h < n_heads; h++) {
         float *bh = buf + (u64)h * head_dim;
         for (u32 i = 0; i < half; i++) {
-            float theta = 1.0f / powf(theta_base, (float)(2 * i) / (float)head_dim);
-            float c     = cosf((float)pos * theta);
-            float s     = sinf((float)pos * theta);
-            float a     = bh[i], b = bh[i + half];
+            float theta  = 1.0f / powf(theta_base, (float)(2 * i) / (float)head_dim);
+            float c      = cosf((float)pos * theta);
+            float s      = sinf((float)pos * theta);
+            float a      = bh[i], b = bh[i + half];
             bh[i]        = a * c - b * s;
             bh[i + half] = a * s + b * c;
         }
@@ -465,10 +463,10 @@ void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, 
     for (u32 h = 0; h < n_heads; h++) {
         float *bh = buf + (u64)h * head_dim;
         for (u32 i = 0; i < n_pairs; i++) {
-            float theta = 1.0f / powf(theta_base, (float)(2 * i) / (float)rope_dim);
-            float c     = cosf((float)pos * theta);
-            float s     = sinf((float)pos * theta);
-            float a     = bh[i], b = bh[i + half];
+            float theta  = 1.0f / powf(theta_base, (float)(2 * i) / (float)rope_dim);
+            float c      = cosf((float)pos * theta);
+            float s      = sinf((float)pos * theta);
+            float a      = bh[i], b = bh[i + half];
             bh[i]        = a * c - b * s;
             bh[i + half] = a * s + b * c;
         }
@@ -509,6 +507,9 @@ float sigmoid(float x) {
 }
 
 
+/* Byte cursor over the mmap'd model file: sequential, bounds-checked
+ * reader.  base = mapped bytes, size = file size, post = current
+ * read offset, error = first failure message (empty until an error). */
 typedef struct {
     u8 *base;
     u64 size;
@@ -516,9 +517,10 @@ typedef struct {
     char error[125];
 } Cursor;
 
-
+/* fd of the held instance lock file (-1 when not locked). */
 static int global_lock_fd = -1;
 
+/* Create a cursor positioned at byte offset post. */
 static Cursor cursor_at(u8 *base, u64 size, u64 post) {
     Cursor c = {
         .base = base,
@@ -529,12 +531,16 @@ static Cursor cursor_at(u8 *base, u64 size, u64 post) {
     return c;
 }
 
+/* Record the first error message (with the byte offset at failure).
+ * Later calls are ignored so the earliest error is preserved. */
 static void cursor_error(Cursor *c, const char *msg) {
     if (c->error[0] == '\0') {
         snprintf(c->error,  sizeof(c->error), "%s at byte %" PRIu64, msg, c->post);
     }
 }
 
+/* Bounds check: can n bytes be read from c->post without passing
+ * the end of the mapped file? */
 static bool cursor_has(Cursor *c, u64 n) {
     if (n > c->size || c->post + n > c->size) {
         cursor_error(c, "Truncated GGUF file");
@@ -543,12 +549,14 @@ static bool cursor_has(Cursor *c, u64 n) {
     return true;
 }
 
+/* Advance the cursor by n bytes (bounds-checked). */
 static bool cursor_skip(Cursor *c, u64 n) {
     if (!cursor_has(c, n)) return false;
     c->post += n;
     return true;
 }
 
+/* Read n bytes into dest and advance the cursor (bounds-checked). */
 static bool cursor_read(Cursor *c, void *dest, u64 n) {
     if (!cursor_has(c, n)) return false;
     memcpy(dest, c->base + c->post, (size_t)n);
@@ -556,6 +564,8 @@ static bool cursor_read(Cursor *c, void *dest, u64 n) {
     return true;
 }
 
+/* Typed single-value reads (host byte order matches the little-endian
+ * GGUF on-disk layout). */
 static bool cursor_i32(Cursor *c, i32 *v) {
     return cursor_read(c, v, sizeof(*v));
 }
@@ -572,6 +582,8 @@ static bool cursor_u64(Cursor *c, u64 *v) {
     return cursor_read(c, v, sizeof(*v));
 }
 
+/* Read a length-prefixed GGUF string into a Key.  content points
+ * directly into the mmap'd bytes (no copy), valid while mapped. */
 static bool cursor_key(Cursor *c, Key *k) {
     u64 len;
     if (!cursor_u64(c, &len)) return false;
@@ -582,6 +594,8 @@ static bool cursor_key(Cursor *c, Key *k) {
     return true;
 }
 
+/* Skip a metadata value of the given GGUF type without reading it,
+ * recursing into arrays.  depth guards against pathological nesting. */
 static bool cursor_skip_value(Cursor *c, GGUFValueType type, int depth) {
     if (depth > GGUF_MAX_DIMS) {
         cursor_error(c, "Metadata array nesting is too deep");
@@ -619,12 +633,15 @@ static bool cursor_skip_value(Cursor *c, GGUFValueType type, int depth) {
     }
 }
 
+/* Open-addressing hash table (power-of-two capacity) mapping token
+ * pieces / merge strings to their IDs / ranks. */
 static void tokenizer_table_init(TokenizerTable *table, u64 expected) {
     table->cap = next_pow2(expected * 2 + 16);
     table->used = 0;
     table->entry = scalloc(table->cap, sizeof(table->entry[0]));
 }
 
+/* Free a tokenizer hash table. */
 static void tokenizer_table_free(TokenizerTable *table) {
     if (table) {
         sfree(table->entry);
@@ -632,6 +649,7 @@ static void tokenizer_table_free(TokenizerTable *table) {
     }
 }
 
+/* Insert or update key -> value, probing linearly on hash conflict. */
 static void tokenizer_table_put(TokenizerTable *table, Key key, i32 value) {
     u64 mask = table->cap - 1;
     u64 hash = hash_bytes(key.content, key.len);
@@ -651,6 +669,7 @@ static void tokenizer_table_put(TokenizerTable *table, Key key, i32 value) {
     table->used++;
 }
 
+/* Look up key; on a hit set *value and return true. */
 static bool tokenizer_table_get(TokenizerTable *table, Key key, i32 *value) {
     if (table->cap == 0) return false;
 
@@ -669,7 +688,7 @@ static bool tokenizer_table_get(TokenizerTable *table, Key key, i32 *value) {
 }
 
 
-/* Sumary model. */
+/* Human-readable name of a GGUF metadata value type (model summary). */
 static const char *gguf_value_type_name(u32 type) {
     switch (type) {
         case GGUF_VALUE_UINT8:   return "u8";
@@ -688,6 +707,8 @@ static const char *gguf_value_type_name(u32 type) {
     }
 }
 
+/* Fallback metadata key prefix for an architecture.  When the model
+ * stores its own arch name (e.g. "qwen35") that is preferred. */
 static const char *arch_key_prefix(ModelArch arch) {
     switch (arch) {
         case ARCH_LLAMA:    return "llama";
@@ -698,12 +719,15 @@ static const char *arch_key_prefix(ModelArch arch) {
     }
 }
 
+/* GGUF type-info lookup by type ID; NULL for unknown types. */
 static const GGUFTypeInfo *tensor_type(u32 type) {
     u32 n = sizeof(gguf_types) / sizeof(gguf_types[0]);
     if (type >= n || gguf_types[type].name == NULL) return NULL;
     else return &gguf_types[type];
 }
 
+/* Storage size in bytes for n_element elements of `type`, rounded up
+ * to whole blocks (e.g. 256 elements per K-quant block). */
 static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     const GGUFTypeInfo *info = tensor_type(type);
     if (info == NULL || info->block_elems == 0) return false;
@@ -713,6 +737,7 @@ static bool tensor_bytes(u32 type, u64 n_element, u64 *bytes) {
     return true;
 }
 
+/* Release the instance lock file (registered via atexit). */
 static void release_instance_lock(void) {
     if (global_lock_fd >= 0) {
         close(global_lock_fd);
@@ -720,6 +745,10 @@ static void release_instance_lock(void) {
     }
 }
 
+/* Single-instance guard: take an exclusive flock on a lock file
+ * (path from TINY_LLAMA_LOCK, default /tmp/tiny_llama.lock) and
+ * write this process's PID into it.  Refuses to start if another
+ * tiny_llama process already holds the lock. */
 static void acquire_instance_lock(void) {
     const char *path = getenv("TINY_LLAMA_LOCK");
     if (!path || !path[0]) path = "/tmp/tiny_llama.lock";
@@ -759,7 +788,7 @@ static void acquire_instance_lock(void) {
     atexit(release_instance_lock);
 }
 
-/* Model find kv. */
+/* Find a metadata KV by key name, or NULL. */
 static KV *model_find_kv(Model *m, char *s) {
     for (u64 i = 0; i < m->n_kv; i++) {
         if (key_streq(m->kv[i].key, s)) return &m->kv[i];
@@ -767,6 +796,7 @@ static KV *model_find_kv(Model *m, char *s) {
     return NULL;
 }
 
+/* Read a string-typed metadata value into a Key (mmap-backed). */
 static bool model_get_key(Model *m, char *s, Key *out) {
     KV *kv = model_find_kv(m, s);
     if (!kv || kv->type != GGUF_VALUE_STRING) return false;
@@ -774,6 +804,8 @@ static bool model_get_key(Model *m, char *s, Key *out) {
     return cursor_key(&c, out);
 }
 
+/* Read an array-typed metadata value header (item type + count);
+ * out->data_pos points at the first element. */
 static bool model_get_array(Model *m, char *s, ArrayRef *out) {
     KV *kv = model_find_kv(m, s);
     if (!kv || kv->type != GGUF_VALUE_ARRAY) return false;
@@ -784,6 +816,7 @@ static bool model_get_array(Model *m, char *s, ArrayRef *out) {
     return true;
 }
 
+/* Read a u32-typed metadata value (GGUF stores ints as u32). */
 bool model_get_i32(Model *m, const char *key, i32 *out) {
     KV *kv = model_find_kv(m, (char *)key);
     if (!kv || kv->type != GGUF_VALUE_UINT32) return false;
@@ -791,6 +824,7 @@ bool model_get_i32(Model *m, const char *key, i32 *out) {
     return cursor_i32(&c, out);
 }
 
+/* Read an f32-typed metadata value. */
 bool model_get_f32(Model *m, const char *key, float *out) {
     KV *kv = model_find_kv(m, (char *)key);
     if (!kv || kv->type != GGUF_VALUE_FLOAT32) return false;
@@ -798,6 +832,8 @@ bool model_get_f32(Model *m, const char *key, float *out) {
     return cursor_float(&c, out);
 }
 
+/* Detect the architecture from "general.architecture" and remember
+ * the arch name string (e.g. "qwen35") for metadata key lookups. */
 static ModelArch model_detect_arch(Model *m) {
     Key arch_name;
     if (!model_get_key(m, "general.architecture", &arch_name)) return ARCH_UNKNOWN;
@@ -815,6 +851,7 @@ static ModelArch model_detect_arch(Model *m) {
     return ARCH_UNKNOWN;
 }
 
+/* Find a tensor by name, or NULL. */
 static TensorInfo *model_find_tensor(Model *m, char *name) {
     for (u64 i = 0; i < m->n_tensor; i++) {
         if (key_streq(m->tensor[i].key, name))
@@ -823,6 +860,8 @@ static TensorInfo *model_find_tensor(Model *m, char *name) {
     return NULL;
 }
 
+/* Count layers: scan tensor names of the form "blk.{N}...." and
+ * return the maximum N + 1. */
 static u32 model_count_layers(Model *m) {
     u32 max_n = 0;
     for (u64 i = 0; i < m->n_tensor; i++) {
@@ -838,7 +877,8 @@ static u32 model_count_layers(Model *m) {
     return max_n + 1;
 }
 
-/* Load KVs. */
+/* Parse the metadata (KV) section into an array of KV entries; also
+ * records the file alignment from "general.alignment" if present. */
 KV *kv_load(Model *m, Cursor *c) {
     KV *kv = scalloc(m->n_kv, sizeof(m->kv[0]));
     m->alignment = GGUF_DEFAULT_ALIGNMENT;
@@ -864,7 +904,8 @@ KV *kv_load(Model *m, Cursor *c) {
     return kv;
 }
 
-/* Load tensor. */
+/* Parse the tensor-info section: name, dims, type and offset, plus
+ * derived fields (element count, byte size, padded last-dim stride). */
 TensorInfo *tensor_load(Model *m, Cursor *c) {
     TensorInfo *tensor = scalloc(m->n_tensor, sizeof(m->tensor[0]));
     
@@ -913,6 +954,7 @@ TensorInfo *tensor_load(Model *m, Cursor *c) {
     return tensor;
 }
 
+/* Determine the tokenizer flavour from "tokenizer.ggml.model". */
 static TokenizerType tokenizer_type(Model *m) {
     Key model_name;
 
@@ -928,11 +970,13 @@ static TokenizerType tokenizer_type(Model *m) {
     return TOKENIZER_TYPE_NONE;
 }
 
+/* Hash-table lookup of a C string in the token table. */
 static bool vocab_try_lookup(Vocab *v, const char *text, i32 *id) {
     Key key = {.content = (char *)text, .len = strlen(text)};
     return tokenizer_table_get(&v->tokens, key, id);
 }
 
+/* Look up a token by C string; VOCAB_ID_NONE when absent. */
 i32 vocab_lookup(Vocab *v, const char *text) {
     i32 id;
     if (vocab_try_lookup(v, text, &id)) return id;
@@ -984,7 +1028,8 @@ i32 vocab_merge_result(Vocab *v, i32 id1, i32 id2) {
     return (i32)VOCAB_ID_NONE;
 }
 
-/* Load vocab for BPE. */
+/* Load a GPT-2 style BPE vocab: token & merge tables, special token
+ * IDs, and the byte->token mapping (bytes_to_unicode). */
 static Vocab *vocab_load_for_bpe(Model *m) {
     Vocab *v;
     ArrayRef tokens, merges;
@@ -1127,7 +1172,8 @@ static void vocab_free(Vocab *v) {
     memset(v, 0, sizeof(*v));
 }
 
-/* Tensor name map. */
+/* Non-layer tensor map entry: role, GGUF tensor name, and whether a
+ * missing tensor is fatal at load time. */
 typedef struct {
     TensorRole  role;
     const char *name;
@@ -1167,6 +1213,8 @@ static const TensorMapEntry unknown_tensor_map[] = {
 
 /* Layer tensor suffix maps (blk.{N}.{suffix}.weight). */
 
+/* Per-layer tensor map entry: role, suffix matched against
+ * "blk.{N}.{suffix}.weight", and whether a missing tensor is fatal. */
 typedef struct {
     TensorRole  role;
     const char *suffix;
@@ -1240,6 +1288,8 @@ static const LayerTensorMap unknown_layer_map[] = {
     {TENSOR_FFN_UP,     "ffn_up",       false},
 };
 
+/* Build the per-layer weight table: match each "blk.{N}.{suffix}.weight"
+ * tensor against the architecture's layer map and record its role. */
 static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) {
     LayerWeights *layers = scalloc(n_layer, sizeof(LayerWeights));
 
@@ -1302,7 +1352,9 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
     return layers;
 }
 
-/* Load weights. */
+/* Load all weights: non-layer tensors (token_embd, output, norms)
+ * plus the per-layer tensors.  Falls back to tied embeddings when
+ * output.weight is absent. */
 static Weights *weights_load(Model *m) {
     Weights *w = smalloc(sizeof(*w));
 
@@ -1349,7 +1401,8 @@ static Weights *weights_load(Model *m) {
     return w;
 }
 
-/* Load model. */
+/* Load a GGUF v3 model: open + mmap the file, then parse the header,
+ * KV and tensor-info sections, and detect the architecture. */
 Model *model_load(const char *path) {
     Model *m;
     int fd;
@@ -1394,6 +1447,7 @@ Model *model_load(const char *path) {
     return m;
 }
 
+/* Print a model summary: header, metadata KVs and tensor list. */
 static void model_summary(Model *m) {
     /* ---- Header ---- */
     const char *arch_name = m->arch_name[0] ? m->arch_name : "unknown";
@@ -1469,11 +1523,13 @@ static void model_summary(Model *m) {
 }
 
 
+/* Release the model (munmap + close); currently an empty shell. */
 void model_close(Model *m) {
 
 }
 
-/* Open engine. */
+/* Open the engine: take the instance lock, then load the model,
+ * vocab (unless inspect-only) and weights. */
 Engine *engine_open(EngineOptons *opts) {
     Engine *en = smalloc(sizeof(*en));
     acquire_instance_lock();
@@ -1483,11 +1539,12 @@ Engine *engine_open(EngineOptons *opts) {
     return en;
 }
 
-/* Summary engine. */
+/* Print the summary of the loaded model. */
 void engine_summary(Engine *en) {
     model_summary(en->model);
 }
 
+/* Close the engine: shut down the GPU path, free vocab and model. */
 void engine_close(Engine *en) {
     if (!en) return;
 #ifdef GPU_BUILD
@@ -1497,6 +1554,8 @@ void engine_close(Engine *en) {
     model_close(en->model);
 }
 
+/* Derive the architecture config (embedding size, head counts, RoPE,
+ * MLA dims) from model metadata and weight tensor shapes. */
 void arch_config_init(Engine *en, ArchConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     Weights *w = en->weights;
@@ -1590,6 +1649,8 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 }
 
 
+/* Create a session: sampling parameters, thread pool, architecture
+ * config, and the ops table for the detected architecture. */
 Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     if (!en || ctx_size == 0) return NULL;
 
@@ -1639,6 +1700,7 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
     return s;
 }
 
+/* Destroy a session: free the thread pool and arch-specific state. */
 void session_free(Session *s) {
     if (!s) return;
     pthreads_destroy(s->pthreads);
