@@ -79,9 +79,10 @@ AllocSetContext *AllocSetMemoryContextCreate(u32 block_size) {
     size_t size;
     AllocBlock block;
 
-    size = ALLOC_SET_CXT_SIZE + ALLOC_BLOCK_SIZE + ALLOC_CHUNK_SIZE;
-    size = MAXALIGN(size);
-    
+    /* Allocate the context header and the first (keeper) block
+     * together; block_size is the payload capacity of the keeper. */
+    size = MAXALIGN(ALLOC_SET_CXT_SIZE + block_size);
+
     set = (AllocSet) malloc(size);
     if (!set) fatal("Out of memory");
 
@@ -93,7 +94,7 @@ AllocSetContext *AllocSetMemoryContextCreate(u32 block_size) {
     block->endptr  = ((char *) set) + size;
 
     set->blocks = block;
-    set->next_block_size = size;
+    set->next_block_size = MAXALIGN(block_size);
     memset(set->free_list, 0, sizeof(set->free_list));
 
     return set;
@@ -112,6 +113,15 @@ static void *AllocSetAllocNewBlock(AllocSetContext *context, size_t chksize) {
     AllocSet set = (AllocSet) context;
 
     blk_size = set->next_block_size;
+
+    /* Grow the block size for the next block, up to the cap. */
+    set->next_block_size = blk_size > DEFAULT_MAX_BLOCK_SIZE / 2
+                           ? DEFAULT_MAX_BLOCK_SIZE : blk_size * 2;
+
+    /* The block must be able to hold the requested chunk. */
+    if (blk_size < chksize + ALLOC_BLOCK_SIZE + ALLOC_CHUNK_SIZE)
+        blk_size = chksize + ALLOC_BLOCK_SIZE + ALLOC_CHUNK_SIZE;
+
     AllocBlock block = (AllocBlock) malloc(blk_size);
     if (!block) fatal("Out of memory");
 
@@ -195,12 +205,10 @@ void *AllocSetRealloc(void *ptr, size_t size) {
     /* Way to external chunk. */
     if (AllocChunkIsExternal(chunk)) {
         size_t blksize;
-        size_t oldblksize;
 
         block = CHUNK_EXTERNAL_GET_BLOCK(chunk);
         set = block->set;
         blksize = MAXALIGN(size + ALLOC_BLOCK_SIZE + ALLOC_CHUNK_SIZE);
-        oldblksize = block->endptr - ((char *) block);
 
         block = realloc(block, blksize);
         if (!block) fatal("Out of memory");
@@ -250,9 +258,8 @@ void AllocSetFree(void *ptr) {
 }
 
 void AllocSetReset(AllocSetContext *context) {
-    AllocSet   set        = (AllocSet) context;
-    size_t     keepersize = KEEPER_ALLOC_BLOCK(set)->endptr - ((char *) set);
-    AllocBlock block      = set->blocks;
+    AllocSet   set   = (AllocSet) context;
+    AllocBlock block = set->blocks;
 
     /* Clean the free list*/
     memset(set->free_list, 0, sizeof(set->free_list));
@@ -276,8 +283,7 @@ void AllocSetReset(AllocSetContext *context) {
     }
 }
 
-void AllocSetDelete(AllocSetContext *context) {
+void AllocSetMemoryContextDelete(AllocSetContext *context) {
     AllocSetReset(context);
     free((AllocSet) context);
-    context = NULL;
 }

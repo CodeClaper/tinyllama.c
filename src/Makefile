@@ -71,7 +71,7 @@ core.o: core.c core.h def.h model/model.h
 quants.o: quants.c quants.h def.h
 	$(CC) $(CFLAGS) -c quants.c -o $@
 
-mm.o: mm.c def.h mm.h
+mm.o: mm.c def.h mm.h asctx.h
 	$(CC) $(CFLAGS) -c mm.c -o $@
 
 slog.o: slog.c def.h slog.h
