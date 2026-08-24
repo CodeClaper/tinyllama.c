@@ -18,7 +18,7 @@ static AllocSetContext *mm_ctx;
 
 static AllocSetContext *mm_get_ctx(void) {
     if (mm_ctx == NULL)
-        mm_ctx = AllocSetMemoryContextCreate(MM_INIT_BLOCK_SIZE);
+        mm_ctx = alloc_set_memory_context_create(MM_INIT_BLOCK_SIZE);
     return mm_ctx;
 }
 
@@ -28,7 +28,7 @@ static void fatal(const char *msg) {
 }
 
 void *smalloc(size_t n) {
-    void *p = AllocSetAlloc(mm_get_ctx(), n ? n : 1);
+    void *p = alloc_set_alloc(mm_get_ctx(), n ? n : 1);
     if (!p) fatal("Out of memory");
     memset(p, '\0', n);
     return p;
@@ -41,17 +41,17 @@ void *scalloc(size_t n, size_t s) {
     if (n && s && n > SIZE_MAX / s) fatal("Out of memory");
     total = (n ? n : 1) * (s ? s : 1);
 
-    void *p = AllocSetAlloc(mm_get_ctx(), total);
+    void *p = alloc_set_alloc(mm_get_ctx(), total);
     if (!p) fatal("Out of memory");
     memset(p, '\0', total);
     return p;
 }
 
 void *srealloc(void *p, size_t n) {
-    /* AllocSetRealloc needs a live chunk; mirror realloc(NULL, n). */
+    /* alloc_set_realloc needs a live chunk; mirror realloc(NULL, n). */
     if (p == NULL) return smalloc(n);
 
-    p = AllocSetRealloc(p, n);
+    p = alloc_set_realloc(p, n);
     if (!p) fatal("out of memory");
     return p;
 }
@@ -65,6 +65,6 @@ char *sstrdup(char *s) {
 }
 
 void sfree(void *p) {
-    /* AllocSetFree does chunk-header math; NULL must never reach it. */
-    if (p) AllocSetFree(p);
+    /* alloc_set_free does chunk-header math; NULL must never reach it. */
+    if (p) alloc_set_free(p);
 }

@@ -50,31 +50,31 @@ static void fatal(const char *msg) {
  *      leftmost_32_pos(size - 1) - ALLOC_MINBITS + 1
  * -------------------------
  * */
-static inline int AllocSetFreeIndex(size_t size) {
+static inline int alloc_set_free_index(size_t size) {
     int idx = size > (1 << ALLOC_MINBITS) 
             ? leftmost_32_pos(size -1) - ALLOC_MINBITS + 1
             : 0;
     return idx;
 }
 
-static inline void AllocChunkSetMaskExternal(AllocChunk chunk) {
+static inline void alloc_chunk_set_mask_external(AllocChunk chunk) {
     chunk->mask = ALLOC_CHUNK_MAGIC | (((uint64_t) 1) << ALLOC_CHUNK_EXTERNAL_BASEBIT);
 }
 
-static inline void AllocChunkSetMask(AllocChunk chunk, AllocBlock block, size_t value) {
+static inline void alloc_chunk_set_mask(AllocChunk chunk, AllocBlock block, size_t value) {
     size_t offset = (char *) chunk - (char *) block;
     chunk->mask = (((uint64_t) offset) << ALLOC_CHUNK_BLOCK_OFFSET_BASEBIT) | ((uint64_t) value) << ALLOC_CHUNK_VALUE_BASEBIT;
 }
 
-static inline bool AllocChunkIsExternal(AllocChunk chunk) {
+static inline bool alloc_chunk_is_external(AllocChunk chunk) {
     return CHUNK_IS_EXTERNAL(chunk->mask);
 }
 
-static inline AllocBlock AllocChunkGetBlock(AllocChunk chunk) {
+static inline AllocBlock alloc_chunk_get_block(AllocChunk chunk) {
     return (AllocBlock) ((char *) chunk - CHUNK_GET_OFFSET(chunk->mask));
 }
 
-AllocSetContext *AllocSetMemoryContextCreate(u32 block_size) {
+AllocSetContext *alloc_set_memory_context_create(u32 block_size) {
     AllocSetContext *set;
     size_t size;
     AllocBlock block;
@@ -100,15 +100,15 @@ AllocSetContext *AllocSetMemoryContextCreate(u32 block_size) {
     return set;
 }
 
-void *AllocSetAllocChunkFromBlock(AllocSetContext *context, AllocBlock block, size_t chksize) {
+void *alloc_set_alloc_chunk_from_block(AllocSetContext *context, AllocBlock block, size_t chksize) {
     AllocChunk chunk = (AllocChunk) block->freeptr;
     block->freeptr += (chksize + ALLOC_CHUNK_SIZE);
     chunk->next = NULL;
-    AllocChunkSetMask(chunk, block, chksize);
+    alloc_chunk_set_mask(chunk, block, chksize);
     return CHUNK_GET_POINTER(chunk);
 }
 
-static void *AllocSetAllocNewBlock(AllocSetContext *context, size_t chksize) {
+static void *alloc_set_alloc_new_block(AllocSetContext *context, size_t chksize) {
     size_t blk_size;
     AllocSet set = (AllocSet) context;
 
@@ -134,10 +134,10 @@ static void *AllocSetAllocNewBlock(AllocSetContext *context, size_t chksize) {
     if (block->next) block->next->pres = block;
     set->blocks = block;
 
-    return AllocSetAllocChunkFromBlock(context, block, chksize);
+    return alloc_set_alloc_chunk_from_block(context, block, chksize);
 }
 
-static void *AllocSetAllocLarge(AllocSetContext *context, size_t size) {
+static void *alloc_set_alloc_large(AllocSetContext *context, size_t size) {
     AllocSet set = (AllocSet) context;
     size_t blk_size;
     AllocBlock block;
@@ -151,7 +151,7 @@ static void *AllocSetAllocLarge(AllocSetContext *context, size_t size) {
     block->freeptr = block->endptr = ((char *) block) + blk_size;
     chunk = (AllocChunk) (((char *) block) + ALLOC_BLOCK_SIZE);
     /* Mark the Chunk as externally managed. */
-    AllocChunkSetMaskExternal(chunk);
+    alloc_chunk_set_mask_external(chunk);
 
     if (set->blocks != NULL) {
         block->pres = set->blocks;
@@ -167,18 +167,18 @@ static void *AllocSetAllocLarge(AllocSetContext *context, size_t size) {
     return CHUNK_GET_POINTER(chunk);
 }
 
-void *AllocSetAlloc(AllocSetContext *context, size_t size) {
+void *alloc_set_alloc(AllocSetContext *context, size_t size) {
     size_t     chksize, freesize;
     int        fdx;
     AllocChunk chunk;
 
-    if (size > ALLOC_CHUNK_LIMIT) return AllocSetAllocLarge(context, size);
+    if (size > ALLOC_CHUNK_LIMIT) return alloc_set_alloc_large(context, size);
 
     AllocSet   set   = (AllocSet) context;
     AllocBlock block = set->blocks;
 
     /* Find there is enough chunk in FreeList. */
-    fdx = AllocSetFreeIndex(size);
+    fdx = alloc_set_free_index(size);
     chunk = set->free_list[fdx];
     if (chunk) {
         set->free_list[fdx] = chunk->next;
@@ -192,18 +192,18 @@ void *AllocSetAlloc(AllocSetContext *context, size_t size) {
      * Otherwise, generate new block and allocate from that. */
     freesize = block->endptr - block->freeptr;
 
-    if (freesize < chksize + ALLOC_CHUNK_SIZE) return AllocSetAllocNewBlock(context, chksize);
-    else return AllocSetAllocChunkFromBlock(context, block, chksize);
+    if (freesize < chksize + ALLOC_CHUNK_SIZE) return alloc_set_alloc_new_block(context, chksize);
+    else return alloc_set_alloc_chunk_from_block(context, block, chksize);
 }
 
-void *AllocSetRealloc(void *ptr, size_t size) {
+void *alloc_set_realloc(void *ptr, size_t size) {
     AllocChunk chunk = POINTER_GET_CHUNK(ptr);
     AllocBlock block;
     AllocSet   set;
     size_t     old_size;
 
     /* Way to external chunk. */
-    if (AllocChunkIsExternal(chunk)) {
+    if (alloc_chunk_is_external(chunk)) {
         size_t blksize;
 
         block = CHUNK_EXTERNAL_GET_BLOCK(chunk);
@@ -224,24 +224,24 @@ void *AllocSetRealloc(void *ptr, size_t size) {
     }
 
     /* Way to normal chunk. */
-    block = AllocChunkGetBlock(chunk);
+    block = alloc_chunk_get_block(chunk);
     set = block->set;
     old_size = CHUNK_GET_VALUE(chunk->mask);
 
     if (old_size >= size) return ptr; 
     else {
-        void *nptr = AllocSetAlloc((AllocSetContext *) set, size);
+        void *nptr = alloc_set_alloc((AllocSetContext *) set, size);
         memcpy(nptr, ptr, old_size);
-        AllocSetFree(ptr);
+        alloc_set_free(ptr);
         return nptr;
     }
 }
 
-void AllocSetFree(void *ptr) {
+void alloc_set_free(void *ptr) {
     AllocSet   set;
     AllocChunk chunk = POINTER_GET_CHUNK(ptr);
 
-    if (AllocChunkIsExternal(chunk)) {
+    if (alloc_chunk_is_external(chunk)) {
         AllocBlock block = CHUNK_EXTERNAL_GET_BLOCK(chunk);
         set = block->set;
         if (block->pres) block->pres->next = block->next;
@@ -249,15 +249,15 @@ void AllocSetFree(void *ptr) {
         if (block->next) block->next->pres = block->pres;
         free(block);
     } else {
-        AllocBlock block = AllocChunkGetBlock(chunk); 
+        AllocBlock block = alloc_chunk_get_block(chunk); 
         set = block->set;
-        int fdx = AllocSetFreeIndex(CHUNK_GET_VALUE(chunk->mask));
+        int fdx = alloc_set_free_index(CHUNK_GET_VALUE(chunk->mask));
         chunk->next = set->free_list[fdx];
         set->free_list[fdx] = chunk;
     }
 }
 
-void AllocSetReset(AllocSetContext *context) {
+void alloc_set_reset(AllocSetContext *context) {
     AllocSet   set   = (AllocSet) context;
     AllocBlock block = set->blocks;
 
@@ -283,7 +283,7 @@ void AllocSetReset(AllocSetContext *context) {
     }
 }
 
-void AllocSetMemoryContextDelete(AllocSetContext *context) {
-    AllocSetReset(context);
+void alloc_set_memory_context_delete(AllocSetContext *context) {
+    alloc_set_reset(context);
     free((AllocSet) context);
 }

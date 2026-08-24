@@ -54,8 +54,8 @@ typedef struct AllocChunkData {
     u64         mask;           /* Store details of the chunk. */
 } AllocChunkData;
 
-AllocSetContext *AllocSetMemoryContextCreate(u32 block_size);
-void *AllocSetAlloc(AllocSetContext *context, size_t size);
-void *AllocSetRealloc(void *ptr, size_t size);
-void AllocSetFree(void *ptr);
-void AllocSetMemoryContextDelete(AllocSetContext *context);
+AllocSetContext *alloc_set_memory_context_create(u32 block_size);
+void *alloc_set_alloc(AllocSetContext *context, size_t size);
+void *alloc_set_realloc(void *ptr, size_t size);
+void alloc_set_free(void *ptr);
+void alloc_set_memory_context_delete(AllocSetContext *context);
