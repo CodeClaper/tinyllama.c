@@ -33,12 +33,12 @@ else
 endif
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
+       tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o $(GPU_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
-              tokenizer.o sampler.o pthreads.o kvcache.o rax.o \
+              tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               cpu/quants_cpu.o $(GPU_OBJS)
 
@@ -118,6 +118,9 @@ gpu/quants_gpu.o: gpu/quants_gpu.cu gpu/quants_gpu.h def.h
 
 kvcache.o: kvcache.c kvcache.h def.h
 	$(CC) $(CFLAGS) -c kvcache.c -o $@
+
+asctx.o: asctx.c asctx.h def.h
+	$(CC) $(CFLAGS) -c asctx.c -o $@
 
 rax.o: rax.c rax.h
 	$(CC) $(CFLAGS) -c rax.c -o $@
