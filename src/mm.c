@@ -50,7 +50,6 @@ void *scalloc(size_t n, size_t s) {
 void *srealloc(void *p, size_t n) {
     /* alloc_set_realloc needs a live chunk; mirror realloc(NULL, n). */
     if (p == NULL) return smalloc(n);
-
     p = alloc_set_realloc(p, n);
     if (!p) fatal("out of memory");
     return p;

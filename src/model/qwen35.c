@@ -61,28 +61,6 @@ static void rms_norm_inplace(float *x, const float *weight, u32 n, float eps) {
         x[j] = x[j] * ss * weight[j];
 }
 
-/* Qwen3.5 Q-norm: the Q projection output has shape [n_head, 2, head_dim].
- * Apply RMS norm to each head_dim slice using the provided dequantised
- * weight, then take the FIRST head_dim half as the effective Q.
- * dst  – [n_head * head_dim] output
- * src  – [n_head * 2 * head_dim] input (Q projection output, may be
- *        destroyed by this function)
- * norm_weight – [head_dim] dequantised norm weight */
-static void qwen_q_norm(float *dst, float *src, u32 n_head, u32 head_dim,
-                        const float *norm_weight, float eps) {
-    u32 stride = 2 * head_dim;
-    for (u32 h = 0; h < n_head; h++) {
-        float *hsrc = src + (u64)h * stride;
-        float *hdst = dst + (u64)h * head_dim;
-        /* Normalise both halves in-place in src, then copy the first
-         * half to dst.  Doing it in src avoids overflowing dst which
-         * is only head_dim wide per head. */
-        rms_norm_inplace(hsrc,           norm_weight, head_dim, eps);
-        rms_norm_inplace(hsrc + head_dim, norm_weight, head_dim, eps);
-        memcpy(hdst, hsrc, head_dim * sizeof(float));
-    }
-}
-
 /* Qwen3.5 K-norm: the K projection output has shape [n_kv_head, head_dim].
  * Apply RMS norm to each head_dim slice in-place. */
 static void qwen_k_norm(float *k, u32 n_kv_head, u32 head_dim,
