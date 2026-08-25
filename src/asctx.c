@@ -31,11 +31,6 @@ static int leftmost_32_pos(uint32_t word) {
     return shift + leftmost_one_pos[(word >> shift) & 255];
 }
 
-/* Check if the pinter is align. */
-static int is_aligned(void *ptr, size_t alignment) {
-      return ((uintptr_t)ptr & (alignment - 1)) == 0;
-}
-
 static void fatal(const char *msg) {
     fprintf(stderr, "Fatal for: %s\n", msg);
     exit(1);
