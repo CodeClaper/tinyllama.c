@@ -1131,18 +1131,17 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     (void)vocab_try_lookup(v, "<|im_end|>",      &v->im_end_id);
 
     /* Build byte-to-token-ID table for GPT-2 bytes_to_unicode mapping.
-     * In GPT-2 BPE, control bytes (0-32,127-160,173) are mapped to
-     * Unicode codepoints U+0100+ before being stored as token pieces. */
+     * Token pieces in the GGUF store the UTF-8 encoding of the MAPPED
+     * codepoint: self-mapping bytes >= 0x80 map to U+0080..U+00FF
+     * (2-byte UTF-8), control bytes map to U+0100+. */
     for (int b = 0; b < 256; b++) {
         v->byte_token_ids[b] = VOCAB_ID_NONE;
         bool is_self = (b >= 33 && b <= 126)
                     || (b >= 161 && b <= 172)
                     || (b >= 174 && b <= 255);
+        int cp;
         if (is_self) {
-            char byte_char = (char)b;
-            i32 id;
-            if (vocab_lookup_len(v, &byte_char, 1, &id))
-                v->byte_token_ids[b] = id;
+            cp = b;
         } else {
             /* Count non-self-mapping bytes < b to get the Unicode offset. */
             int off = 0;
@@ -1152,20 +1151,20 @@ static Vocab *vocab_load_for_bpe(Model *m) {
                        || (i >= 174 && i <= 255);
                 if (!si) off++;
             }
-            int cp = 256 + off;
-            /* Encode Unicode codepoint as UTF-8 (cp < 0x800 → 2 bytes). */
-            char utf8[4];
-            int ulen;
-            if (cp < 0x80)      { utf8[0] = (char)cp; ulen = 1; }
-            else if (cp < 0x800){ utf8[0] = (char)(0xC0 | (cp >> 6));
-                                  utf8[1] = (char)(0x80 | (cp & 0x3F)); ulen = 2; }
-            else                { utf8[0] = (char)(0xE0 | (cp >> 12));
-                                  utf8[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                                  utf8[2] = (char)(0x80 | (cp & 0x3F)); ulen = 3; }
-            i32 id;
-            if (vocab_lookup_len(v, utf8, ulen, &id))
-                v->byte_token_ids[b] = id;
+            cp = 256 + off;
         }
+        /* Encode mapped codepoint as UTF-8. */
+        char utf8[4];
+        int ulen;
+        if (cp < 0x80)      { utf8[0] = (char)cp; ulen = 1; }
+        else if (cp < 0x800){ utf8[0] = (char)(0xC0 | (cp >> 6));
+                              utf8[1] = (char)(0x80 | (cp & 0x3F)); ulen = 2; }
+        else                { utf8[0] = (char)(0xE0 | (cp >> 12));
+                              utf8[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                              utf8[2] = (char)(0x80 | (cp & 0x3F)); ulen = 3; }
+        i32 id;
+        if (vocab_lookup_len(v, utf8, ulen, &id))
+            v->byte_token_ids[b] = id;
     }
 
     return v;
