@@ -17,7 +17,10 @@ DEBUG_VEC=1 make
 # AddressSanitizer build (on top of release or DEBUG flags; ~2-4x slower)
 SAN=1 make
 
-# Run tests
+# Metal GPU backend build (macOS only; uses Apple clang, links Metal.framework)
+METAL=1 make
+
+# Run tests (adds test_gpu with GPU=1, test_metal with METAL=1)
 make check
 
 # Clean

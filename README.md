@@ -22,6 +22,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
 - epoll-based event loop for HTTP serving
 - Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
+- Optional Metal GPU acceleration on macOS with automatic CPU fallback (`METAL=1 make`)
 - CPU backends with x86 and ARM optimizations
 
 ## Supported Models
@@ -38,7 +39,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 
 - **Compiler:** GCC
 - **Libraries:** libm (math), pthreads, Linux kernel (eventfd, epoll)
-- **Optional:** CUDA toolkit (nvcc) for the GPU backend
+- **Optional:** CUDA toolkit (nvcc) for the GPU backend, or macOS with Xcode command line tools for the Metal backend
 - **OS:** Linux only (uses `eventfd`, `epoll`, `mmap`)
 
 ## Build
@@ -58,6 +59,9 @@ SAN=1 make
 
 # CUDA GPU build (requires nvcc; falls back to CPU per-op when the GPU path is unavailable)
 GPU=1 make
+
+# Metal GPU build (macOS only; requires clang + Metal framework)
+METAL=1 make
 
 # Run tests
 make check
@@ -151,7 +155,7 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 ./src/bench -m model.gguf -i "Explain quantum computing." -r 10 -o output.txt
 ```
 
-The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage. A GPU build prints the active device (`CUDA` or `CPU`).
+The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage. A GPU build prints the active device (`CUDA`, `Metal`, or `CPU`).
 
 ## Benchmark
 

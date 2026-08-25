@@ -17,6 +17,9 @@
 #ifdef GPU_BUILD
 #include "gpu/quants_gpu.h"
 #endif
+#ifdef METAL_BUILD
+#include "metal/quants_metal.h"
+#endif
 #include "pthreads.h"
 #include "mm.h"
 #include "slog.h"
@@ -229,6 +232,14 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             return true;
     }
 #endif
+#ifdef METAL_BUILD
+    /* Metal matvec: same persistent-weights contract as the CUDA
+     * path, with the same fall-through semantics. */
+    if (rows * cols >= METAL_MAT_MIN_OPS && metal_available()) {
+        if (metal_matvec(tw, base, x, y, rows, cols, trans) == 0)
+            return true;
+    }
+#endif
 
     if (trans) {
         /* Transposed: W stored as [cols × rows], compute y = W^T @ x.
@@ -361,6 +372,13 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
     /* GPU matmat: same fall-through contract as mat_vec_mul. */
     if (batch * rows * cols >= GPU_MAT_MIN_OPS && gpu_available()) {
         if (gpu_matmat(tw, base, X, Y, batch, rows, cols, trans) == 0)
+            return true;
+    }
+#endif
+#ifdef METAL_BUILD
+    /* Metal matmat: same fall-through contract as mat_vec_mul. */
+    if (batch * rows * cols >= METAL_MAT_MIN_OPS && metal_available()) {
+        if (metal_matmat(tw, base, X, Y, batch, rows, cols, trans) == 0)
             return true;
     }
 #endif
@@ -1549,6 +1567,9 @@ void engine_close(Engine *en) {
     if (!en) return;
 #ifdef GPU_BUILD
     gpu_shutdown(); /* free cached device weight buffers */
+#endif
+#ifdef METAL_BUILD
+    metal_shutdown(); /* free cached device weight buffers */
 #endif
     vocab_free(en->vocab);
     model_close(en->model);

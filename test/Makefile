@@ -1,8 +1,12 @@
 CC      = gcc
 ARCH    ?= $(shell uname -m)
+UNAME_S := $(shell uname -s)
 CFLAGS  = -O0 -g -Wall -pthread -Ic
 ifneq (,$(filter x86_64 i386 i686,$(ARCH)))
 	CFLAGS += -msse4.1
+endif
+ifeq ($(UNAME_S),Darwin)
+	CC = clang
 endif
 LDFLAGS = -lpthread
 SRC_DIR  = ../src
@@ -23,7 +27,22 @@ ifdef GPU
 	GPU_LINK  += gpu_quants_gpu.o
 endif
 
-all: test_pthreads test_utils test_qwen25 $(GPU_TESTS)
+# Metal backend test (optional, macOS only).  Build with: METAL=1 make
+METAL_TESTS =
+ifdef METAL
+	ifeq ($(UNAME_S),Linux)
+		$(error METAL=1 requires macOS)
+	endif
+	ifdef GPU
+		$(error GPU=1 and METAL=1 are mutually exclusive)
+	endif
+	CFLAGS += -D METAL_BUILD
+	LDFLAGS += -framework Metal -framework Foundation
+	METAL_TESTS += test_metal
+	METAL_LINK  += metal_quants_metal.o
+endif
+
+all: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
 
 test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -79,15 +98,30 @@ gpu_quants_gpu.o: $(SRC_DIR)/gpu/quants_gpu.cu $(SRC_DIR)/gpu/quants_gpu.h $(SRC
 test_gpu: c/test_gpu.c gpu_quants_gpu.o quants.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
+$(SRC_DIR)/metal/quants_metal_msl.h: $(SRC_DIR)/metal/quants_metal.metal
+	@echo "  GEN $@"
+	@printf '/* Generated from quants_metal.metal - do not edit. */\n#ifndef __QUANTS_METAL_MSL_H__\n#define __QUANTS_METAL_MSL_H__\nstatic const char *quants_metal_msl =\n' > $@
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(SRC_DIR)/metal/quants_metal.metal >> $@
+	@printf ';\n#endif /* __QUANTS_METAL_MSL_H__ */\n' >> $@
+
+metal_quants_metal.o: $(SRC_DIR)/metal/quants_metal.m $(SRC_DIR)/metal/quants_metal.h $(SRC_DIR)/metal/quants_metal_msl.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -fobjc-arc -I$(SRC_DIR) -c $(SRC_DIR)/metal/quants_metal.m -o $@
+
+test_metal: c/test_metal.c metal_quants_metal.o quants.o slog.o utils.o mm.o asctx.o
+	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
+
 .PHONY: all check clean
 
-check: test_pthreads test_utils test_qwen25 $(GPU_TESTS)
+check: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
 	./test_pthreads
 	./test_utils
 	./test_qwen25
 ifdef GPU
 	./test_gpu
 endif
+ifdef METAL
+	./test_metal
+endif
 
 clean:
-	rm -f test_pthreads test_qwen25 gpu_quants_gpu.o test_gpu *.o
+	rm -f test_pthreads test_qwen25 gpu_quants_gpu.o test_gpu metal_quants_metal.o test_metal *.o

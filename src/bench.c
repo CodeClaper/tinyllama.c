@@ -14,6 +14,9 @@
 #ifdef GPU_BUILD
 #include "gpu/quants_gpu.h"
 #endif
+#ifdef METAL_BUILD
+#include "metal/quants_metal.h"
+#endif
 
 typedef struct {
     EngineOptons engine;
@@ -277,6 +280,8 @@ int main(int argc, char *argv[]) {
     printf("Architecture:       %s\n", engine->model->arch_name);
 #ifdef GPU_BUILD
     printf("Device:             %s\n", gpu_available() ? "CUDA" : "CPU");
+#elif defined(METAL_BUILD)
+    printf("Device:             %s\n", metal_available() ? "Metal" : "CPU");
 #else
     printf("Device:             CPU\n");
 #endif
