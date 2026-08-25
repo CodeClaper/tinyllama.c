@@ -153,6 +153,34 @@ static int decode_token(Session *s, Vocab *v, u32 id, char *buf, int max_len) {
     return 0;
 }
 
+/* Strict UTF-8 validation: rejects truncated sequences, invalid lead /
+ * continuation bytes, overlong encodings, surrogates and > U+10FFFF. */
+static bool utf8_valid(const char *s, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)s[i];
+        u32   cp;
+        size_t n;
+        if (c < 0x80) { i++; continue; }
+        else if ((c & 0xE0) == 0xC0) { n = 2; cp = c & 0x1Fu; }
+        else if ((c & 0xF0) == 0xE0) { n = 3; cp = c & 0x0Fu; }
+        else if ((c & 0xF8) == 0xF0) { n = 4; cp = c & 0x07u; }
+        else return false;
+        if (i + n > len) return false;
+        for (size_t j = 1; j < n; j++) {
+            unsigned char cc = (unsigned char)s[i + j];
+            if ((cc & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (u32)(cc & 0x3Fu);
+        }
+        if ((n == 2 && cp < 0x80u) || (n == 3 && cp < 0x800u) ||
+            (n == 4 && cp < 0x10000u) || cp > 0x10FFFFu ||
+            (cp >= 0xD800u && cp <= 0xDFFFu))
+            return false;
+        i += n;
+    }
+    return true;
+}
+
 /* Strip trailing whitespace (including \n, \r) from a string in-place. */
 static void strip_trailing(char *s) {
     int len = (int)strlen(s);
@@ -200,7 +228,8 @@ int main(int argc, char *argv[]) {
     /* Banner. */
     printf("Chat with %s. Type /quit to exit, /clear to reset.\n", engine->model->arch_name);
 
-    char input[4096];
+    char *input = NULL;
+    size_t input_cap = 0;
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
 
@@ -208,8 +237,14 @@ int main(int argc, char *argv[]) {
         fputs("You > ", stdout);
         fflush(stdout);
 
-        if (!fgets(input, (int)sizeof(input), stdin)) break; /* EOF */
+        ssize_t ilen = getline(&input, &input_cap, stdin);
+        if (ilen < 0) break; /* EOF */
         strip_trailing(input);
+
+        if (!utf8_valid(input, strlen(input))) {
+            fprintf(stderr, "Invalid UTF-8 input, line skipped.\n");
+            continue;
+        }
 
         /* Commands. */
         if (!strcmp(input, "/quit") || !strcmp(input, "/exit")) break;
@@ -231,6 +266,8 @@ int main(int argc, char *argv[]) {
             n_prompt = build_continuation_tokens(v, input, prompt_tokens, max_pt);
             if (n_prompt == 0) fatal("No valid tokens in input");
         }
+        if (n_prompt >= max_pt)
+            fprintf(stderr, "Warning: prompt truncated to %d tokens.\n", max_pt);
 
         /* Forward pass. */
         if (!session->ops.prefill(session, prompt_tokens, n_prompt, session->logits))
@@ -278,6 +315,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Bye.\n");
+    free(input);
     session_free(session);
     engine_close(engine);
     return 0;
