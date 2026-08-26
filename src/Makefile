@@ -156,7 +156,7 @@ kvcache.o: kvcache.c kvcache.h def.h
 asctx.o: asctx.c asctx.h def.h
 	$(CC) $(CFLAGS) -c asctx.c -o $@
 
-rax.o: rax.c rax.h
+rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c rax.c -o $@
 
 .PHONY: clean all
