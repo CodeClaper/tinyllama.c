@@ -54,12 +54,12 @@ else
 	METAL_OBJS =
 endif
 
-OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
+OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o graph.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o $(GPU_OBJS) $(METAL_OBJS)
 
-MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
+MAIN_OBJS = core.o quants.o mm.o slog.o utils.o graph.o \
               tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               cpu/quants_cpu.o $(GPU_OBJS) $(METAL_OBJS)
@@ -92,6 +92,9 @@ core.o: core.c core.h def.h model/model.h
 
 quants.o: quants.c quants.h def.h
 	$(CC) $(CFLAGS) -c quants.c -o $@
+
+graph.o: graph.c graph.h def.h
+	$(CC) $(CFLAGS) -c graph.c -o $@
 
 mm.o: mm.c def.h mm.h asctx.h
 	$(CC) $(CFLAGS) -c mm.c -o $@
