@@ -290,8 +290,7 @@ int main(int argc, char *argv[]) {
         for (u32 i = 0; i < max_tokens; i++) {
             if (next_token == (u32)v->eos_id) break;
             char dec[64];
-            int dlen = decode_token(session, v, next_token, dec,
-                                    (int)sizeof(dec) - 1);
+            int dlen = decode_token(session, v, next_token, dec, (int)sizeof(dec) - 1);
             if (dlen > 0) {
                 dec[dlen] = '\0';
                 fputs(dec, stdout);
