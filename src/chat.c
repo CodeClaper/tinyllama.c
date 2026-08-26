@@ -11,6 +11,7 @@
 #include "tokenizer.h"
 #include "sampler.h"
 #include "slog.h"
+#include "linenoise.h"
 
 typedef struct {
     EngineOptons engine;
@@ -229,17 +230,15 @@ int main(int argc, char *argv[]) {
     printf("Chat with %s. Type /quit to exit, /clear to reset.\n", engine->model->arch_name);
 
     char *input = NULL;
-    size_t input_cap = 0;
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
 
     FOREVER {
-        fputs("You > ", stdout);
-        fflush(stdout);
-
-        ssize_t ilen = getline(&input, &input_cap, stdin);
-        if (ilen < 0) break; /* EOF */
+        free(input);
+        input = linenoise("You > ");
+        if (input == NULL) break; /* EOF, Ctrl-D or Ctrl-C */
         strip_trailing(input);
+        if (input[0] != '\0') linenoiseHistoryAdd(input);
 
         if (!utf8_valid(input, strlen(input))) {
             fprintf(stderr, "Invalid UTF-8 input, line skipped.\n");
@@ -315,7 +314,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("Bye.\n");
-    free(input);
+    linenoiseFree(input);
     session_free(session);
     engine_close(engine);
     return 0;
