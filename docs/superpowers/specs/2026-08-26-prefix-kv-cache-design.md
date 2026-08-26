@@ -28,29 +28,31 @@ server 模式每次请求都 `reset` 后全量 prefill 整段对话（`server.c`
 ```c
 /* kvcache.h */
 typedef struct {
-    rax     *tree;     /* token 序列 → 缓存段 */
-    raxNode *cur;      /* 当前路径末端（decode 挂边） */
-    u32      pos;      /* 当前活动序列写位置 */
-    u32      max_pos;  /* 缓冲历史最高写位置 */
-    bool     enabled;  /* MLA 架构为 false */
-    KvCache  kv;       /* 复用 def.h 现有缓冲结构 */
+    rax     *tree;      /* token 序列 → 缓存段；enabled=false 时为 NULL */
+    u32      pos;       /* 当前活动序列写位置（= 活动长度） */
+    u32      max_pos;   /* 缓冲历史最高写位置 */
+    bool     enabled;   /* MLA 架构为 false */
+    KvCache *kv;        /* 指向 Session.cache（缓冲归 arch 管理） */
+    unsigned char *curkey; /* 当前路径 key（growable，decode 增量扩展） */
+    size_t       curkey_len;
+    size_t       curkey_cap;
 } KvPrefixCache;
 ```
 
-- 节点值 = 单个 `u32 pos`（无需 len：token 级边下每节点贡献恰好 1 个 token 的 KV）
+- 节点值 = 单个 `u32 pos`（无需 len：token 级边下每节点贡献恰好 1 个 token 的 KV），直接 `(void *)(uintptr_t)pos` 存指针，**零分配**
 - `def.h` 只加 `KvPrefixCache` 前向声明 + Session 一个字段；缓冲结构体留在 def.h 不动
-- key 编码：`token → 4 字节大端`，`memcpy` 手工移位（树只在内存中，用 BE 便于调试）
+- key 编码：`token → 4 字节大端`（树只在内存中，用 BE 便于调试）
 
-**关键不变量（路径连续）**：驱逐规则保证活段永不被覆写，且写入总是从 match_end 连续延伸——因此命中段 `[deepest.pos - matchlen + 1, deepest.pos + 1)` 必然连续，后端可直接按连续区间计算 attention。
+**关键不变量（路径连续）**：驱逐规则保证活段永不被覆写（分叉时 `[match_end, max_pos)` 全部驱逐，写游标只会落在死区），且写入总是从 match_end 连续延伸——因此命中段 `[match_end - matchlen, match_end)` 必然连续，后端可直接按连续区间计算 attention。
 
 ## 数据流
 
 **prefill(s, tokens, n) 三步：**
-1. `raxFindPrefix(tree, tokens, n)` → `{deepest, matchlen}`；`match_end = deepest.pos + 1`（0 表示无命中，`match_end = 0`）
-2. 后端只对后缀 `[matched_len, n)` 计算 KV，从 `match_end` 起写入
-3. `kvcache_prefix_insert()`：为后缀逐 token 挂边、写 `pos` 值，更新 `pos/cur`；rax 遇分叉自动节点分裂，已缓存分支不动
+1. `kvcache_prefix_match()` → `{matchlen, match_end}`（match_end = 命中最深节点的 pos+1；无命中时为 0）。**此处做 flush 检查**：`match_end + (n - matchlen) > cap` → 整体清空、返回 0/0
+2. 后端只对后缀 `[matchlen, n)` 计算 KV，从 `match_end` 起写入
+3. `kvcache_prefix_insert()`：若 `match_end < max_pos` 先做驱逐，再为后缀逐 token 挂边、写 `pos` 值，更新 `pos/max_pos/curkey`；rax 遇分叉自动节点分裂，已缓存分支不动
 
-**generate(s, token) 一步：** 后端在 `pos` 处算一个 token 的 KV，`cur` 下挂一条边，`pos++`
+**generate(s, token) 一步：** 后端在 `pos` 处算一个 token 的 KV，然后 `kvcache_append()`：`pos + 1 > cap` → flush；否则 `curkey` 追加 4 字节、raxInsert 挂边、`pos++`
 
 **效果**：server 请求 2 的 prompt 命中请求 1 的整条历史路径 → `matched_len == n`，全部 KV 计算跳过。chat 同理，`/clear` 后旧分支留树，重开即命中。
 
@@ -67,21 +69,20 @@ typedef struct {
 树里 C→(2) 仍指向位置 2 → 损坏
 ```
 
-**规则**：写区间 `[write_start, write_end) = [match_end, match_end + suffix_len)` 前，驱逐所有位置落在区间内的 token 节点：
+**驱逐规则（修正版，规划阶段发现原精确区间规则有漏洞）**：写游标从 `match_end` 起延伸——本请求的后缀会写 `[match_end, match_end+suffix)`，且**后续 generate 还会从 `pos` 继续写**。仅按后缀区间驱逐会被"空后缀 prefill 后紧接 generate"击穿（prefill 命中 AB 无后缀，随后 generate 写位置 2 覆盖 C）。因此：
 
 ```
-驱逐条件:  pos >= write_start  &&  pos < write_end
+若 match_end < max_pos：驱逐所有 pos >= match_end 的节点
+若 match_end == max_pos：零驱逐（最常见的向后延伸路径，O(1)）
 ```
 
-上例：D 写 [2,3) → 驱逐 C(2)；A(0)、B(1) 保留，X(3)、Y(4) 不受影响（D 只覆盖位置 2）。树剩 A、B、X、Y，D 写入后插 ABD 分支。正确——驱逐粒度精确到被覆盖的单个 token，不误伤同路径其他节点。
+上例：D 写位置 2 → 驱逐 C(2)、X(3)、Y(4)（X、Y 所在路径因 C 被驱逐而失效，一并清理）；A(0)、B(1) 保留。树剩 A、B，D 写入后插 ABD 分支。正确。
 
-**优化：**
-1. `match_end == max_pos`（把历史往后接的最常见路径）→ 零驱逐，O(1) 跳过
-2. 精确边界：驱逐粒度 = 单个 token 位置，不误伤相邻分支；驱逐后位置变死区，可安全覆写
+**代价**：分叉时可能误伤 `[match_end, max_pos)` 内与本次写入不重叠的节点——它们所在路径随分叉断裂，驱逐是正确的；分叉是少数派，代价可接受。驱逐后位置变死区，可安全覆写。
 
-**实现**：rax 迭代器全树扫描 + 检查值——仅在 `match_end < max_pos` 时触发（分叉是少数），O(已缓存节点数)。`raxRemove` 支持删内部 key 节点（有子节点时只摘 key/value）。
+**实现**：rax 迭代器全树扫描 + 检查值——仅在 `match_end < max_pos` 时触发，O(已缓存节点数)。`raxRemove` 支持删内部 key 节点（有子节点时只摘 key/value）。
 
-**flush**：`max_pos == cap` 时整体清空（`raxFreeWithCallback` + 缓冲归零），打 WARN。
+**flush**：`match_end + (n - matchlen) > cap` 时整体清空（`raxFree` + 状态归零），打 WARN；append 侧 `pos + 1 > cap` 同样 flush。清空后本次请求全量重算（后端从位置 0 写起）。
 
 ## reset / 驱逐语义
 
@@ -94,11 +95,12 @@ typedef struct {
 
 ## 后端接口变化
 
-- `ArchOps.prefill/generate` 签名不变，后端内部调 kvcache API：
-  - `kvcache_prefix_match(s, tokens, n)` → `{match_len, pos}`
-  - `kvcache_prefix_insert(s, tokens, start, end)`（内部含驱逐检查）
-  - `kvcache_append(s, token)`（decode 挂边）
-  - `kvcache_reset(s)` / `kvcache_flush(s)`
+- `ArchOps.prefill/generate` 签名不变，后端内部调 kvcache API（操作 `KvPrefixCache *pc`，不依赖 Session）：
+  - `kvcache_init(pc, kv, n_layer, cap, enabled)` / `kvcache_free(pc)` — session_create/free 调用；`kv` 指向已分配好的 `Session.cache`
+  - `kvcache_reset(pc)` — 清 curkey、pos=0、各层 `n=0`；**不动树**
+  - `kvcache_prefix_match(pc, tokens, n, &matchlen, &match_end)` — 含 flush 检查
+  - `kvcache_prefix_insert(pc, tokens, n, matchlen, match_end)` — 含驱逐检查
+  - `kvcache_append(pc, token)` — decode 挂边，含 flush 检查
 - 打 INFO/WARN 统计 hit/miss，便于肉眼验证收益
 
 ## 测试

@@ -337,9 +337,9 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen25_generate(s, tokens[0], logits);
 
-    Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
-    ArchConfig     *c  = &s->cfg;
-    Weights        *w  = s->en->weights;
+    Qwen25Workspace *ws  = (Qwen25Workspace *)s->arch_data;
+    ArchConfig     *c    = &s->cfg;
+    Weights        *w    = s->en->weights;
     const u8       *base = s->en->model->map;
 
     u32 n_head      = c->n_head;
@@ -404,12 +404,6 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                     xp[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + tok);
             }
         }
-    }
-
-    DBG_VEC("prefill_embd[0]", xs, n_embd);
-    if (n_tokens > 1) {
-        float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
-        DBG_VEC("prefill_embd[last]", last_x, n_embd);
     }
 
     /* ---- 2. Per-layer ---- */
