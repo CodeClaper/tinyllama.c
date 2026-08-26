@@ -107,9 +107,9 @@ typedef struct {
 
 - 单测（纯 C，无需模型）：rax + 小维度缓冲模拟——
   - 最长前缀命中（含 `matched_len == n` 全命中）
-  - 分叉驱逐正确性（第 3 节 ABD 场景）
-  - 精确边界不误伤相邻分支
-  - flush-on-full
+  - 分叉驱逐正确性（第 3 节 ABD 场景，含空后缀 prefill 后紧接 generate 的击穿用例）
+  - 驱逐范围 `[match_end, max_pos)` 的完整性（分叉时相邻分支一并驱逐）
+  - flush-on-full（prefill 溢出与 decode 溢出两条路径）
   - decode 逐 token 挂边
   - reset 后复用旧路径
 - 集成：server 同一对话连发两请求，第二请求 prefill 时间 ≈ 0
