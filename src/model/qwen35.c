@@ -363,7 +363,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             for (u32 i = 0; i < n_embd; i++)
                 ws->x[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + token);
         }
-        DBG_VEC("embd(x)", ws->x, n_embd);
     }
 
     /* ---- 2. Per-layer ---- */
@@ -512,10 +511,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             /* SSM residual and skip standard attention pathway. */
             for (u32 i = 0; i < n_embd; i++)
                 ws->x[i] += ws->xb2[i];
-            if (l == 0) {
-                DBG_VEC("ssm_out(xb2)", ws->xb2, n_embd);
-                DBG_VEC("x_after_ssm_residual", ws->x, n_embd);
-            }
             goto ssm_attn_done;
 
         } else if (t_qkv) {
@@ -592,19 +587,9 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
             return false;
         }
 
-        if (l == 0) {
-            DBG_VEC("q (after proj+bias)", ws->q, q_head_dim);
-            DBG_VEC("k (after proj+bias)", ws->k, kv_head_dim);
-            DBG_VEC("v (after proj+bias)", ws->v, kv_head_dim);
-        }
-
         /* ---- 2c. RoPE ---- */
         rope_partial(ws->q, n_head, q_head_dim, c->rope_dim, pos, ws->rope_theta);
         rope_partial(ws->k, n_kv_head, kv_head_dim, c->rope_dim, pos, ws->rope_theta);
-        if (l == 0) {
-            DBG_VEC("q_rope", ws->q, q_head_dim);
-            DBG_VEC("k_rope", ws->k, kv_head_dim);
-        }
 
         /* ---- 2d. KV cache write (head-major: [head][pos][dim]) ---- */
         {
@@ -714,10 +699,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
         /* ---- 2g. Attention residual ---- */
         for (u32 i = 0; i < n_embd; i++)
             ws->x[i] += ws->xb2[i];
-        if (l == 0) {
-            DBG_VEC("attn_out_proj(xb2)", ws->xb2, n_embd);
-            DBG_VEC("x_after_attn_residual", ws->x, n_embd);
-        }
 
         ssm_attn_done:
         /* ---- 2h. Pre-FFN norm ---- */
@@ -747,7 +728,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
                 ws->x[i] += ws->xb[i];
         }
 
-        if (l == 0) DBG_VEC("x_after_ffn_residual", ws->x, n_embd);
     }
 
     /* ---- 3. Final RMS norm ---- */
@@ -757,7 +737,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
          * as the final norm; try output_norm first, then fall back. */
         if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         rms_norm(ws->xb, ws->x, t_norm, base, n_embd, eps);
-        DBG_VEC("final_norm(xb)", ws->xb, n_embd);
     }
 
     /* ---- 4. LM head ---- */
@@ -766,7 +745,6 @@ static bool qwen35_generate(Session *s, u32 token, float *logits) {
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
         float *dst = logits ? logits : s->logits;
         if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) return false;
-        DBG_VEC("logits", dst, c->n_vocab);
     }
 
     /* ---- 5. Update session state ---- */
@@ -859,12 +837,6 @@ static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                     xp[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + tok);
             }
         }
-    }
-
-    DBG_VEC("prefill_embd[0]", xs, n_embd);
-    if (n_tokens > 1) {
-        float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
-        DBG_VEC("prefill_embd[last]", last_x, n_embd);
     }
 
     /* ---- 2. Per-layer ---- */
@@ -1376,7 +1348,6 @@ static bool qwen35_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
         rms_norm(ws->xb, last_x, t_norm, base, n_embd, eps);
-        DBG_VEC("final_norm(xb)", ws->xb, n_embd);
     }
 
     /* ---- 4. LM head ---- */
