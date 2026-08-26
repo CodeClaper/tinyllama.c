@@ -276,15 +276,13 @@ int main(int argc, char *argv[]) {
             fatal("Forward pass failed");
 
         /* Sample first token. */
-        u32 next_token;
-        if (co.temperature > 0.0f)
-            next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                       co.temperature, co.top_k, co.top_p, co.min_p,
-                                       co.repeat_penalty, co.repeat_last_n,
-                                       co.frequency_penalty, co.presence_penalty,
-                                       session->tokens, session->n_tokens);
-        else
-            next_token = sample_greedy(session->logits, session->cfg.n_vocab);
+        u32 next_token = (co.temperature > 0.0f) 
+            ? sample_token(session->logits, session->cfg.n_vocab, 
+                    co.temperature, co.top_k, co.top_p, co.min_p, 
+                    co.repeat_penalty, co.repeat_last_n, 
+                    co.frequency_penalty, co.presence_penalty, 
+                    session->tokens, session->n_tokens)
+            : sample_greedy(session->logits, session->cfg.n_vocab);
 
         /* Generate. */
         u32 n_gen = 0;
