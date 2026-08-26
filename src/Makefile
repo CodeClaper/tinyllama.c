@@ -55,12 +55,12 @@ else
 endif
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o \
-       tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o \
+       tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        cpu/quants_cpu.o $(GPU_OBJS) $(METAL_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o \
-              tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o \
+              tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               cpu/quants_cpu.o $(GPU_OBJS) $(METAL_OBJS)
 
@@ -158,6 +158,9 @@ asctx.o: asctx.c asctx.h def.h
 
 rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c rax.c -o $@
+
+linenoise.o: linenoise.c linenoise.h
+	$(CC) $(CFLAGS) -c linenoise.c -o $@
 
 .PHONY: clean all
 
