@@ -136,6 +136,7 @@ static void linenoiseFoldClear(struct linenoiseState *l);
 
 static struct termios orig_termios; /* In order to restore at exit.*/
 static int maskmode = 0; /* Show "***" instead of input. For passwords. */
+static const char *input_color = NULL; /* ANSI code for the input text, NULL=off. */
 static int rawmode = 0; /* For atexit() function to check if restore is needed*/
 static int rawmode_output = STDOUT_FILENO; /* fd used for terminal escapes. */
 static int mlmode = 0;  /* Multi line mode. Default is single line. */
@@ -544,6 +545,14 @@ void linenoiseMaskModeEnable(void) {
 /* Disable mask mode. */
 void linenoiseMaskModeDisable(void) {
     maskmode = 0;
+}
+
+/* Set the ANSI escape sequence (e.g. "\x1b[32m") used to render the edited
+ * line. The color is reset to the default right after the buffer, so the
+ * terminal state is never left dangling. NULL (the default) disables it.
+ * The escape sequence must be zero-width; the refresh code relies on that. */
+void linenoiseSetInputColor(const char *code) {
+    input_color = code;
 }
 
 /* Set if to use or not the multi line mode. */
@@ -1271,6 +1280,7 @@ static void refreshSingleLine(struct linenoiseState *l, int flags) {
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
         abAppend(&ab,l->prompt,l->plen);
+        if (input_color != NULL) abAppend(&ab,input_color,strlen(input_color));
         if (maskmode == 1) {
             /* In mask mode, we output one '*' per UTF-8 character, not byte */
             size_t i = 0;
@@ -1281,6 +1291,7 @@ static void refreshSingleLine(struct linenoiseState *l, int flags) {
         } else {
             abAppend(&ab,buf,len);
         }
+        if (input_color != NULL) abAppend(&ab,"\x1b[0m",4);
         /* Show hints if any. */
         refreshShowHints(&ab,l,pwidth,fullwidth);
     }
@@ -1359,6 +1370,7 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
     if (flags & REFRESH_WRITE) {
         /* Write the prompt and the current buffer content */
         abAppend(&ab,l->prompt,l->plen);
+        if (input_color != NULL) abAppend(&ab,input_color,strlen(input_color));
         if (maskmode == 1) {
             /* In mask mode, output one '*' per UTF-8 character, not byte */
             size_t i = 0;
@@ -1369,6 +1381,7 @@ static void refreshMultiLine(struct linenoiseState *l, int flags) {
         } else {
             abAppend(&ab,render,render_len);
         }
+        if (input_color != NULL) abAppend(&ab,"\x1b[0m",4);
 
         /* Show hints if any. */
         refreshShowHints(&ab,l,pwidth,bufwidth);
@@ -1513,7 +1526,7 @@ int linenoiseEditInsert(struct linenoiseState *l, const char *c, size_t clen) {
                              memchr(c, '\r', clen) != NULL;
 
         if (linenoiseEditInsertNoRefresh(l,c,clen) == -1) return 0;
-        if (!needs_refresh && !mlmode && !hintsCallback &&
+        if (!needs_refresh && !mlmode && !hintsCallback && input_color == NULL &&
             (maskmode || l->fold_count == 0))
         {
             size_t bufwidth = utf8StrWidth(l->buf,l->len);

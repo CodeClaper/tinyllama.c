@@ -229,13 +229,16 @@ int main(int argc, char *argv[]) {
     /* Banner. */
     printf("Chat with %s. Type /quit to exit, /clear to reset.\n", engine->model->arch_name);
 
+    /* Green prompt and input. */
+    linenoiseSetInputColor("\033[32m");
+
     char *input = NULL;
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
 
     FOREVER {
         free(input);
-        input = linenoise("You > ");
+        input = linenoise("\033[32mYou > \033[0m");
         if (input == NULL) break; /* EOF, Ctrl-D or Ctrl-C */
         strip_trailing(input);
         if (input[0] != '\0') linenoiseHistoryAdd(input);

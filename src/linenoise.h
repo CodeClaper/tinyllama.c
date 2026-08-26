@@ -112,6 +112,7 @@ void linenoiseSetMultiLine(int ml);
 void linenoisePrintKeyCodes(void);
 void linenoiseMaskModeEnable(void);
 void linenoiseMaskModeDisable(void);
+void linenoiseSetInputColor(const char *code);
 
 #ifdef __cplusplus
 }
