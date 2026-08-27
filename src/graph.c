@@ -7,7 +7,9 @@
 
 /* Attention kernel (defined at the bottom); used by graph_compute. */
 bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
-                         const float *v, float *out, const GraphRunCtx *ctx);/* Grow a dynamic array, doubling capacity when full. */
+                         const float *v, float *out, const GraphRunCtx *ctx);
+
+/* Grow a dynamic array, doubling capacity when full. */
 static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
     if (*cap >= need) return true;
     u32 nc = *cap ? *cap * 2 : 16;
@@ -22,16 +24,15 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
 /* Append a node with a precomputed output shape. */
 static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *weight,
                     void *param, u64 out_elems, u32 out_ndim, const u64 *out_dim) {
-    if (!g || out_elems == 0) return (u32)-1;
-    if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode)))
-        return (u32)-1;
+    if (!g || out_elems == 0) return GRAPH_NODE_NONE;
+    if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
 
     GraphNode *n = &g->node[g->n_node];
-    n->op = op;
-    n->weight = weight;
-    n->param = param;
+    n->op        = op;
+    n->weight    = weight;
+    n->param     = param;
     n->out_elems = out_elems;
-    n->out_ndim = out_ndim;
+    n->out_ndim  = out_ndim;
     for (u32 i = 0; i < MAX_DIMS; i++) n->out_dim[i] = out_dim ? out_dim[i] : 0;
     for (int i = 0; i < 4; i++) n->src[i] = src ? src[i] : -1;
     return g->n_node++;
@@ -89,7 +90,7 @@ static bool shape_matmat(const GraphNode *a, TensorInfo *w, bool trans,
 
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
-    if (!a || !weight) return (u32)-1;
+    if (!a || !weight) return GRAPH_NODE_NONE;
     return node_add(g, OP_RMS_NORM, (int[]){src,-1,-1,-1}, weight, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
@@ -97,7 +98,7 @@ u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
 u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     u64 rows = 0, cols = 0;
-    if (!a || !shape_matvec(a, weight, trans, &rows, &cols)) return (u32)-1;
+    if (!a || !shape_matvec(a, weight, trans, &rows, &cols)) return GRAPH_NODE_NONE;
     u64 dim[1] = { rows };
     return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (int[]){src,-1,-1,-1},
                     weight, NULL, rows, 1, dim);
@@ -106,45 +107,45 @@ u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans) {
 u32 graph_mul_mat2(Graph *g, u32 src, TensorInfo *weight) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     u64 batch = 0, rows = 0, cols = 0;
-    if (!a || !shape_matmat(a, weight, false, &batch, &rows, &cols)) return (u32)-1;
+    if (!a || !shape_matmat(a, weight, false, &batch, &rows, &cols)) return GRAPH_NODE_NONE;
     u64 dim[2] = { batch, rows };
     return node_add(g, OP_MATMUL2, (int[]){src,-1,-1,-1}, weight, NULL,
                     batch * rows, 2, dim);
 }
 
 u32 graph_binary(Graph *g, GraphOp op, u32 a_id, u32 b_id) {
-    if (op != OP_ADD && op != OP_MUL) return (u32)-1;
+    if (op != OP_ADD && op != OP_MUL) return GRAPH_NODE_NONE;
     const GraphNode *a = a_id < g->n_node ? &g->node[a_id] : NULL;
     const GraphNode *b = b_id < g->n_node ? &g->node[b_id] : NULL;
-    if (!a || !b || a->out_elems != b->out_elems) return (u32)-1;
+    if (!a || !b || a->out_elems != b->out_elems) return GRAPH_NODE_NONE;
     return node_add(g, op, (int[]){a_id,b_id,-1,-1}, NULL, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_silu(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
-    if (!a) return (u32)-1;
+    if (!a) return GRAPH_NODE_NONE;
     return node_add(g, OP_SILU, (int[]){src,-1,-1,-1}, NULL, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_softmax(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
-    if (!a) return (u32)-1;
+    if (!a) return GRAPH_NODE_NONE;
     return node_add(g, OP_SOFTMAX, (int[]){src,-1,-1,-1}, NULL, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_rope(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
-    if (!a) return (u32)-1;
+    if (!a) return GRAPH_NODE_NONE;
     return node_add(g, OP_ROPE_NEOX, (int[]){src,-1,-1,-1}, NULL, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
     const GraphNode *tok = token_id < g->n_node ? &g->node[token_id] : NULL;
-    if (!tok || !weight || weight->ndim < 2) return (u32)-1;
+    if (!tok || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
     u64 n_embd = weight->dim[weight->ndim - 1];
     u64 dim[2] = { n_tokens, n_embd };
     return node_add(g, OP_EMBED, (int[]){token_id,-1,-1,-1}, weight, NULL,
@@ -152,11 +153,11 @@ u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
 }
 
 u32 graph_attention(Graph *g, u32 q, u32 k, u32 v, GraphAttnParam *param) {
-    if (!param) return (u32)-1;
+    if (!param) return GRAPH_NODE_NONE;
     const GraphNode *nq = q < g->n_node ? &g->node[q] : NULL;
     const GraphNode *nk = k < g->n_node ? &g->node[k] : NULL;
     const GraphNode *nv = v < g->n_node ? &g->node[v] : NULL;
-    if (!nq || !nk || !nv) return (u32)-1;
+    if (!nq || !nk || !nv) return GRAPH_NODE_NONE;
 
     /* q output: [batch, n_head * head_dim]; attn matches this shape. */
     u64 batch = param->n_tokens;
@@ -224,7 +225,7 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
         ap->rope_theta = 10000.0f;
 
         u32 a = graph_attention(g, q, k, v, ap);
-        if (a == (u32)-1) { graph_free(g); return NULL; }
+        if (a == GRAPH_NODE_NONE) { graph_free(g); return NULL; }
 
         u32 ao = graph_mul_mat2(g, a, wo);
         hid = graph_binary(g, OP_ADD, hid, ao);

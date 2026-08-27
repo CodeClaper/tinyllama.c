@@ -4,16 +4,18 @@
 #include "def.h"
 #include "pthreads.h"
 
+#define GRAPH_NODE_NONE ((u32)-1)  /* invalid node handle (builder return) */
+
 typedef enum {
     OP_INPUT,      /* leaf: caller-seeded value, produced externally */
-    OP_ADD,        /* out = a + b                 (element-wise)    */
-    OP_MUL,        /* out = a * b                 (element-wise)    */
-    OP_MATMUL,     /* out = W @ x                 (mat-vec)         */
-    OP_MATMUL2,    /* out[b] = W @ x[b]           (mat-mat, batch)  */
-    OP_MATMUL_T,   /* out = W^T @ x               (mat-vec)         */
-    OP_RMS_NORM,   /* out = rms(x) * w                              */
+    OP_ADD,        /* out = a + b                 (element-wise)     */
+    OP_MUL,        /* out = a * b                 (element-wise)     */
+    OP_MATMUL,     /* out = W @ x                 (mat-vec)          */
+    OP_MATMUL2,    /* out[b] = W @ x[b]           (mat-mat, batch)   */
+    OP_MATMUL_T,   /* out = W^T @ x               (mat-vec)          */
+    OP_RMS_NORM,   /* out = rms(x) * w                               */
     OP_ROPE_NEOX,  /* out = rope(in)                                 */
-    OP_SOFTMAX,    /* out = softmax(x)  (per-row over last dim)     */
+    OP_SOFTMAX,    /* out = softmax(x)  (per-row over last dim)      */
     OP_SILU,       /* out = silu(x)                                  */
     OP_EMBED,      /* out = token_embd[token]                        */
     OP_ATTENTION,  /* fused per-head scored attention + KV update    */
