@@ -237,7 +237,7 @@ int main(int argc, char *argv[]) {
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
 
     FOREVER {
-        free(input);
+        if (!input) sfree(input);
         input = linenoise("\033[32mYou > \033[0m");
         if (input == NULL) break; /* EOF, Ctrl-D or Ctrl-C */
         strip_trailing(input);
