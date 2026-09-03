@@ -163,6 +163,20 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
     #undef RMS_STACK
 }
 
+/* Batch-dequantise a 1-D bias tensor and add it element-wise to dst[0..n-1].
+ * Uses a stack buffer when n <= BIAS_BUF_STACK; falls back to heap for
+ * oversized tensors (unlikely for bias).  This trades memory for speed:
+ * tensor_get_f32_batch uses SIMD block dequant, and the addition loop
+ * is trivially auto-vectorisable with contiguous f32 data. */
+void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
+    float  stack_buf[BIAS_BUF_STACK];
+    float *buf = n <= BIAS_BUF_STACK ? stack_buf : smalloc((u64)n * sizeof(float));
+    tensor_get_f32_batch(tb, base, 0, n, buf);
+    for (u32 i = 0; i < n; i++)
+        dst[i] += buf[i];
+    if (buf != stack_buf) sfree(buf);
+}
+
 /* ---- Parallel mat-vec row workers ----------------------------------
  * Each invocation of the worker computes one output element y[i].
  * The context is shared read-only across threads (it is fully

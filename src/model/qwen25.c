@@ -25,21 +25,6 @@ typedef struct {
 
 /* ---- Arch ops --------------------------------------------------- */
 
-/* Batch-dequantise a 1-D bias tensor and add it element-wise to dst[0..n-1].
- * Uses a stack buffer when n <= BIAS_BUF_STACK; falls back to heap for
- * oversized tensors (unlikely for bias).  This trades memory for speed:
- * tensor_get_f32_batch uses SIMD block dequant, and the addition loop
- * is trivially auto-vectorisable with contiguous f32 data. */
-#define BIAS_BUF_STACK 4096
-static inline void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
-    float  stack_buf[BIAS_BUF_STACK];
-    float *buf = n <= BIAS_BUF_STACK ? stack_buf : smalloc((u64)n * sizeof(float));
-    tensor_get_f32_batch(tb, base, 0, n, buf);
-    for (u32 i = 0; i < n; i++)
-        dst[i] += buf[i];
-    if (buf != stack_buf) sfree(buf);
-}
-
 static bool qwen25_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
