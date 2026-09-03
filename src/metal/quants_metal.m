@@ -30,7 +30,7 @@
 #include "quants_metal_msl.h" /* quants_metal_msl[] — embedded kernel source */
 
 /* Scalar reference dequant, used only by the CPU fallback paths. */
-float gguf_dequant(TensorInfo *ti, const u8 *base, u64 i);
+float gguf_dequant(TensorInfo *ti, u64 i);
 
 /* IQ grids / value tables defined in quants.c, concatenated into one
  * device buffer at first use (see quants_metal.metal for the layout). */
@@ -257,17 +257,17 @@ static void metal_execute(id<MTLComputePipelineState> pipe, MTLSize grid, MTLSiz
  * Scalar CPU fallbacks
  * ================================================================ */
 
-static void scalar_dequant_range(TensorInfo *ti, const u8 *base,
+static void scalar_dequant_range(TensorInfo *ti,
                                  u64 i0, u64 nb, float *out) {
     for (u64 j = 0; j < nb; j++)
-        out[j] = gguf_dequant(ti, base, i0 + j);
+        out[j] = gguf_dequant(ti, i0 + j);
 }
 
-static float scalar_dot(TensorInfo *ti, const u8 *base,
+static float scalar_dot(TensorInfo *ti,
                         u64 i, u64 n, const float *x) {
     double sum = 0.0;
     for (u64 j = 0; j < n; j++)
-        sum += (double)gguf_dequant(ti, base, i + j) * (double)x[j];
+        sum += (double)gguf_dequant(ti, i + j) * (double)x[j];
     return (float)sum;
 }
 
@@ -275,16 +275,16 @@ static float scalar_dot(TensorInfo *ti, const u8 *base,
  * Dequant / dot batch
  * ================================================================ */
 
-static int metal_dequant_batch_inner(TensorInfo *ti, const u8 *base,
+static int metal_dequant_batch_inner(TensorInfo *ti,
                                      u64 i0, u64 nb, float *out) {
     if (metal_ensure_ready() != 0) {
-        scalar_dequant_range(ti, base, i0, nb, out);
+        scalar_dequant_range(ti, i0, nb, out);
         return 0;
     }
 
     u64 be, bb;
     if (metal_geom(ti->type, &be, &bb) != 0) {
-        scalar_dequant_range(ti, base, i0, nb, out);
+        scalar_dequant_range(ti, i0, nb, out);
         return 0;
     }
 
@@ -292,7 +292,7 @@ static int metal_dequant_batch_inner(TensorInfo *ti, const u8 *base,
     u64 end_i    = i0 + nb;
     u64 n_blocks = (end_i - start_i + be - 1) / be;
     u64 bytes    = n_blocks * bb;
-    const u8 *src = base + ti->offset + (start_i / be) * bb;
+    const u8 *src = (const u8 *)ti->data + (start_i / be) * bb;
     /* Copy through the tensor's declared end, not just the decoded
      * blocks: some IQ decoders read a few bytes past the last block
      * (block-relative offsets spilling beyond the block end), so the
@@ -302,14 +302,14 @@ static int metal_dequant_batch_inner(TensorInfo *ti, const u8 *base,
      * this is a no-op there. */
     bytes = ti->bytes - (start_i / be) * bb;
     if (bytes > (u64)g_device.maxBufferLength) {
-        scalar_dequant_range(ti, base, i0, nb, out);
+        scalar_dequant_range(ti, i0, nb, out);
         return 0;
     }
 
     id<MTLBuffer> d_data = [g_device newBufferWithBytes:src length:(NSUInteger)bytes options:MTLResourceStorageModeShared];
     id<MTLBuffer> d_out  = [g_device newBufferWithLength:(NSUInteger)(nb * sizeof(float)) options:MTLResourceStorageModeShared];
     if (!d_data || !d_out) {
-        scalar_dequant_range(ti, base, i0, nb, out);
+        scalar_dequant_range(ti, i0, nb, out);
         return 0;
     }
 
@@ -325,52 +325,52 @@ static int metal_dequant_batch_inner(TensorInfo *ti, const u8 *base,
     return 0;
 }
 
-int metal_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
-    if (!ti || !base || !out || nb == 0) return 0;
+int metal_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
+    if (!ti || !ti->data || !out || nb == 0) return 0;
     if (i0 + nb > ti->n_element) return -1;
 
     pthread_mutex_lock(&g_lock);
     @autoreleasepool {
-        int rc = metal_dequant_batch_inner(ti, base, i0, nb, out);
+        int rc = metal_dequant_batch_inner(ti, i0, nb, out);
         pthread_mutex_unlock(&g_lock);
         return rc;
     }
 }
 
-int metal_dequant_tensor(TensorInfo *ti, const u8 *base, float *out) {
-    if (!ti || !base || !out) return -1;
+int metal_dequant_tensor(TensorInfo *ti, float *out) {
+    if (!ti || !ti->data || !out) return -1;
 
     pthread_mutex_lock(&g_lock);
     @autoreleasepool {
-        int rc = metal_dequant_batch_inner(ti, base, 0, ti->n_element, out);
+        int rc = metal_dequant_batch_inner(ti, 0, ti->n_element, out);
         pthread_mutex_unlock(&g_lock);
         return rc;
     }
 }
 
-static float metal_dot_batch_inner(TensorInfo *ti, const u8 *base,
+static float metal_dot_batch_inner(TensorInfo *ti,
                                    u64 i, u64 n, const float *x) {
     if (metal_ensure_ready() != 0)
-        return scalar_dot(ti, base, i, n, x);
+        return scalar_dot(ti, i, n, x);
 
     u64 be, bb;
     if (metal_geom(ti->type, &be, &bb) != 0)
-        return scalar_dot(ti, base, i, n, x);
+        return scalar_dot(ti, i, n, x);
 
     u64 start_i  = (i / be) * be;
     u64 end_i    = i + n;
     u64 n_blocks = (end_i - start_i + be - 1) / be;
     u64 bytes    = n_blocks * bb;
-    const u8 *src = base + ti->offset + (start_i / be) * bb;
+    const u8 *src = (const u8 *)ti->data + (start_i / be) * bb;
     if (bytes > (u64)g_device.maxBufferLength)
-        return scalar_dot(ti, base, i, n, x);
+        return scalar_dot(ti, i, n, x);
 
     unsigned blocks = metal_block_count(n);
     id<MTLBuffer> d_data = [g_device newBufferWithBytes:src length:(NSUInteger)bytes options:MTLResourceStorageModeShared];
     id<MTLBuffer> d_x    = [g_device newBufferWithBytes:x length:(NSUInteger)(n * sizeof(float)) options:MTLResourceStorageModeShared];
     id<MTLBuffer> d_partial = [g_device newBufferWithLength:(NSUInteger)(blocks * sizeof(float)) options:MTLResourceStorageModeShared];
     if (!d_data || !d_x || !d_partial)
-        return scalar_dot(ti, base, i, n, x);
+        return scalar_dot(ti, i, n, x);
 
     struct MetalDequantParams dp = { ti->type, start_i, i, n };
     id<MTLBuffer> d_p = [g_device newBufferWithBytes:&dp length:sizeof(dp) options:MTLResourceStorageModeShared];
@@ -387,13 +387,13 @@ static float metal_dot_batch_inner(TensorInfo *ti, const u8 *base,
     return (float)sum;
 }
 
-float metal_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x) {
-    if (!ti || !base || !x || n == 0) return 0.0f;
+float metal_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
+    if (!ti || !ti->data || !x || n == 0) return 0.0f;
     if (i + n > ti->n_element) return 0.0f;
 
     pthread_mutex_lock(&g_lock);
     @autoreleasepool {
-        float v = metal_dot_batch_inner(ti, base, i, n, x);
+        float v = metal_dot_batch_inner(ti, i, n, x);
         pthread_mutex_unlock(&g_lock);
         return v;
     }
@@ -403,15 +403,15 @@ float metal_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float 
  * Persistent-weight matmul backend
  * ================================================================ */
 
-/* Device weight cache: (base, ti) identifies a tensor unambiguously
- * (base is the mmap base — per-model identity; ti the flat tensor
- * array element).  Uploaded lazily on first use; never evicted —
+/* Device weight cache: (ti->data, ti) identifies a tensor
+ * unambiguously (ti->data is the resolved host buffer; ti the flat
+ * tensor array element).  Uploaded lazily on first use; never evicted —
  * weights are read-only and the model is loaded once.  A failed
  * upload is a CPU fallback, not fatal.
  *
  * A content snapshot guards the pointer key: if a caller reuses a
- * freed (base, ti) identity for a new tensor (the unit tests hit this
- * via malloc address reuse), the stale device copy is replaced rather
+ * freed (ti->data, ti) identity for a new tensor (the unit tests hit
+ * this via malloc address reuse), the stale device copy is replaced rather
  * than served.  The engine never aliases identities, so the snapshot
  * always matches there and the replace path is never taken. */
 #define METAL_CACHE_MAX 4096
@@ -424,21 +424,21 @@ static u32            g_cache_type[METAL_CACHE_MAX];
 static u64            g_cache_off[METAL_CACHE_MAX];
 static int            g_cache_n = 0;
 
-static id<MTLBuffer> metal_cache_upload(TensorInfo *ti, const u8 *base) {
+static id<MTLBuffer> metal_cache_upload(TensorInfo *ti) {
     if ((u64)ti->bytes > (u64)g_device.maxBufferLength) return nil;
-    return [g_device newBufferWithBytes:base + ti->offset length:(NSUInteger)ti->bytes
+    return [g_device newBufferWithBytes:ti->data length:(NSUInteger)ti->bytes
                                 options:MTLResourceStorageModeShared];
 }
 
-static id<MTLBuffer> metal_cache_get(TensorInfo *ti, const u8 *base) {
+static id<MTLBuffer> metal_cache_get(TensorInfo *ti) {
     for (int i = 0; i < g_cache_n; i++) {
-        if (g_cache_base[i] != base || g_cache_ti[i] != ti) continue;
+        if (g_cache_base[i] != ti->data || g_cache_ti[i] != ti) continue;
         if (g_cache_elems[i] == ti->n_element && g_cache_bytes[i] == ti->bytes &&
             g_cache_type[i] == ti->type && g_cache_off[i] == ti->offset)
             return g_cache_dev[i]; /* same identity, same content */
         /* Same pointers, different content: replace the dead copy. */
         g_cache_dev[i] = nil;
-        id<MTLBuffer> d = metal_cache_upload(ti, base);
+        id<MTLBuffer> d = metal_cache_upload(ti);
         if (!d) return nil;
         g_cache_dev[i]   = d;
         g_cache_elems[i] = ti->n_element;
@@ -448,9 +448,9 @@ static id<MTLBuffer> metal_cache_get(TensorInfo *ti, const u8 *base) {
         return d;
     }
     if (g_cache_n >= METAL_CACHE_MAX || ti->bytes == 0) return nil;
-    id<MTLBuffer> d = metal_cache_upload(ti, base);
+    id<MTLBuffer> d = metal_cache_upload(ti);
     if (!d) return nil;
-    g_cache_base[g_cache_n] = base;
+    g_cache_base[g_cache_n] = ti->data;
     g_cache_ti[g_cache_n]   = ti;
     g_cache_dev[g_cache_n]  = d;
     g_cache_elems[g_cache_n] = ti->n_element;
@@ -461,13 +461,13 @@ static id<MTLBuffer> metal_cache_get(TensorInfo *ti, const u8 *base) {
     return d;
 }
 
-static int metal_matmul_inner(TensorInfo *ti, const u8 *base,
+static int metal_matmul_inner(TensorInfo *ti,
                               const float *X, float *Y,
                               u64 batch, u64 rows, u64 cols, bool trans) {
     if (metal_ensure_ready() != 0) return -1;
     if (ti->type >= 31 || metal_type_suffix[ti->type] == NULL) return -1;
 
-    id<MTLBuffer> d_w = metal_cache_get(ti, base);
+    id<MTLBuffer> d_w = metal_cache_get(ti);
     if (!d_w) return -1;
 
     id<MTLBuffer> d_x = [g_device newBufferWithBytes:X length:(NSUInteger)(batch * cols * sizeof(float)) options:MTLResourceStorageModeShared];
@@ -487,27 +487,27 @@ static int metal_matmul_inner(TensorInfo *ti, const u8 *base,
     return 0;
 }
 
-int metal_matvec(TensorInfo *ti, const u8 *base, const float *x, float *y,
+int metal_matvec(TensorInfo *ti, const float *x, float *y,
                  u64 rows, u64 cols, bool trans) {
-    if (!ti || !base || !x || !y || rows == 0 || cols == 0) return -1;
+    if (!ti || !ti->data || !x || !y || rows == 0 || cols == 0) return -1;
     if (rows * cols > ti->n_element) return -1; /* dim sanity (CPU checks dims) */
 
     pthread_mutex_lock(&g_lock);
     @autoreleasepool {
-        int rc = metal_matmul_inner(ti, base, x, y, 1, rows, cols, trans);
+        int rc = metal_matmul_inner(ti, x, y, 1, rows, cols, trans);
         pthread_mutex_unlock(&g_lock);
         return rc;
     }
 }
 
-int metal_matmat(TensorInfo *ti, const u8 *base, const float *X, float *Y,
+int metal_matmat(TensorInfo *ti, const float *X, float *Y,
                  u64 batch, u64 rows, u64 cols, bool trans) {
-    if (!ti || !base || !X || !Y || batch == 0 || rows == 0 || cols == 0) return -1;
+    if (!ti || !ti->data || !X || !Y || batch == 0 || rows == 0 || cols == 0) return -1;
     if (rows * cols > ti->n_element) return -1;
 
     pthread_mutex_lock(&g_lock);
     @autoreleasepool {
-        int rc = metal_matmul_inner(ti, base, X, Y, batch, rows, cols, trans);
+        int rc = metal_matmul_inner(ti, X, Y, batch, rows, cols, trans);
         pthread_mutex_unlock(&g_lock);
         return rc;
     }

@@ -680,8 +680,8 @@ static inline float dequant_iq4_xs(const u8 *data, u64 i) {
 
 /* ---- Dispatcher --------------------------------------------------- */
 
-float gguf_dequant(TensorInfo *ti, const u8 *base, u64 i) {
-    const u8 *data = base + ti->offset;
+float gguf_dequant(TensorInfo *ti, u64 i) {
+    const u8 *data = ti->data;
     switch (ti->type) {
         case GGUF_TYPE_F32:     return dequant_f32(data, i);
         case GGUF_TYPE_F16:     return dequant_f16(data, i);

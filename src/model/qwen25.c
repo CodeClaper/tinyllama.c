@@ -105,8 +105,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
     Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
     Weights        *w  = s->en->weights;
-    const u8       *base = s->en->model->map;
-
+    
     u32 n_head      = c->n_head;
     u32 n_kv_head   = c->n_kv_head;
     u32 q_head_dim  = c->head_dim;
@@ -125,11 +124,11 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
         if (te->dim[0] == c->n_vocab) {
             /* [n_vocab, n_embd] — row token is contiguous */
-            tensor_get_f32_batch(te, base, (u64)token * n_embd, n_embd, ws->x);
+            tensor_get_f32_batch(te,  (u64)token * n_embd, n_embd, ws->x);
         } else {
             /* [n_embd, n_vocab] */
             for (u32 i = 0; i < n_embd; i++)
-                ws->x[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + token);
+                ws->x[i] = tensor_get_f32(te,  (u64)i * c->n_vocab + token);
         }
     }
 
@@ -139,7 +138,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         AttnKvCache  *akc = &s->cache.std[l];
 
         /* ---- 2a. Attention norm ---- */
-        rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_ATTN_NORM], base, n_embd, eps);
+        rms_norm(ws->xb, ws->x, lw->tensors[TENSOR_ATTN_NORM],  n_embd, eps);
 
         /* ---- 2b. Q / K / V projections ---- */
         TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
@@ -151,14 +150,14 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         if (t_qkv) {
             bool qkv_trans = (t_qkv->dim[0] == n_embd);
             fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-            if (!mat_vec_mul(ws->qkv_fused, t_qkv, base, ws->xb, fused_total, n_embd, qkv_trans, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->qkv_fused, t_qkv,  ws->xb, fused_total, n_embd, qkv_trans, s->pthreads)) return false;
             memcpy(ws->q, ws->qkv_fused, q_dim * sizeof(float));
             memcpy(ws->k, ws->qkv_fused + q_dim, kv_dim * sizeof(float));
             memcpy(ws->v, ws->qkv_fused + q_dim + kv_dim, kv_dim * sizeof(float));
         } else if (t_q && t_k && t_v) {
-            if (!mat_vec_mul(ws->q, t_q, base, ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
-            if (!mat_vec_mul(ws->k, t_k, base, ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) return false;
-            if (!mat_vec_mul(ws->v, t_v, base, ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->q, t_q,  ws->xb, q_dim,  n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->k, t_k,  ws->xb, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->v, t_v,  ws->xb, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) return false;
         } else {
             slog(WARN, "Layer %u: missing QKV / Q,K,V tensors", l);
             return false;
@@ -171,15 +170,15 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
             TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
             if (tb_q) {
                 u32 n = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
-                bias_add(ws->q, tb_q, base, n);
+                bias_add(ws->q, tb_q,  n);
             }
             if (tb_k) {
                 u32 n = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
-                bias_add(ws->k, tb_k, base, n);
+                bias_add(ws->k, tb_k,  n);
             }
             if (tb_v) {
                 u32 n = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
-                bias_add(ws->v, tb_v, base, n);
+                bias_add(ws->v, tb_v,  n);
             }
         }
 
@@ -235,7 +234,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         {
             TensorInfo *t_out = lw->tensors[TENSOR_ATTN_OUT];
             if (t_out) {
-                if (!mat_vec_mul(ws->xb2, t_out, base, attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
+                if (!mat_vec_mul(ws->xb2, t_out,  attn_out, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) return false;
             }
         }
 
@@ -246,7 +245,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         /* ---- 2h. Pre-FFN norm ---- */
         {
             TensorInfo *ti = lw->tensors[TENSOR_POST_ATTN_NORM];
-            if (ti) rms_norm(ws->xb, ws->x, ti, base, n_embd, eps);
+            if (ti) rms_norm(ws->xb, ws->x, ti,  n_embd, eps);
         }
 
         /* ---- 2i. SwiGLU FFN ---- */
@@ -256,14 +255,14 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
             TensorInfo *t_down = lw->tensors[TENSOR_FFN_DOWN];
             u32 fh = ws->ffn_hidden;
 
-            if (!mat_vec_mul(ws->hb, t_gate, base, ws->xb, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) return false;
-            if (!mat_vec_mul(ws->hb2, t_up, base, ws->xb, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->hb, t_gate,  ws->xb, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->hb2, t_up,  ws->xb, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) return false;
 
             silu(ws->hb, fh);
             for (u32 i = 0; i < fh; i++)
                 ws->hb[i] *= ws->hb2[i];
 
-            if (!mat_vec_mul(ws->xb, t_down, base, ws->hb, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) return false;
+            if (!mat_vec_mul(ws->xb, t_down,  ws->hb, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) return false;
 
             /* Residual. */
             for (u32 i = 0; i < n_embd; i++)
@@ -277,7 +276,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         /* Some Qwen2 models use TENSOR_POST_ATTN_NORM from layer 0
          * as the final norm; try output_norm first, then fall back. */
         if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
-        rms_norm(ws->xb, ws->x, t_norm, base, n_embd, eps);
+        rms_norm(ws->xb, ws->x, t_norm,  n_embd, eps);
     }
 
     /* ---- 4. LM head ---- */
@@ -285,7 +284,7 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];  /* tied weights */
         float *dst = logits ? logits : s->logits;
-        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) return false;
+        if (!mat_vec_mul(dst, t_out,  ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) return false;
     }
 
     /* ---- 5. Update session state ---- */
@@ -306,8 +305,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
     Qwen25Workspace *ws  = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c    = &s->cfg;
     Weights        *w    = s->en->weights;
-    const u8       *base = s->en->model->map;
-
+    
     u32 n_head      = c->n_head;
     u32 n_kv_head   = c->n_kv_head;
     u32 q_head_dim  = c->head_dim;
@@ -360,14 +358,14 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
             /* [n_vocab, n_embd] — each token's row is contiguous */
             for (u32 p = 0; p < n_tokens; p++) {
                 float *xp = xs + (u64)p * n_embd;
-                tensor_get_f32_batch(te, base, (u64)tokens[p] * n_embd, n_embd, xp);
+                tensor_get_f32_batch(te,  (u64)tokens[p] * n_embd, n_embd, xp);
             }
         } else {
             for (u32 p = 0; p < n_tokens; p++) {
                 float *xp = xs + (u64)p * n_embd;
                 u32 tok = tokens[p];
                 for (u32 i = 0; i < n_embd; i++)
-                    xp[i] = tensor_get_f32(te, base, (u64)i * c->n_vocab + tok);
+                    xp[i] = tensor_get_f32(te,  (u64)i * c->n_vocab + tok);
             }
         }
     }
@@ -395,7 +393,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         /* ---- 2a. RMS norm on all xs → norm_buf ---- */
         for (u32 p = 0; p < n_tokens; p++)
             rms_norm(norm_buf + (u64)p * n_embd,
-                     xs + (u64)p * n_embd, t_attn, base, n_embd, eps);
+                     xs + (u64)p * n_embd, t_attn, n_embd, eps);
 
         /* ---- 2b. Batched Q/K/V projection ---- */
         {
@@ -413,24 +411,24 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
             if (tb_q) {
                 n_q = tb_q->n_element < (u64)q_dim ? (u32)tb_q->n_element : q_dim;
                 q_bias = n_q <= BIAS_BUF_STACK ? q_bias_stack : smalloc((u64)n_q * sizeof(float));
-                tensor_get_f32_batch(tb_q, base, 0, n_q, q_bias);
+                tensor_get_f32_batch(tb_q,  0, n_q, q_bias);
             }
             if (tb_k) {
                 n_k = tb_k->n_element < (u64)kv_dim ? (u32)tb_k->n_element : kv_dim;
                 k_bias = n_k <= BIAS_BUF_STACK ? k_bias_stack : smalloc((u64)n_k * sizeof(float));
-                tensor_get_f32_batch(tb_k, base, 0, n_k, k_bias);
+                tensor_get_f32_batch(tb_k,  0, n_k, k_bias);
             }
             if (tb_v) {
                 n_v = tb_v->n_element < (u64)kv_dim ? (u32)tb_v->n_element : kv_dim;
                 v_bias = n_v <= BIAS_BUF_STACK ? v_bias_stack : smalloc((u64)n_v * sizeof(float));
-                tensor_get_f32_batch(tb_v, base, 0, n_v, v_bias);
+                tensor_get_f32_batch(tb_v,  0, n_v, v_bias);
             }
 
             if (t_qkv) {
                 /* Fused QKV: one mat_mat_mul, then split per token. */
                 qkv_trans   = (t_qkv->dim[0] == n_embd);
                 fused_total = (u32)(qkv_trans ? t_qkv->dim[1] : t_qkv->dim[0]);
-                if (!mat_mat_mul(qkv_buf, t_qkv, base, norm_buf, n_tokens, fused_total, n_embd, qkv_trans, s->pthreads)) goto fail;
+                if (!mat_mat_mul(qkv_buf, t_qkv,  norm_buf, n_tokens, fused_total, n_embd, qkv_trans, s->pthreads)) goto fail;
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
                     float *row = qkv_buf + (u64)p * fused_total;
@@ -472,13 +470,13 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
                 fused_total = q_dim + 2 * kv_dim;
 
                 /* Q → qbuf (stride q_dim, ready for attention + RoPE in-place). */
-                if (!mat_mat_mul(qbuf, t_q, base, norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) goto fail;
+                if (!mat_mat_mul(qbuf, t_q,  norm_buf, n_tokens, q_dim, n_embd, (q_dim != n_embd) && t_q->dim[0] == n_embd, s->pthreads)) goto fail;
 
                 /* K → after Q in qkv_buf, V → after K. */
                 float *kbuf = qkv_buf;
                 float *vbuf = qkv_buf + (u64)n_tokens * kv_dim;
-                if (!mat_mat_mul(kbuf, t_k, base, norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) goto fail;
-                if (!mat_mat_mul(vbuf, t_v, base, norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) goto fail;
+                if (!mat_mat_mul(kbuf, t_k,  norm_buf, n_tokens, kv_dim, n_embd, t_k->dim[0] == n_embd, s->pthreads)) goto fail;
+                if (!mat_mat_mul(vbuf, t_v,  norm_buf, n_tokens, kv_dim, n_embd, t_v->dim[0] == n_embd, s->pthreads)) goto fail;
 
                 for (u32 p = 0; p < n_tokens; p++) {
                     u32 pos = cache_start + p;
@@ -557,7 +555,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
 
         /* ---- 2d. Batched attention output projection ---- */
         if (t_out) {
-            if (!mat_mat_mul(norm_buf, t_out, base, attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
+            if (!mat_mat_mul(norm_buf, t_out,  attn_buf, n_tokens, n_embd, q_dim, (n_embd != q_dim) && t_out->dim[0] == q_dim, s->pthreads)) { goto fail; }
         } else {
             /* No output projection: copy attn_buf → norm_buf (if dims match). */
             memcpy(norm_buf, attn_buf, row_q * sizeof(float));
@@ -574,16 +572,16 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         /* ---- 2f. Pre-FFN norm → norm_buf ---- */
         if (t_post) {
             for (u32 p = 0; p < n_tokens; p++)
-                rms_norm(norm_buf + (u64)p * n_embd, xs + (u64)p * n_embd, t_post, base, n_embd, eps);
+                rms_norm(norm_buf + (u64)p * n_embd, xs + (u64)p * n_embd, t_post,  n_embd, eps);
         }
 
         /* ---- 2g. Batched FFN (SwiGLU) ---- */
         {
             /* Gate projection: norm_buf → gate_buf */
-            if (!mat_mat_mul(gate_buf, t_gate, base, norm_buf, n_tokens, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) goto fail;
+            if (!mat_mat_mul(gate_buf, t_gate,  norm_buf, n_tokens, fh, n_embd, t_gate->dim[0] == n_embd, s->pthreads)) goto fail;
 
             /* Up projection: norm_buf → up_buf */
-            if (!mat_mat_mul(up_buf, t_up, base, norm_buf, n_tokens, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) goto fail;
+            if (!mat_mat_mul(up_buf, t_up,  norm_buf, n_tokens, fh, n_embd, t_up->dim[0] == n_embd, s->pthreads)) goto fail;
 
             /* Element-wise: gate = silu(gate) * up  (per token, cheap) */
             for (u32 p = 0; p < n_tokens; p++) {
@@ -595,7 +593,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
             }
 
             /* Down projection: gate_buf → norm_buf (reuse norm_buf for output) */
-            if (!mat_mat_mul(norm_buf, t_down, base, gate_buf, n_tokens, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) goto fail;
+            if (!mat_mat_mul(norm_buf, t_down,  gate_buf, n_tokens, n_embd, fh, t_down->dim[0] == fh, s->pthreads)) goto fail;
         }
 
         /* ---- 2h. Residual ---- */
@@ -612,7 +610,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
         if (!t_norm) t_norm = w->layers[n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
         float *last_x = xs + (u64)(n_tokens - 1) * n_embd;
-        rms_norm(ws->xb, last_x, t_norm, base, n_embd, eps);
+        rms_norm(ws->xb, last_x, t_norm,  n_embd, eps);
     }
 
     /* ---- 4. LM head ---- */
@@ -620,7 +618,7 @@ static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits)
         TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
         if (!t_out) t_out = w->tensors[TENSOR_TOKEN_EMBD];
         float *dst = logits ? logits : s->logits;
-        if (!mat_vec_mul(dst, t_out, base, ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) goto fail;
+        if (!mat_vec_mul(dst, t_out,  ws->xb, c->n_vocab, n_embd, t_out->dim[0] == n_embd, s->pthreads)) goto fail;
     }
 
     /* ---- 5. Update session state ---- */

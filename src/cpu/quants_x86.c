@@ -744,8 +744,8 @@ static block_dequant_fn block_table[] = {
  * Public API
  * ================================================================ */
 
-void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
-    const u8 *data = base + ti->offset;
+void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
+    const u8 *data = ti->data;
     u32 type = ti->type;
 
     /* ---- Non-block / simple conversion types: direct SSE path ---- */
@@ -814,7 +814,7 @@ void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *o
             fn(data + bi * block_bytes, out + (cs - i0));
         } else {
             for (u64 j = cs; j < ce; j++)
-                out[j - i0] = gguf_dequant(ti, base, j);
+                out[j - i0] = gguf_dequant(ti, j);
         }
     }
 
@@ -822,7 +822,7 @@ void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *o
 
 fallback:
     for (u64 j = i0; j < i0 + nb; j++)
-        out[j - i0] = gguf_dequant(ti, base, j);
+        out[j - i0] = gguf_dequant(ti, j);
 }
 
 /* ================================================================
@@ -1300,8 +1300,8 @@ static float sse_dot_q2_k_block(const u8 *data, const float *x) {
 
 typedef float (*block_dot_fn)(const u8 *data, const float *x);
 
-float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x) {
-    const u8 *data = base + ti->offset;
+float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
+    const u8 *data = ti->data;
     u32 type = ti->type;
 
     /* ---- Non-block types: direct SSE dot ---- */
@@ -1364,7 +1364,7 @@ float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *
             result += dot_fn(data + bi * block_bytes, x + (cs - i));
         } else {
             for (u64 j = cs; j < ce; j++)
-                result += gguf_dequant(ti, base, j) * x[j - i];
+                result += gguf_dequant(ti, j) * x[j - i];
         }
     }
 
@@ -1372,7 +1372,7 @@ float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *
 
 fallback_dot:
     for (u64 j = i; j < i + n; j++)
-        result += gguf_dequant(ti, base, j) * x[j - i];
+        result += gguf_dequant(ti, j) * x[j - i];
     return result;
 }
 
@@ -1387,8 +1387,8 @@ float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
     return 0.0f;
 }
 
-float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
+float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
                          const i8 *x_i8, float x_scale) {
-    (void)ti; (void)base; (void)i; (void)n; (void)x_i8; (void)x_scale;
+    (void)ti; (void)i; (void)n; (void)x_i8; (void)x_scale;
     return 0.0f;
 }

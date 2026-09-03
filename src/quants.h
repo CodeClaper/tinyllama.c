@@ -4,7 +4,7 @@
 #include "def.h"
 
 /* ---- public API ---- */
-float gguf_dequant(TensorInfo *ti, const u8 *base, u64 i);
+float gguf_dequant(TensorInfo *ti, u64 i);
 
 /* ---- shared by CPU-specific dequant kernels ---- */
 float f16_to_f32(u16 bits);

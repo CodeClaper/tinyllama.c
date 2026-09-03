@@ -775,8 +775,8 @@ static block_dequant_fn block_table[] = {
  * Public API
  * ================================================================ */
 
-void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
-    const u8 *data = base + ti->offset;
+void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
+    const u8 *data = ti->data;
     u32 type = ti->type;
 
     /* ---- Non-block / simple conversion types: direct NEON path ---- */
@@ -850,7 +850,7 @@ void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *o
         } else {
             /* Partial — fall back to scalar. */
             for (u64 j = cs; j < ce; j++)
-                out[j - i0] = gguf_dequant(ti, base, j);
+                out[j - i0] = gguf_dequant(ti, j);
         }
     }
 
@@ -860,7 +860,7 @@ void gguf_dequant_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *o
 fallback:
     /* No block function available — fall back to per-element scalar. */
     for (u64 j = i0; j < i0 + nb; j++)
-        out[j - i0] = gguf_dequant(ti, base, j);
+        out[j - i0] = gguf_dequant(ti, j);
 }
 
 /* ================================================================
@@ -1387,8 +1387,8 @@ static float neon_dot_q2_k_block(const u8 *data, const float *x) {
 
 typedef float (*block_dot_fn)(const u8 *data, const float *x);
 
-float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *x) {
-    const u8 *data = base + ti->offset;
+float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
+    const u8 *data = ti->data;
     u32 type = ti->type;
 
     /* ---- Non-block types: direct NEON dot ---- */
@@ -1456,7 +1456,7 @@ float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *
         } else {
             /* Partial block — scalar per-element. */
             for (u64 j = cs; j < ce; j++)
-                result += gguf_dequant(ti, base, j) * x[j - i];
+                result += gguf_dequant(ti, j) * x[j - i];
         }
     }
 
@@ -1465,7 +1465,7 @@ float gguf_dot_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n, const float *
 fallback_dot:
     /* No fused dot function — scalar per-element. */
     for (u64 j = i; j < i + n; j++)
-        result += gguf_dequant(ti, base, j) * x[j - i];
+        result += gguf_dequant(ti, j) * x[j - i];
     return result;
 }
 
@@ -1593,9 +1593,9 @@ static float vdot_dot_q8_k_block(const u8 *data, const i8 *x_i8,
 typedef float (*i8_block_dot_fn)(const u8 *data, const i8 *x_i8,
                                   float d, float x_scale);
 
-float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
+float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
                          const i8 *x_i8, float x_scale) {
-    const u8 *data = base + ti->offset;
+    const u8 *data = ti->data;
     u32 type = ti->type;
     u32 block_elems, block_bytes;
     i8_block_dot_fn fn = NULL;
@@ -1632,7 +1632,7 @@ float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
             result += fn(data + bi * block_bytes, x_i8 + off, d_scale, x_scale);
         } else {
             for (u64 j = cs; j < ce; j++)
-                result += gguf_dequant(ti, base, j) * ((float)(i8)x_i8[j - i] / x_scale);
+                result += gguf_dequant(ti, j) * ((float)(i8)x_i8[j - i] / x_scale);
         }
     }
 
@@ -1641,7 +1641,7 @@ float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
 fallback_i8:
     /* Fall back: dequant with scalar, multiply with original x scaled back. */
     for (u64 j = i; j < i + n; j++)
-        result += gguf_dequant(ti, base, j) * ((float)(i8)x_i8[j - i] / x_scale);
+        result += gguf_dequant(ti, j) * ((float)(i8)x_i8[j - i] / x_scale);
     return result;
 }
 
@@ -1650,9 +1650,9 @@ fallback_i8:
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
     (void)x; (void)out; (void)n; return 0.0f;
 }
-float gguf_dot_i8_batch(TensorInfo *ti, const u8 *base, u64 i, u64 n,
+float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
                          const i8 *x_i8, float x_scale) {
-    (void)ti; (void)base; (void)i; (void)n; (void)x_i8; (void)x_scale;
+    (void)ti; (void)i; (void)n; (void)x_i8; (void)x_scale;
     return 0.0f;
 }
 

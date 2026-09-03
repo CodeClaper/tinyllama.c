@@ -89,7 +89,7 @@ static const GGUFTypeInfo gguf_types[] = {
 /* Read a single f32/f16/bf16/quantised weight from a GGUF tensor at index i.
  * Supports all GGUF v3 types. Delegates to gguf_dequant() for per-type
  * unpacking. */
-float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
+float tensor_get_f32(TensorInfo *ti, u64 i) {
     if (i >= ti->n_element) {
         char name[128];
         snprintf(name, sizeof(name), "%.*s",
@@ -110,12 +110,12 @@ float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i) {
         }
         slog(ERROR, "Fatal: out-of-bounds tensor access");
     }
-    return gguf_dequant(ti, base, i);
+    return gguf_dequant(ti, i);
 }
 
 /* Batch version of tensor_get_f32: dequantises nb contiguous elements
  * starting at i0 into out[0..nb-1].  Uses NEON SIMD for full blocks. */
-void tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out) {
+void tensor_get_f32_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
     if (i0 + nb > ti->n_element || nb == 0) {
         char name[128];
         snprintf(name, sizeof(name), "%.*s", ti->key.len < 127 ? ti->key.len : 127, ti->key.content);
@@ -135,13 +135,13 @@ void tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float 
         }
         slog(ERROR, "Fatal: out-of-bounds batch tensor access");
     }
-    gguf_dequant_batch(ti, base, i0, nb, out);
+    gguf_dequant_batch(ti, i0, nb, out);
 }
 
 /* ---- Math primitives ------------------------------------------- */
 
 /* RMS Normalisation: o = x / rms(x) * w  (in-place ok when o == x). */
-void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps) {
+void rms_norm(float *o, const float *x, TensorInfo *tw, int n, float eps) {
     u64 tn = tw->dim[0]; /* 1-D weight tensor */
     if ((u64)n > tn) {
         slog(WARN, "rms_norm: n=%d > tensor dim=%llu, clamping", n, (unsigned long long)tn);
@@ -156,7 +156,7 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
     #define RMS_STACK 4096
     float  rms_stack[RMS_STACK];
     float *w_buf = (u64)n <= RMS_STACK ? rms_stack : smalloc((u64)n * sizeof(float));
-    tensor_get_f32_batch(tw, base, 0, (u64)n, w_buf);
+    tensor_get_f32_batch(tw, 0, (u64)n, w_buf);
     for (int i = 0; i < n; i++)
         o[i] = x[i] * scale * w_buf[i];
     if (w_buf != rms_stack) sfree(w_buf);
@@ -168,10 +168,10 @@ void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, f
  * oversized tensors (unlikely for bias).  This trades memory for speed:
  * tensor_get_f32_batch uses SIMD block dequant, and the addition loop
  * is trivially auto-vectorisable with contiguous f32 data. */
-void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
+void bias_add(float *dst, TensorInfo *tb, u32 n) {
     float  stack_buf[BIAS_BUF_STACK];
     float *buf = n <= BIAS_BUF_STACK ? stack_buf : smalloc((u64)n * sizeof(float));
-    tensor_get_f32_batch(tb, base, 0, n, buf);
+    tensor_get_f32_batch(tb, 0, n, buf);
     for (u32 i = 0; i < n; i++)
         dst[i] += buf[i];
     if (buf != stack_buf) sfree(buf);
@@ -185,7 +185,6 @@ void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n) {
 typedef struct {
     float       *y;       /* output row slice                      */
     TensorInfo  *tw;      /* weight tensor                         */
-    const u8    *base;    /* mmap base                             */
     const float *x;       /* input vector                          */
     u64          cols;    /* row length / dot-product length       */
     const i8    *x_i8;    /* i8-quantised x (dotprod path only)    */
@@ -196,7 +195,7 @@ typedef struct {
 static void matvec_worker(void *arg, int tid, int i) {
     (void)tid;
     MatVecCtx *c = (MatVecCtx *)arg;
-    c->y[i] = gguf_dot_batch(c->tw, c->base, (u64)i * c->cols, c->cols, c->x);
+    c->y[i] = gguf_dot_batch(c->tw, (u64)i * c->cols, c->cols, c->x);
 }
 
 /* i8 dot-product row worker (ARMv8.2+ dotprod, Q8_0 / Q8_K). */
@@ -204,7 +203,7 @@ static void matvec_worker(void *arg, int tid, int i) {
 static void matvec_i8_worker(void *arg, int tid, int i) {
     (void)tid;
     MatVecCtx *c = (MatVecCtx *)arg;
-    c->y[i] = gguf_dot_i8_batch(c->tw, c->base, (u64)i * c->cols, c->cols,
+    c->y[i] = gguf_dot_i8_batch(c->tw, (u64)i * c->cols, c->cols,
                                 c->x_i8, c->x_scale);
 }
 #endif
@@ -219,7 +218,7 @@ static void matvec_i8_worker(void *arg, int tid, int i) {
  * standard (non-transposed) path is dispatched across the worker pool;
  * each row's fused dequant + dot product runs on a separate core.  The
  * transposed path stays serial (its strided gather needs per-row scratch). */
-bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
+bool mat_vec_mul(float *y, TensorInfo *tw, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
     if (!tw || tw->ndim < 2) {
         slog(WARN, "mat_vec_mul: tensor missing or ndim < 2");
         return false;
@@ -242,7 +241,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
      * through to the CPU path whenever the GPU path is unavailable,
      * below the size threshold, or fails (y is untouched on failure). */
     if (rows * cols >= GPU_MAT_MIN_OPS && gpu_available()) {
-        if (gpu_matvec(tw, base, x, y, rows, cols, trans) == 0)
+        if (gpu_matvec(tw, x, y, rows, cols, trans) == 0)
             return true;
     }
 #endif
@@ -250,7 +249,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
     /* Metal matvec: same persistent-weights contract as the CUDA
      * path, with the same fall-through semantics. */
     if (rows * cols >= METAL_MAT_MIN_OPS && metal_available()) {
-        if (metal_matvec(tw, base, x, y, rows, cols, trans) == 0)
+        if (metal_matvec(tw, x, y, rows, cols, trans) == 0)
             return true;
     }
 #endif
@@ -265,7 +264,7 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
 
         for (u64 r = 0; r < rows; r++) {
             for (u64 c = 0; c < cols; c++)
-                w_row[c] = tensor_get_f32(tw, base, c * tc + r);
+                w_row[c] = tensor_get_f32(tw, c * tc + r);
             float sum = 0.0f;
             for (u64 c = 0; c < cols; c++)
                 sum += w_row[c] * x[c];
@@ -285,11 +284,11 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
             if (!x_i8) return false;
             float x_scale = quantize_f32_to_i8(x, x_i8, cols);
             if (pool && pool->nthreads > 1 && rows > 1) {
-                MatVecCtx ctx = { y, tw, base, x, cols, x_i8, x_scale };
+                MatVecCtx ctx = { y, tw, x, cols, x_i8, x_scale };
                 pthreads_parallel_for(pool, 0, (int)rows, matvec_i8_worker, &ctx);
             } else {
                 for (u64 r = 0; r < rows; r++)
-                    y[r] = gguf_dot_i8_batch(tw, base, r * cols, cols,
+                    y[r] = gguf_dot_i8_batch(tw, r * cols, cols,
                                              x_i8, x_scale);
             }
             sfree(x_i8);
@@ -297,11 +296,11 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
 #endif
         {
             if (pool && pool->nthreads > 1 && rows > 1) {
-                MatVecCtx ctx = { y, tw, base, x, cols, NULL, 0.0f };
+                MatVecCtx ctx = { y, tw, x, cols, NULL, 0.0f };
                 pthreads_parallel_for(pool, 0, (int)rows, matvec_worker, &ctx);
             } else {
                 for (u64 r = 0; r < rows; r++)
-                    y[r] = gguf_dot_batch(tw, base, r * cols, cols, x);
+                    y[r] = gguf_dot_batch(tw, r * cols, cols, x);
             }
         }
     }
@@ -316,7 +315,6 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 r
 typedef struct {
     float       *Y;         /* output matrix [batch × rows]           */
     TensorInfo  *tw;        /* weight tensor                          */
-    const u8    *base;      /* mmap base                              */
     const float *X;         /* input matrix [batch × cols]            */
     u64          batch;
     u64          rows;
@@ -332,9 +330,9 @@ static void matmat_worker(void *arg, int tid, int i) {
 
     if (c->trans) {
         for (u64 ci = 0; ci < c->cols; ci++)
-            w_row[ci] = tensor_get_f32(c->tw, c->base, ci * c->tc + (u64)i);
+            w_row[ci] = tensor_get_f32(c->tw, ci * c->tc + (u64)i);
     } else {
-        tensor_get_f32_batch(c->tw, c->base, (u64)i * c->cols, c->cols, w_row);
+        tensor_get_f32_batch(c->tw, (u64)i * c->cols, c->cols, w_row);
     }
 
     for (u64 b = 0; b < c->batch; b++) {
@@ -357,7 +355,7 @@ static void matmat_worker(void *arg, int tid, int i) {
  * When pool is non-NULL and has more than one thread, the outer row
  * loop is dispatched across the worker pool (one row per work item);
  * each thread gets its own w_row slice to avoid data races. */
-bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
+bool mat_mat_mul(float *Y, TensorInfo *tw, const float *X,
                  u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
     if (!tw || tw->ndim < 2) {
         slog(WARN, "mat_mat_mul: tensor missing or ndim < 2");
@@ -385,14 +383,14 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
 #ifdef GPU_BUILD
     /* GPU matmat: same fall-through contract as mat_vec_mul. */
     if (batch * rows * cols >= GPU_MAT_MIN_OPS && gpu_available()) {
-        if (gpu_matmat(tw, base, X, Y, batch, rows, cols, trans) == 0)
+        if (gpu_matmat(tw, X, Y, batch, rows, cols, trans) == 0)
             return true;
     }
 #endif
 #ifdef METAL_BUILD
     /* Metal matmat: same fall-through contract as mat_vec_mul. */
     if (batch * rows * cols >= METAL_MAT_MIN_OPS && metal_available()) {
-        if (metal_matmat(tw, base, X, Y, batch, rows, cols, trans) == 0)
+        if (metal_matmat(tw, X, Y, batch, rows, cols, trans) == 0)
             return true;
     }
 #endif
@@ -405,7 +403,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
             slog(WARN, "mat_mat_mul: smalloc failed for parallel row buffers");
             return false;
         }
-        MatMatCtx ctx = { Y, tw, base, X, batch, rows, cols, tc, trans, w_row_buf };
+        MatMatCtx ctx = { Y, tw, X, batch, rows, cols, tc, trans, w_row_buf };
         pthreads_parallel_for(pool, 0, (int)rows, matmat_worker, &ctx);
         sfree(w_row_buf);
         return true;
@@ -422,7 +420,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
     if (trans) {
         for (u64 r = 0; r < rows; r++) {
             for (u64 c = 0; c < cols; c++)
-                w_row[c] = tensor_get_f32(tw, base, c * tc + r);
+                w_row[c] = tensor_get_f32(tw, c * tc + r);
 
             for (u64 b = 0; b < batch; b++) {
                 const float *x_row = X + b * cols;
@@ -434,7 +432,7 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X,
         }
     } else {
         for (u64 r = 0; r < rows; r++) {
-            tensor_get_f32_batch(tw, base, r * cols, cols, w_row);
+            tensor_get_f32_batch(tw, r * cols, cols, w_row);
 
             for (u64 b = 0; b < batch; b++) {
                 const float *x_row = X + b * cols;
@@ -1470,8 +1468,10 @@ Model *model_load(const char *path) {
     u64 data_base = c.post;
     if (data_base % m->alignment)
         data_base += m->alignment - (data_base % m->alignment);
-    for (u64 i = 0; i < m->n_tensor; i++)
+    for (u64 i = 0; i < m->n_tensor; i++) {
         m->tensor[i].offset += data_base;
+        m->tensor[i].data = m->map + m->tensor[i].offset;
+    }
 
     m->arch = model_detect_arch(m);
 

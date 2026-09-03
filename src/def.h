@@ -108,6 +108,7 @@ typedef struct {
     u64 dim[MAX_DIMS];
     u32 type;
     u64 offset;
+    void *data;     /* resolved pointer to the tensor data (map + offset) */
     u64 n_element;
     u64 bytes;
     u64 padded_dim; /* padded last-dimension stride for quantised types */

@@ -17,10 +17,10 @@
 #define BIAS_BUF_STACK 4096
 
 /* ---- Operators (tensor compute kernels; implementations in core.c) ---- */
-void rms_norm(float *o, const float *x, TensorInfo *tw, const u8 *base, int n, float eps);
-void bias_add(float *dst, TensorInfo *tb, const u8 *base, u32 n);
-bool mat_vec_mul(float *y, TensorInfo *tw, const u8 *base, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool);
-bool mat_mat_mul(float *Y, TensorInfo *tw, const u8 *base, const float *X, u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool);
+void rms_norm(float *o, const float *x, TensorInfo *tw, int n, float eps);
+void bias_add(float *dst, TensorInfo *tb, u32 n);
+bool mat_vec_mul(float *y, TensorInfo *tw, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool);
+bool mat_mat_mul(float *Y, TensorInfo *tw, const float *X, u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool);
 void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
 void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
 void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, float theta_base);
@@ -30,8 +30,8 @@ float softplus(float x);
 float sigmoid(float x);
 
 /* ---- Tensor dequant accessors ---- */
-float tensor_get_f32(TensorInfo *ti, const u8 *base, u64 i);
-void  tensor_get_f32_batch(TensorInfo *ti, const u8 *base, u64 i0, u64 nb, float *out);
+float tensor_get_f32(TensorInfo *ti, u64 i);
+void  tensor_get_f32_batch(TensorInfo *ti, u64 i0, u64 nb, float *out);
 
 /* ---- Model metadata access & loading ---- */
 bool model_get_i32(Model *m, const char *key, i32 *out);

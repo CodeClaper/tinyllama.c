@@ -85,7 +85,7 @@ u32 graph_mul_mat2(Graph *g, u32 src, TensorInfo *weight) {
     u64 batch = 0, rows = 0, cols = 0;
     if (!a || !shape_matmat(a, weight, false, &batch, &rows, &cols)) return GRAPH_NODE_NONE;
     u64 dim[2] = { batch, rows };
-    return node_add(g, OP_MATMUL2, (int[]){src,-1,-1,-1}, weight, NULL,
+    return node_add(g, OP_MATMULARRY, (int[]){src,-1,-1,-1}, weight, NULL,
                     batch * rows, 2, dim);
 }
 
@@ -265,8 +265,8 @@ static void per_row_softmax(float *x, u64 rows, u64 cols) {
 }
 
 bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
-    if (!g || !ctx || !ctx->base) {
-        slog(WARN, "graph_compute: missing graph / ctx / base");
+    if (!g || !ctx) {
+        slog(WARN, "graph_compute: missing graph / ctx");
         return false;
     }
     u32 cnt = g->n_node;
@@ -323,7 +323,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                 u64 rows = nd->out_elems / ncols;
                 for (u64 r = 0; r < rows; r++)
                     rms_norm(o + r * ncols, xa + r * ncols,
-                             nd->weight, ctx->base, (int)ncols, ctx->eps);
+                             nd->weight, (int)ncols, ctx->eps);
                 break;
             }
             case OP_MATMUL:
@@ -336,10 +336,10 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                     ok = false;
                     goto done;
                 }
-                mat_vec_mul(o, nd->weight, ctx->base, xa, rows, cols, trans, ctx->pool);
+                mat_vec_mul(o, nd->weight, xa, rows, cols, trans, ctx->pool);
                 break;
             }
-            case OP_MATMUL2: {
+            case OP_MATMULARRY: {
                 u64 batch, rows, cols;
                 const GraphNode *an = &g->node[nd->src[0]];
                 if (!shape_matmat(an, nd->weight, false, &batch, &rows, &cols)) {
@@ -347,7 +347,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                     ok = false;
                     goto done;
                 }
-                mat_mat_mul(o, nd->weight, ctx->base, xa, batch, rows, cols, false, ctx->pool);
+                mat_mat_mul(o, nd->weight, xa, batch, rows, cols, false, ctx->pool);
                 break;
             }
             case OP_EMBED: {
@@ -358,7 +358,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                     float *dst = o + t * n_embd;
                     if (id < 0) { memset(dst, 0, n_embd * sizeof(float)); continue; }
                     for (u64 j = 0; j < n_embd; j++)
-                        dst[j] = tensor_get_f32(nd->weight, ctx->base, (u64)id * n_embd + j);
+                        dst[j] = tensor_get_f32(nd->weight, (u64)id * n_embd + j);
                 }
                 break;
             }

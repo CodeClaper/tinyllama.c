@@ -123,22 +123,23 @@ static u64 make_tensor(u32 type, u64 be, u64 bb,
     ti->offset     = 0;
     ti->n_element  = n_elems;
     ti->bytes      = bytes;
+    ti->data       = *buf;
     return n_elems;
 }
 
 /* Part A: metal_dequant_batch vs gguf_dequant, bit-exact.  Returns the
  * number of mismatching elements (prints the first few). */
-static int check_dequant_exact(TensorInfo *ti, const u8 *buf) {
+static int check_dequant_exact(TensorInfo *ti) {
     u64 n = ti->n_element;
     float *out = malloc(n * sizeof(float));
-    if (metal_dequant_batch(ti, buf, 0, n, out) != 0) {
+    if (metal_dequant_batch(ti, 0, n, out) != 0) {
         printf("    metal_dequant_batch failed\n");
         free(out);
         return 1;
     }
     int bad = 0;
     for (u64 i = 0; i < n; i++) {
-        float ref = gguf_dequant(ti, buf, i);
+        float ref = gguf_dequant(ti, i);
         union { float f; u32 u; } a = { out[i] }, b = { ref };
         if (a.u != b.u) {
             if (bad < 5)
@@ -153,12 +154,12 @@ static int check_dequant_exact(TensorInfo *ti, const u8 *buf) {
 
 /* Reference dot product in double: y[b*rows + r] = sum_c w[i]*x[b*cols+c]
  * with i = r*cols+c (nontrans) or c*rows+r (trans). */
-static double ref_dot(TensorInfo *ti, const u8 *buf, u64 rows, u64 cols,
+static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
                       bool trans, u64 b, u64 r, u64 batch, const float *x) {
     double sum = 0.0;
     for (u64 c = 0; c < cols; c++) {
         u64 i = trans ? c * rows + r : r * cols + c;
-        sum += (double)gguf_dequant(ti, buf, i) * (double)x[b * cols + c];
+        sum += (double)gguf_dequant(ti, i) * (double)x[b * cols + c];
     }
     return sum;
 }
@@ -166,7 +167,7 @@ static double ref_dot(TensorInfo *ti, const u8 *buf, u64 rows, u64 cols,
 /* Part B: matvec (both orientations) and matmat (batch=3).  Tolerance
  * covers f32 accumulation drift (values bounded by the 0x3F mask);
  * any index/decode error is orders of magnitude larger. */
-static int check_matmul(TensorInfo *ti, const u8 *buf, u64 rows, u64 cols,
+static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
                         bool trans, u64 batch) {
     u64 nx = batch * cols, ny = batch * rows;
     float *x = malloc(nx * sizeof(float));
@@ -177,16 +178,16 @@ static int check_matmul(TensorInfo *ti, const u8 *buf, u64 rows, u64 cols,
     int bad = 0;
     int rc;
     if (batch == 1)
-        rc = metal_matvec(ti, buf, x, got, rows, cols, trans);
+        rc = metal_matvec(ti, x, got, rows, cols, trans);
     else
-        rc = metal_matmat(ti, buf, x, got, batch, rows, cols, trans);
+        rc = metal_matmat(ti, x, got, batch, rows, cols, trans);
     if (rc != 0) {
         printf("    metal_matvec/matmat returned %d\n", rc);
         bad++;
     } else {
         for (u64 b = 0; b < batch; b++) {
             for (u64 r = 0; r < rows; r++) {
-                double ref = ref_dot(ti, buf, rows, cols, trans, b, r, batch, x);
+                double ref = ref_dot(ti, rows, cols, trans, b, r, batch, x);
                 double tol = 1e-2 * (fabs(ref) + 100.0);
                 double err = fabs((double)got[b * rows + r] - ref);
                 if (err > tol) {
@@ -213,26 +214,26 @@ static int run_type(u32 type, u64 be, u64 bb) {
         TensorInfo ti;
         make_tensor(type, be, bb, rows, cols, &buf, &ti);
 
-        int bad = check_dequant_exact(&ti, buf);
+        int bad = check_dequant_exact(&ti);
         if (bad)
             printf("  [%s %llux%llu] dequant: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
 
-        bad = check_matmul(&ti, buf, rows, cols, false, 1);
+        bad = check_matmul(&ti, rows, cols, false, 1);
         if (bad)
             printf("  [%s %llux%llu] matvec: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
 
         /* trans: tensor reinterpreted as [cols x rows] */
-        bad = check_matmul(&ti, buf, cols, rows, true, 1);
+        bad = check_matmul(&ti, cols, rows, true, 1);
         if (bad)
             printf("  [%s %llux%llu] matvec trans: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
 
-        bad = check_matmul(&ti, buf, rows, cols, false, 3);
+        bad = check_matmul(&ti, rows, cols, false, 3);
         if (bad)
             printf("  [%s %llux%llu] matmat: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
@@ -295,8 +296,8 @@ MU_TEST(test_cache_hit) {
     for (u64 i = 0; i < n; i++)
         x[i] = (float)((int32_t)rng_next() % 2000001 - 1000000) / 1000000.0f;
 
-    mu_assert_int_eq(0, metal_matvec(&ti, buf, x, y1, 64, 256, false));
-    mu_assert_int_eq(0, metal_matvec(&ti, buf, x, y2, 64, 256, false));
+    mu_assert_int_eq(0, metal_matvec(&ti, x, y1, 64, 256, false));
+    mu_assert_int_eq(0, metal_matvec(&ti, x, y2, 64, 256, false));
     mu_assert_int_eq(0, memcmp(y1, y2, 64 * sizeof(float)));
 
     free(x); free(y1); free(y2); free(buf);
@@ -308,9 +309,9 @@ MU_TEST(test_bad_dims) {
     TensorInfo ti;
     make_tensor(GGUF_TYPE_Q4_K, 256, 144, 64, 256, &buf, &ti);
     float x[256], y[64];
-    mu_assert(metal_matvec(&ti, buf, x, y, 64, 300, false) != 0,
+    mu_assert(metal_matvec(&ti, x, y, 64, 300, false) != 0,
               "oversized cols should fail");
-    mu_assert(metal_matvec(NULL, buf, x, y, 64, 256, false) != 0,
+    mu_assert(metal_matvec(NULL, x, y, 64, 256, false) != 0,
               "NULL tensor should fail");
     free(buf);
 }

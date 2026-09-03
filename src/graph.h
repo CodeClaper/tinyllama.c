@@ -21,6 +21,20 @@ typedef enum {
     OP_ATTENTION,  /* fused per-head scored attention + KV update    */
 } GraphOp;
 
+/* Per-node attention parameters (OP_ATTENTION only).  Owned by the
+ * graph and freed when the graph is destroyed. */
+typedef struct {
+    AttnKvCache *cache;    /* this layer's KV cache  */
+    u32          n_heads;
+    u32          n_kv_head;
+    u32          head_dim;
+    u32          kv_head_dim;
+    u32          ctx_cap;  /* cache capacity = max cached positions */
+    u32          start;    /* first token index written this call  */
+    u32          n_tokens; /* number of tokens in this batch       */
+    float        rope_theta;
+} GraphAttnParam;
+
 typedef struct {
     GGUFType type;
     u64     dim[MAX_DIMS];
@@ -50,7 +64,6 @@ typedef struct {
 
 /* Per-run context: params not carried by the node itself. */
 typedef struct {
-    const u8   *base;       /* mmap base for weight dequant */
     pthreads_t *pool;
     u32         n_head;
 
