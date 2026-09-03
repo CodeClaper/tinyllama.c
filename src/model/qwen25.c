@@ -4,6 +4,7 @@
 #include <string.h>
 #include "model.h"
 #include "../core.h"
+#include "../graph.h"
 #include "../mm.h"
 #include "../slog.h"
 #include "../utils.h"
@@ -716,11 +717,123 @@ static int qwen25_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     return w;
 }
 
+
+/* Build a static execution graph for a fresh batch of n_tokens tokens.
+ * The graph mirrors qwen25_prefill: token embedding, per-layer RMS norm,
+ * Q/K/V projections (+bias, RoPE), causal GQA attention, output projection
+ * and residuals, SwiGLU FFN, final norm and LM head.  Positions are the
+ * batch row indices (0 .. n_tokens-1), so the graph performs a standalone
+ * forward pass that does not consult the session KV cache. */
+static Graph *qwen25_graph_build(Session *s, u32 *token, u32 n_tokens) {
+    ArchConfig *c = &s->cfg;
+    Weights    *w = s->en->weights;
+
+    if (!s || !w || !token || n_tokens == 0 || n_tokens > s->ctx_size) return NULL;
+
+    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+    if (!te || te->ndim < 2) {
+        slog(WARN, "graph_build: missing token embedding");
+        return NULL;
+    }
+
+    Graph *g = graph_new();
+    if (!g) return NULL;
+
+    u32 cur = graph_embed(g, GRAPH_NODE_NONE, te, n_tokens);
+    if (cur == GRAPH_NODE_NONE) goto fail;
+
+    for (u32 l = 0; l < c->n_layer; l++) {
+        LayerWeights *lw = &w->layers[l];
+
+        TensorInfo *t_q = lw->tensors[TENSOR_ATTN_Q];
+        TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
+        TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
+        TensorInfo *t_o = lw->tensors[TENSOR_ATTN_OUT];
+        TensorInfo *t_g = lw->tensors[TENSOR_FFN_GATE];
+        TensorInfo *t_u = lw->tensors[TENSOR_FFN_UP];
+        TensorInfo *t_d = lw->tensors[TENSOR_FFN_DOWN];
+        if (!t_q || !t_k || !t_v || !t_o || !t_g || !t_u || !t_d) {
+            slog(WARN, "graph_build: layer %u missing tensors (fused QKV unsupported)", l);
+            goto fail;
+        }
+
+        /* ---- Attention block ---- */
+        u32 n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
+        if (n == GRAPH_NODE_NONE) goto fail;
+
+        u32 q = graph_mul_mat2(g, n, t_q);
+        u32 k = graph_mul_mat2(g, n, t_k);
+        u32 v = graph_mul_mat2(g, n, t_v);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
+
+        /* Qwen2.5 attention biases (bias=True); skip when absent. */
+        if (lw->tensors[TENSOR_ATTN_Q_BIAS]) {
+            q = graph_bias(g, q, lw->tensors[TENSOR_ATTN_Q_BIAS]);
+            if (q == GRAPH_NODE_NONE) goto fail;
+        }
+        if (lw->tensors[TENSOR_ATTN_K_BIAS]) {
+            k = graph_bias(g, k, lw->tensors[TENSOR_ATTN_K_BIAS]);
+            if (k == GRAPH_NODE_NONE) goto fail;
+        }
+        if (lw->tensors[TENSOR_ATTN_V_BIAS]) {
+            v = graph_bias(g, v, lw->tensors[TENSOR_ATTN_V_BIAS]);
+            if (v == GRAPH_NODE_NONE) goto fail;
+        }
+
+        q = graph_rope(g, q);
+        k = graph_rope(g, k);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
+
+        u32 attn = graph_attn(g, q, k, v);
+        if (attn == GRAPH_NODE_NONE) goto fail;
+
+        u32 o = graph_mul_mat2(g, attn, t_o);
+        if (o == GRAPH_NODE_NONE) goto fail;
+
+        u32 h = graph_binary(g, OP_ADD, cur, o);
+        if (h == GRAPH_NODE_NONE) goto fail;
+
+        /* ---- SwiGLU FFN ---- */
+        u32 hn = graph_rms_norm(g, h, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        if (hn == GRAPH_NODE_NONE) goto fail;
+
+        u32 gate = graph_silu(g, graph_mul_mat2(g, hn, t_g));
+        u32 up   = graph_mul_mat2(g, hn, t_u);
+        if (gate == GRAPH_NODE_NONE || up == GRAPH_NODE_NONE) goto fail;
+
+        u32 mul = graph_binary(g, OP_MUL, gate, up);
+        if (mul == GRAPH_NODE_NONE) goto fail;
+
+        u32 down = graph_mul_mat2(g, mul, t_d);
+        if (down == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_binary(g, OP_ADD, h, down);
+        if (cur == GRAPH_NODE_NONE) goto fail;
+    }
+
+    /* ---- Final norm ---- */
+    TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
+    if (!t_norm) t_norm = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+    u32 fn = graph_rms_norm(g, cur, t_norm);
+    if (fn == GRAPH_NODE_NONE) goto fail;
+
+    /* ---- LM head (tied to token embeddings when absent) ---- */
+    TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+    if (!t_out) t_out = te;
+    if (graph_mul_mat2(g, fn, t_out) == GRAPH_NODE_NONE) goto fail;
+
+    return g;
+fail:
+    graph_free(g);
+    return NULL;
+}
+
 const ArchOps qwen25_ops = {
-    .init    = qwen25_init,
-    .free    = qwen25_free,
-    .prefill = qwen25_prefill,
-    .generate = qwen25_generate,
-    .reset   = qwen25_reset,
-    .decode  = qwen25_decode,
+    .init        = qwen25_init,
+    .free        = qwen25_free,
+    .prefill     = qwen25_prefill,
+    .generate    = qwen25_generate,
+    .reset       = qwen25_reset,
+    .decode      = qwen25_decode,
+    .graph_build = qwen25_graph_build,
 };

@@ -292,14 +292,16 @@ typedef struct {
  * only sees the generic Session type. */
 
 typedef struct Session Session;
+typedef struct Graph Graph;
 
 typedef struct {
-    bool (*init)    (Session *s);
-    void (*free)    (Session *s);
-    bool (*prefill) (Session *s, u32 *tokens, u32 n_tokens, float *logits);
-    bool (*generate)(Session *s, u32 token, float *logits);
-    void (*reset)   (Session *s);
-    int  (*decode)  (const u8 *raw, int raw_len, char *out, int max_len);
+    bool  (*init)                (Session *s);
+    void  (*free)                (Session *s);
+    bool  (*prefill)             (Session *s, u32 *tokens, u32 n_tokens, float *logits);
+    bool  (*generate)            (Session *s, u32 token, float *logits);
+    void  (*reset)               (Session *s);
+    int   (*decode)              (const u8 *raw, int raw_len, char *out, int max_len);
+    Graph* (*graph_build) (Session *s, u32 *token, u32 n_tokens);
 } ArchOps;
 
 struct Session {
@@ -334,4 +336,40 @@ struct Session {
     u32        max_tokens;
 };
 
+#define GRAPH_NODE_NONE ((u32)-1)  /* invalid node handle (builder return) */
+
+typedef enum {
+    OP_INPUT,      /* leaf: caller-seeded value, produced externally */
+    OP_ADD,        /* out = a + b                 (element-wise)     */
+    OP_MUL,        /* out = a * b                 (element-wise)     */
+    OP_MATMUL,     /* out = W @ x                 (mat-vec)          */
+    OP_MATMULARRY, /* out[b] = W @ x[b]           (mat-mat, batch)   */
+    OP_MATMUL_T,   /* out = W^T @ x               (mat-vec)          */
+    OP_RMS_NORM,   /* out = rms(x) * w                               */
+    OP_ROPE_NEOX,  /* out = rope(in)                                 */
+    OP_SOFTMAX,    /* out = softmax(x)  (per-row over last dim)      */
+    OP_SILU,       /* out = silu(x)                                  */
+    OP_EMBED,      /* out = token_embd[token]                        */
+    OP_BIAS,       /* out = x + bias      (per-row over weight)      */
+    OP_ATTN,       /* out = attn(q, k, v) (causal multi-head, GQA)   */
+} GraphOp;
+
+
+typedef struct {
+    GraphOp     op;
+    int         src[4];     /* source node indices; -1 = unused */
+    TensorInfo *weight;
+} GraphNode;
+
+/* Static DAG.  Nodes are appended in build order; because every edge
+ * points strictly backward, build order is also a valid topo order. */
+typedef struct Graph {
+    GraphNode *node;
+    u32        n_node;
+    u32        cap;
+} Graph;
+
+typedef struct {
+
+} GraphPlan;
 #endif

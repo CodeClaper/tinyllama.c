@@ -94,6 +94,16 @@ u32 graph_softmax(Graph *g, u32 src) {
     return node_add(g, OP_SOFTMAX, (int[]){ (int)src, -1, -1, -1 }, NULL);
 }
 
+u32 graph_bias(Graph *g, u32 src, TensorInfo *bias) {
+    if (!g || src >= g->n_node || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
+    return node_add(g, OP_BIAS, (int[]){ (int)src, -1, -1, -1 }, bias);
+}
+
+u32 graph_attn(Graph *g, u32 q, u32 k, u32 v) {
+    if (!g || q >= g->n_node || k >= g->n_node || v >= g->n_node) return GRAPH_NODE_NONE;
+    return node_add(g, OP_ATTN, (int[]){ (int)q, (int)k, (int)v, -1 }, NULL);
+}
+
 u32 graph_rope(Graph *g, u32 src) {
     if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
     return node_add(g, OP_ROPE_NEOX, (int[]){ (int)src, -1, -1, -1 }, NULL);
@@ -174,9 +184,22 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
             case OP_SILU:
             case OP_SOFTMAX:
             case OP_ROPE_NEOX:
-            case OP_RMS_NORM: {
+            case OP_RMS_NORM:
+            case OP_BIAS: {
                 u32 a = nd->src[0];
                 if (a >= cnt) { ok = false; break; }
+                sh = shape[a];
+                break;
+            }
+            case OP_ATTN: {
+                u32 a = nd->src[0], b = nd->src[1], c = nd->src[2];
+                if (a >= cnt || b >= cnt || c >= cnt ||
+                    shape[a].dim0 != shape[b].dim0 ||
+                    shape[a].dim0 != shape[c].dim0) {
+                    slog(WARN, "graph_compute: attention shape mismatch at node %u", i);
+                    ok = false;
+                    break;
+                }
                 sh = shape[a];
                 break;
             }
@@ -273,6 +296,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
 
             float *xa = nd->src[0] >= 0 ? out[nd->src[0]] : NULL;
             float *xb = nd->src[1] >= 0 ? out[nd->src[1]] : NULL;
+            float *xc = nd->src[2] >= 0 ? out[nd->src[2]] : NULL;
 
             switch (nd->op) {
                 case OP_ADD:
@@ -297,6 +321,25 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     u64 rows = sh->elems / ncols;
                     for (u64 r = 0; r < rows; r++)
                         rms_norm(o + r * ncols, xa + r * ncols, nd->weight, (int)ncols, DEFAULT_EPS);
+                    break;
+                }
+                case OP_BIAS: {
+                    u64 ncols = nd->weight ? nd->weight->n_element : 0;
+                    if (ncols == 0 || sh->elems % ncols != 0) {
+                        slog(WARN, "graph_compute: bias shape mismatch at node %u", i);
+                        ok = false;
+                        goto done;
+                    }
+                    float *bias = smalloc(ncols * sizeof(float));
+                    if (!bias) { ok = false; goto done; }
+                    tensor_get_f32_batch(nd->weight, 0, ncols, bias);
+                    u64 rows = sh->elems / ncols;
+                    for (u64 r = 0; r < rows; r++) {
+                        float *dst = o + r * ncols;
+                        for (u64 j = 0; j < ncols; j++)
+                            dst[j] = xa[r * ncols + j] + bias[j];
+                    }
+                    sfree(bias);
                     break;
                 }
                 case OP_MATMUL:
@@ -344,6 +387,49 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     if (!hd) hd = per;
                     for (u64 t = 0; t < n_tok; t++)
                         rope_partial(o + t * per, nh, hd, s->cfg.rope_dim, (u32)t, GRAPH_ROPE_THETA);
+                    break;
+                }
+                case OP_ATTN: {
+                    u32 n_head  = s->cfg.n_head;
+                    u32 n_kv_h  = s->cfg.n_kv_head;
+                    u32 q_hd    = s->cfg.head_dim;
+                    u32 kv_hd   = s->cfg.kv_head_dim;
+                    if (!n_head || !n_kv_h || !q_hd || !kv_hd || n_head % n_kv_h != 0) {
+                        slog(WARN, "graph_compute: attention config invalid at node %u", i);
+                        ok = false;
+                        goto done;
+                    }
+                    u32 gqa   = n_head / n_kv_h;
+                    float scale = 1.0f / sqrtf((float)kv_hd);
+                    u64 n_tok = sh->dim0 ? sh->dim0 : 1;
+                    u32 q_dim = (u32)(sh->elems / n_tok);
+                    u32 kv_dim = (u32)(shape[nd->src[1]].elems / n_tok);
+                    float *scores = smalloc((u64)n_tok * sizeof(float));
+                    if (!scores) { ok = false; goto done; }
+                    memset(o, 0, sh->elems * sizeof(float));
+                    for (u32 h = 0; h < n_head; h++) {
+                        u32 kv_h = h / gqa;
+                        for (u64 qi = 0; qi < n_tok; qi++) {
+                            const float *qh = xa + qi * q_dim + (u64)h * q_hd;
+                            u32 n_keys = (u32)qi + 1;
+                            for (u32 kj = 0; kj < n_keys; kj++) {
+                                const float *kk = xb + (u64)kj * kv_dim + (u64)kv_h * kv_hd;
+                                float s = 0.0f;
+                                for (u32 d = 0; d < kv_hd; d++)
+                                    s += qh[d] * kk[d];
+                                scores[kj] = s * scale;
+                            }
+                            softmax(scores, n_keys);
+                            float *oh = o + qi * q_dim + (u64)h * q_hd;
+                            for (u32 kj = 0; kj < n_keys; kj++) {
+                                const float *vv = xc + (u64)kj * kv_dim + (u64)kv_h * kv_hd;
+                                float st = scores[kj];
+                                for (u32 d = 0; d < kv_hd; d++)
+                                    oh[d] += st * vv[d];
+                            }
+                        }
+                    }
+                    sfree(scores);
                     break;
                 }
                 default:
