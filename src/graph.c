@@ -196,8 +196,8 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                 u32 a = nd->src[0];
                 u64 rows, cols;
                 if (a >= cnt ||
-                    !shape_matvec(shape[a].elems, nd->weight,
-                                  nd->op == OP_MATMUL_T, &rows, &cols)) {
+                    !shape_matvec(shape[a].elems, nd->weight, nd->op == OP_MATMUL_T, &rows, &cols)
+                ) {
                     slog(WARN, "graph_compute: matvec shape mismatch at node %u", i);
                     ok = false;
                     break;
@@ -211,8 +211,8 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                 u32 a = nd->src[0];
                 u64 batch, rows, cols;
                 if (a >= cnt ||
-                    !shape_matmat(shape[a].elems, nd->weight, false,
-                                  &batch, &rows, &cols)) {
+                    !shape_matmat(shape[a].elems, nd->weight, false, &batch, &rows, &cols)
+                ) {
                     slog(WARN, "graph_compute: matmat shape mismatch at node %u", i);
                     ok = false;
                     break;
@@ -296,8 +296,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     if (ncols == 0) ncols = 1;
                     u64 rows = sh->elems / ncols;
                     for (u64 r = 0; r < rows; r++)
-                        rms_norm(o + r * ncols, xa + r * ncols,
-                                 nd->weight, (int)ncols, DEFAULT_EPS);
+                        rms_norm(o + r * ncols, xa + r * ncols, nd->weight, (int)ncols, DEFAULT_EPS);
                     break;
                 }
                 case OP_MATMUL:
