@@ -24,14 +24,6 @@ typedef struct {
     GraphOp     op;
     int         src[4];     /* source node indices; -1 = unused */
     TensorInfo *weight;
-
-    /* OP_ATTENTION only: this layer's KV cache. */
-    AttnKvCache *cache;
-
-    /* Output shape, computed at build time. */
-    u64  out_elems;
-    u32  out_ndim;
-    u64  out_dim[MAX_DIMS];
 } GraphNode;
 
 /* Static DAG.  Nodes are appended in build order; because every edge
