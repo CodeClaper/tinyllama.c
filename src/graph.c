@@ -5,6 +5,9 @@
 #include "mm.h"
 #include "slog.h"
 
+/* RoPE frequency base (models without a metadata override). */
+#define GRAPH_ROPE_THETA 10000.0f
+
 /* ---------------------------------------------------------------- *
  * Operators
  * ---------------------------------------------------------------- */
@@ -23,14 +26,14 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
 
 /* Append a node with a precomputed output shape. */
 static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *weight,
-                    void *param, u64 out_elems, u32 out_ndim, const u64 *out_dim) {
+                    u64 out_elems, u32 out_ndim, const u64 *out_dim) {
     if (!g || out_elems == 0) return GRAPH_NODE_NONE;
     if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
 
     GraphNode *n = &g->node[g->n_node];
     n->op        = op;
     n->weight    = weight;
-    n->param     = param;
+    n->cache     = NULL;
     n->out_elems = out_elems;
     n->out_ndim  = out_ndim;
     for (u32 i = 0; i < MAX_DIMS; i++) n->out_dim[i] = out_dim ? out_dim[i] : 0;
@@ -40,7 +43,7 @@ static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *weight,
 
 u32 graph_input(Graph *g, u32 n_element) {
     u64 dim[1] = { n_element };
-    return node_add(g, OP_INPUT, NULL, NULL, NULL, n_element, 1, dim);
+    return node_add(g, OP_INPUT, NULL, NULL, n_element, 1, dim);
 }
 
 /* mat-vec: rows from weight dims as in mat_vec_mul(). */
@@ -67,7 +70,7 @@ static bool shape_matmat(const GraphNode *a, TensorInfo *w, bool trans,
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     if (!a || !weight) return GRAPH_NODE_NONE;
-    return node_add(g, OP_RMS_NORM, (int[]){src,-1,-1,-1}, weight, NULL,
+    return node_add(g, OP_RMS_NORM, (int[]){src,-1,-1,-1}, weight,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
@@ -77,7 +80,7 @@ u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans) {
     if (!a || !shape_matvec(a, weight, trans, &rows, &cols)) return GRAPH_NODE_NONE;
     u64 dim[1] = { rows };
     return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (int[]){src,-1,-1,-1},
-                    weight, NULL, rows, 1, dim);
+                    weight, rows, 1, dim);
 }
 
 u32 graph_mul_mat2(Graph *g, u32 src, TensorInfo *weight) {
@@ -85,7 +88,7 @@ u32 graph_mul_mat2(Graph *g, u32 src, TensorInfo *weight) {
     u64 batch = 0, rows = 0, cols = 0;
     if (!a || !shape_matmat(a, weight, false, &batch, &rows, &cols)) return GRAPH_NODE_NONE;
     u64 dim[2] = { batch, rows };
-    return node_add(g, OP_MATMULARRY, (int[]){src,-1,-1,-1}, weight, NULL,
+    return node_add(g, OP_MATMULARRY, (int[]){src,-1,-1,-1}, weight,
                     batch * rows, 2, dim);
 }
 
@@ -94,28 +97,28 @@ u32 graph_binary(Graph *g, GraphOp op, u32 a_id, u32 b_id) {
     const GraphNode *a = a_id < g->n_node ? &g->node[a_id] : NULL;
     const GraphNode *b = b_id < g->n_node ? &g->node[b_id] : NULL;
     if (!a || !b || a->out_elems != b->out_elems) return GRAPH_NODE_NONE;
-    return node_add(g, op, (int[]){a_id,b_id,-1,-1}, NULL, NULL,
+    return node_add(g, op, (int[]){a_id,b_id,-1,-1}, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_silu(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     if (!a) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SILU, (int[]){src,-1,-1,-1}, NULL, NULL,
+    return node_add(g, OP_SILU, (int[]){src,-1,-1,-1}, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_softmax(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     if (!a) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SOFTMAX, (int[]){src,-1,-1,-1}, NULL, NULL,
+    return node_add(g, OP_SOFTMAX, (int[]){src,-1,-1,-1}, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
 u32 graph_rope(Graph *g, u32 src) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
     if (!a) return GRAPH_NODE_NONE;
-    return node_add(g, OP_ROPE_NEOX, (int[]){src,-1,-1,-1}, NULL, NULL,
+    return node_add(g, OP_ROPE_NEOX, (int[]){src,-1,-1,-1}, NULL,
                     a->out_elems, a->out_ndim, a->out_dim);
 }
 
@@ -124,22 +127,22 @@ u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
     if (!tok || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
     u64 n_embd = weight->dim[weight->ndim - 1];
     u64 dim[2] = { n_tokens, n_embd };
-    return node_add(g, OP_EMBED, (int[]){token_id,-1,-1,-1}, weight, NULL,
+    return node_add(g, OP_EMBED, (int[]){token_id,-1,-1,-1}, weight,
                     n_tokens * n_embd, 2, dim);
 }
 
-u32 graph_attention(Graph *g, u32 q, u32 k, u32 v, GraphAttnParam *param) {
-    if (!param) return GRAPH_NODE_NONE;
+u32 graph_attention(Graph *g, u32 q, u32 k, u32 v, AttnKvCache *cache) {
     const GraphNode *nq = q < g->n_node ? &g->node[q] : NULL;
     const GraphNode *nk = k < g->n_node ? &g->node[k] : NULL;
     const GraphNode *nv = v < g->n_node ? &g->node[v] : NULL;
     if (!nq || !nk || !nv) return GRAPH_NODE_NONE;
 
     /* q output: [batch, n_head * head_dim]; attn matches this shape. */
-    u64 batch = param->n_tokens;
-    u64 elems = batch * (u64)param->n_heads * param->head_dim;
-    u64 dim[2] = { batch, (u64)param->n_heads * param->head_dim };
-    return node_add(g, OP_ATTENTION, (int[]){q,k,v,-1}, NULL, param, elems, 2, dim);
+    u64 batch = nq->out_dim[0];
+    u64 elems = batch * nq->out_dim[1];
+    u32 id = node_add(g, OP_ATTENTION, (int[]){q,k,v,-1}, NULL, elems, 2, nq->out_dim);
+    if (id != GRAPH_NODE_NONE) g->node[id].cache = cache;
+    return id;
 }
 
 /* ---------------------------------------------------------------- *
@@ -152,14 +155,11 @@ Graph *graph_new(void) {
 
 void graph_free(Graph *g) {
     if (!g) return;
-    for (u32 i = 0; i < g->n_node; i++)
-        sfree(g->node[i].param);
     sfree(g->node);
     sfree(g);
 }
 
-Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
-                   u32 n_tokens, u32 *logits_out) {
+Graph *graph_build(Session *s, const u32 *tokens, u32 n_tokens, u32 *logits_out) {
     if (!s || !s->en || !s->en->weights || n_tokens == 0) return NULL;
     Weights  *w = s->en->weights;
     ArchConfig *c = &s->cfg;
@@ -174,9 +174,6 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
     u32 input = graph_input(g, n_tokens);
 
     u32 hid = graph_embed(g, input, w->tensors[TENSOR_TOKEN_EMBD], n_tokens);
-
-    /* start = first new token's position in the cache. */
-    u32 start = s->n_tokens;
 
     for (u32 li = 0; li < c->n_layer; li++) {
         LayerWeights *lw = &w->layers[li];
@@ -199,19 +196,7 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
         u32 k = graph_mul_mat2(g, hn, wk);
         u32 v = graph_mul_mat2(g, hn, wv);
 
-        GraphAttnParam *ap = smalloc(sizeof(*ap));
-        memset(ap, 0, sizeof(*ap));
-        ap->cache = &s->cache.std[li];
-        ap->n_heads = c->n_head ? c->n_head : c->n_embd / (c->head_dim ? c->head_dim : 1);
-        ap->n_kv_head = c->n_kv_head;
-        ap->head_dim = c->head_dim;
-        ap->kv_head_dim = c->kv_head_dim;
-        ap->ctx_cap = s->ctx_size;
-        ap->start = start;
-        ap->n_tokens = n_tokens;
-        ap->rope_theta = 10000.0f;
-
-        u32 a = graph_attention(g, q, k, v, ap);
+        u32 a = graph_attention(g, q, k, v, &s->cache.std[li]);
         if (a == GRAPH_NODE_NONE) { graph_free(g); return NULL; }
 
         u32 ao = graph_mul_mat2(g, a, wo);
@@ -250,7 +235,6 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
     u32 logits = graph_mul_mat2(g, hn, out_w);
     if (logits_out) *logits_out = logits;
 
-    (void)mode;
     (void)tokens;
     return g;
 }
@@ -264,9 +248,9 @@ static void per_row_softmax(float *x, u64 rows, u64 cols) {
         softmax(x + r * cols, (u32)cols);
 }
 
-bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
-    if (!g || !ctx) {
-        slog(WARN, "graph_compute: missing graph / ctx");
+bool graph_compute(Graph *g, const u32 *tokens, Session *s) {
+    if (!g || !s) {
+        slog(WARN, "graph_compute: missing graph / session");
         return false;
     }
     u32 cnt = g->n_node;
@@ -323,7 +307,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                 u64 rows = nd->out_elems / ncols;
                 for (u64 r = 0; r < rows; r++)
                     rms_norm(o + r * ncols, xa + r * ncols,
-                             nd->weight, (int)ncols, ctx->eps);
+                             nd->weight, (int)ncols, DEFAULT_EPS);
                 break;
             }
             case OP_MATMUL:
@@ -336,7 +320,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                     ok = false;
                     goto done;
                 }
-                mat_vec_mul(o, nd->weight, xa, rows, cols, trans, ctx->pool);
+                mat_vec_mul(o, nd->weight, xa, rows, cols, trans, s->pthreads);
                 break;
             }
             case OP_MATMULARRY: {
@@ -347,7 +331,7 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                     ok = false;
                     goto done;
                 }
-                mat_mat_mul(o, nd->weight, xa, batch, rows, cols, false, ctx->pool);
+                mat_mat_mul(o, nd->weight, xa, batch, rows, cols, false, s->pthreads);
                 break;
             }
             case OP_EMBED: {
@@ -366,19 +350,19 @@ bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
                 memcpy(o, xa, nd->out_elems * sizeof(float));
                 u64 n_tok = nd->out_dim[0];
                 u32 per = (u32)(nd->out_elems / n_tok);
-                u32 nh = (ctx->head_dim && (u64)ctx->head_dim) ? per / ctx->head_dim : 1;
-                u32 hd = ctx->head_dim ? ctx->head_dim : per;
+                u32 hd = s->cfg.head_dim;
+                u32 nh = hd ? per / hd : 1;
+                if (!hd) hd = per;
                 for (u64 t = 0; t < n_tok; t++)
-                    rope_partial(o + t * per, nh, hd, ctx->rope_dim,
-                                 (u32)t, ctx->theta_base);
+                    rope_partial(o + t * per, nh, hd, s->cfg.rope_dim,
+                                 (u32)t, GRAPH_ROPE_THETA);
                 break;
             }
             case OP_ATTENTION: {
-                GraphAttnParam *ap = nd->param;
                 float *q = out[nd->src[0]];
                 float *k = out[nd->src[1]];
                 float *v = out[nd->src[2]];
-                if (!graph_attention_run(ap, q, k, v, o, ctx)) {
+                if (!graph_attention_run(nd, q, k, v, o, s)) {
                     slog(WARN, "graph_compute: attention failed at node %u", i);
                     ok = false;
                     goto done;
@@ -399,17 +383,21 @@ done:
 }
 
 /* Fused per-head causal attention + KV-cache update (OP_ATTENTION). */
-bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
-                         const float *v, float *out, const GraphRunCtx *ctx) {
-    u32 n_head = p->n_heads, n_kv = p->n_kv_head;
-    u32 hd = p->head_dim, kvhd = p->kv_head_dim;
-    u32 n_tok = p->n_tokens, start = p->start, cap = p->ctx_cap;
-    if (!p->cache || hd == 0 || kvhd == 0) return false;
-    if (n_kv == 0) n_kv = n_head;
-    u32 group = n_head / n_kv;
-    float theta = ctx->theta_base ? ctx->theta_base : p->rope_theta;
+bool graph_attention_run(GraphNode *nd, float *q, const float *k,
+                         const float *v, float *out, Session *s) {
+    ArchConfig *c = &s->cfg;
+    u32 n_head = c->n_head ? c->n_head : c->n_embd / (c->head_dim ? c->head_dim : 1);
+    u32 n_kv = c->n_kv_head ? c->n_kv_head : n_head;
+    u32 hd = c->head_dim, kvhd = c->kv_head_dim;
+    u32 n_tok = (u32)nd->out_dim[0];
+    u32 start = s->n_tokens;
 
-    AttnKvCache *kc = p->cache;
+    AttnKvCache *kc = nd->cache;
+    if (!kc || hd == 0 || kvhd == 0) return false;
+    u32 cap = kc->cap;
+    u32 group = n_head / n_kv;
+    float theta = GRAPH_ROPE_THETA;
+
     u32 pos_stride = n_kv * kvhd; /* per-position K/V block */
 
     /* 1) write rope-applied K and raw V into the cache. */
@@ -420,8 +408,8 @@ bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
             const float *kv = k + t * pos_stride + h * kvhd;
             float *dstk = kc->k + (u64)pos * pos_stride + h * kvhd;
             memcpy(dstk, kv, kvhd * sizeof(float));
-            if (ctx->rope_dim)
-                rope_partial(dstk, 1, kvhd, ctx->rope_dim, pos, theta);
+            if (c->rope_dim)
+                rope_partial(dstk, 1, kvhd, c->rope_dim, pos, theta);
             else
                 rope_neox(dstk, 1, kvhd, pos, theta);
             const float *kv2 = v + t * pos_stride + h * kvhd;
@@ -439,8 +427,8 @@ bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
         u32 pos = start + t;
         for (u32 h = 0; h < n_head; h++) {
             float *qh = (float *)(q + (u64)t * n_head * hd + h * hd);
-            if (ctx->rope_dim)
-                rope_partial(qh, 1, hd, ctx->rope_dim, pos, theta);
+            if (c->rope_dim)
+                rope_partial(qh, 1, hd, c->rope_dim, pos, theta);
             else
                 rope_neox(qh, 1, hd, pos, theta);
 
