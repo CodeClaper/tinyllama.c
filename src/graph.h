@@ -11,7 +11,7 @@ typedef enum {
     OP_ADD,        /* out = a + b                 (element-wise)     */
     OP_MUL,        /* out = a * b                 (element-wise)     */
     OP_MATMUL,     /* out = W @ x                 (mat-vec)          */
-    OP_MATMUL2,    /* out[b] = W @ x[b]           (mat-mat, batch)   */
+    OP_MATMULARRY, /* out[b] = W @ x[b]           (mat-mat, batch)   */
     OP_MATMUL_T,   /* out = W^T @ x               (mat-vec)          */
     OP_RMS_NORM,   /* out = rms(x) * w                               */
     OP_ROPE_NEOX,  /* out = rope(in)                                 */
@@ -21,19 +21,12 @@ typedef enum {
     OP_ATTENTION,  /* fused per-head scored attention + KV update    */
 } GraphOp;
 
-/* Per-node attention parameters (OP_ATTENTION only).  Owned by the
- * graph and freed when the graph is destroyed. */
 typedef struct {
-    AttnKvCache *cache;    /* this layer's KV cache  */
-    u32          n_heads;
-    u32          n_kv_head;
-    u32          head_dim;
-    u32          kv_head_dim;
-    u32          ctx_cap;  /* cache capacity = max cached positions */
-    u32          start;    /* first token index written this call  */
-    u32          n_tokens; /* number of tokens in this batch       */
-    float        rope_theta;
-} GraphAttnParam;
+    GGUFType type;
+    u64     dim[MAX_DIMS];
+    void    *data;
+} GraphTensor;
+
 
 typedef struct {
     GraphOp     op;
@@ -54,14 +47,6 @@ typedef struct {
     u32        n_node;
     u32        cap;
 } Graph;
-
-/* Execution plan: one contiguous workspace + per-node output offsets.
- * Blocks are assigned by liveness so temporaries share memory. */
-typedef struct {
-    u64  work_size;
-    u64 *off;        /* [n_node] byte offset of each node's output */
-    u32  n_threads;
-} GraphPlan;
 
 /* Per-run context: params not carried by the node itself. */
 typedef struct {
@@ -102,24 +87,17 @@ u32 graph_attention(Graph *g, u32 q, u32 k, u32 v, GraphAttnParam *param);
 
 /* Build a whole forward pass (embed -> layers -> logits).  Returns a
  * graph whose single OP_INPUT leaf is the token-id buffer (n_tokens
- * u32 values); seed it before compute via graph_seed().  On success
- * *leaf_out is the token-id node id and *logits_out the logits node. */
-Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
-                   u32 n_tokens, u32 *leaf_out, u32 *logits_out);
+ * u32 values), seeded from `tokens` by graph_compute().  On success
+ * *logits_out is the logits node. */
+Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens, u32 n_tokens, u32 *logits_out);
 
-/* Plan: size a single workspace and assign output offsets. */
-GraphPlan *graph_plan(const Graph *g, int n_threads);
-void       graph_plan_free(GraphPlan *p);
-
-/* Seed an OP_INPUT leaf with n u32 token ids (stored as float). */
-void graph_seed(const GraphPlan *p, u8 *work, u32 leaf, const u32 *data, u64 n);
-
-/* Execute the planned graph into the workspace. */
-bool graph_compute(Graph *g, const GraphPlan *p, u8 *work, const GraphRunCtx *ctx);
+/* Execute the graph: allocate one output buffer per node, seed OP_INPUT
+ * leaves from `tokens`, run every node in build order, then release
+ * the buffers. */
+bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx);
 
 /* Fused per-head causal attention + KV-cache update (used by an
  * OP_ATTENTION node; also callable directly). */
-bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
-                         const float *v, float *out, const GraphRunCtx *ctx);
+bool graph_attention_run(GraphAttnParam *p, float *q, const float *k, const float *v, float *out, const GraphRunCtx *ctx);
 
 #endif

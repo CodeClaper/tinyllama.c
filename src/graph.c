@@ -5,9 +5,9 @@
 #include "mm.h"
 #include "slog.h"
 
-/* Attention kernel (defined at the bottom); used by graph_compute. */
-bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
-                         const float *v, float *out, const GraphRunCtx *ctx);
+/* ---------------------------------------------------------------- *
+ * Operators
+ * ---------------------------------------------------------------- */
 
 /* Grow a dynamic array, doubling capacity when full. */
 static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
@@ -38,30 +38,10 @@ static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *weight,
     return g->n_node++;
 }
 
-Graph *graph_new(void) {
-    return scalloc(1, sizeof(Graph));
-}
-
-void graph_free(Graph *g) {
-    if (!g) return;
-    for (u32 i = 0; i < g->n_node; i++)
-        sfree(g->node[i].param);
-    sfree(g->node);
-    sfree(g);
-}
-
-/* ---------------------------------------------------------------- *
- * Leaf / input
- * ---------------------------------------------------------------- */
-
 u32 graph_input(Graph *g, u32 n_element) {
     u64 dim[1] = { n_element };
     return node_add(g, OP_INPUT, NULL, NULL, NULL, n_element, 1, dim);
 }
-
-/* ---------------------------------------------------------------- *
- * Shape helpers
- * ---------------------------------------------------------------- */
 
 /* mat-vec: rows from weight dims as in mat_vec_mul(). */
 static bool shape_matvec(const GraphNode *a, TensorInfo *w, bool trans,
@@ -83,10 +63,6 @@ static bool shape_matmat(const GraphNode *a, TensorInfo *w, bool trans,
     *batch = a->out_elems / *cols;
     return true;
 }
-
-/* ---------------------------------------------------------------- *
- * Op builders
- * ---------------------------------------------------------------- */
 
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
     const GraphNode *a = src < g->n_node ? &g->node[src] : NULL;
@@ -167,11 +143,23 @@ u32 graph_attention(Graph *g, u32 q, u32 k, u32 v, GraphAttnParam *param) {
 }
 
 /* ---------------------------------------------------------------- *
- * Forward-pass builder
+ * Graph creation
  * ---------------------------------------------------------------- */
 
+Graph *graph_new(void) {
+    return scalloc(1, sizeof(Graph));
+}
+
+void graph_free(Graph *g) {
+    if (!g) return;
+    for (u32 i = 0; i < g->n_node; i++)
+        sfree(g->node[i].param);
+    sfree(g->node);
+    sfree(g);
+}
+
 Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
-                   u32 n_tokens, u32 *leaf_out, u32 *logits_out) {
+                   u32 n_tokens, u32 *logits_out) {
     if (!s || !s->en || !s->en->weights || n_tokens == 0) return NULL;
     Weights  *w = s->en->weights;
     ArchConfig *c = &s->cfg;
@@ -184,7 +172,6 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
     Graph *g = graph_new();
 
     u32 input = graph_input(g, n_tokens);
-    if (leaf_out) *leaf_out = input;
 
     u32 hid = graph_embed(g, input, w->tensors[TENSOR_TOKEN_EMBD], n_tokens);
 
@@ -264,99 +251,12 @@ Graph *graph_build(Session *s, GraphMode mode, const u32 *tokens,
     if (logits_out) *logits_out = logits;
 
     (void)mode;
+    (void)tokens;
     return g;
 }
 
 /* ---------------------------------------------------------------- *
- * Plan: liveness-based single workspace + offset table
- * ---------------------------------------------------------------- */
-
-typedef struct { u64 off, size; } Block;
-
-GraphPlan *graph_plan(const Graph *g, int n_threads) {
-    if (!g || g->n_node == 0) return NULL;
-    u32 n = g->n_node;
-
-    GraphPlan *p = scalloc(1, sizeof(*p));
-    p->off = scalloc(n, sizeof(u64));
-    p->n_threads = n_threads > 0 ? n_threads : 1;
-
-    int *remaining = scalloc(n, sizeof(int));
-    int *consumers = scalloc(n, sizeof(int));
-
-    for (u32 i = 0; i < n; i++)
-        for (int s = 0; s < 4; s++)
-            if (g->node[i].src[s] >= 0 && (u32)g->node[i].src[s] < n)
-                consumers[g->node[i].src[s]]++;
-    memcpy(remaining, consumers, n * sizeof(int));
-
-    /* free blocks (released buffers) */
-    Block *free = smalloc((n + 1) * sizeof(Block));
-    u32 nf = 0;
-    u64 cur = 0; /* bump pointer (bytes) */
-
-    for (u32 i = 0; i < n; i++) {
-        u64 sz = g->node[i].out_elems * sizeof(float);
-
-        /* try to reuse a released block (first-fit) */
-        u32 best = 0;
-        bool found = false;
-        for (u32 f = 0; f < nf; f++) {
-            if (free[f].size >= sz && (!found || free[f].size < free[best].size)) {
-                best = f;
-                found = true;
-            }
-        }
-        if (found) {
-            p->off[i] = free[best].off;
-            if (free[best].size > sz) {
-                free[best].off += sz;
-                free[best].size -= sz;
-            } else {
-                /* remove block */
-                free[best] = free[--nf];
-            }
-        } else {
-            /* bump, keeping 16-byte alignment for SIMD kernels */
-            cur = (cur + 15) & ~15ULL;
-            p->off[i] = cur;
-            cur += sz;
-        }
-
-        /* release sources still waiting on this node */
-        for (int s = 0; s < 4; s++) {
-            int src = g->node[i].src[s];
-            if (src < 0 || (u32)src >= n) continue;
-            if (--remaining[src] == 0) {
-                free[nf].off = p->off[src];
-                free[nf].size = g->node[src].out_elems * sizeof(float);
-                nf++;
-            }
-        }
-    }
-    p->work_size = cur;
-
-    sfree(free);
-    sfree(consumers);
-    sfree(remaining);
-    return p;
-}
-
-void graph_plan_free(GraphPlan *p) {
-    if (!p) return;
-    sfree(p->off);
-    sfree(p);
-}
-
-void graph_seed(const GraphPlan *p, u8 *work, u32 leaf, const u32 *data, u64 n) {
-    if (!p || !work || n == 0 || !data) return;
-    float *dst = (float *)(work + p->off[leaf]);
-    for (u64 i = 0; i < n; i++)
-        dst[i] = (float)data[i];
-}
-
-/* ---------------------------------------------------------------- *
- * Compute
+ * Graph execution
  * ---------------------------------------------------------------- */
 
 static void per_row_softmax(float *x, u64 rows, u64 cols) {
@@ -364,116 +264,141 @@ static void per_row_softmax(float *x, u64 rows, u64 cols) {
         softmax(x + r * cols, (u32)cols);
 }
 
-bool graph_compute(Graph *g, const GraphPlan *p, u8 *work, const GraphRunCtx *ctx) {
-    if (!g || !p || !work || !ctx || !ctx->base) {
-        slog(WARN, "graph_compute: missing graph / plan / work / base");
+bool graph_compute(Graph *g, const u32 *tokens, const GraphRunCtx *ctx) {
+    if (!g || !ctx || !ctx->base) {
+        slog(WARN, "graph_compute: missing graph / ctx / base");
         return false;
     }
-    for (u32 i = 0; i < g->n_node; i++) {
-        GraphNode *n = &g->node[i];
-        float *out = (float *)(work + p->off[i]);
+    u32 cnt = g->n_node;
 
-        if (n->op == OP_INPUT) continue; /* seeded externally */
+    bool ok = true;
 
-        float *xa = NULL, *xb = NULL;
-        if (n->src[0] >= 0) xa = (float *)(work + p->off[n->src[0]]);
-        if (n->src[1] >= 0) xb = (float *)(work + p->off[n->src[1]]);
+    /* One output buffer per node, all released at the end. */
+    float **out = scalloc(cnt, sizeof(float *));
+    for (u32 i = 0; i < cnt; i++)
+        out[i] = smalloc(g->node[i].out_elems * sizeof(float));
 
-        switch (n->op) {
+    /* Seed OP_INPUT leaves with token ids (stored as float). */
+    for (u32 i = 0; i < cnt; i++) {
+        if (g->node[i].op != OP_INPUT) continue;
+        if (!tokens) {
+            slog(WARN, "graph_compute: OP_INPUT node requires tokens");
+            ok = false;
+            goto done;
+        }
+        float *dst = out[i];
+        for (u64 j = 0; j < g->node[i].out_elems; j++)
+            dst[j] = (float)tokens[j];
+    }
+
+    for (u32 i = 0; i < cnt; i++) {
+        GraphNode *nd = &g->node[i];
+        float *o = out[i];
+
+        if (nd->op == OP_INPUT) continue; /* seeded above */
+
+        float *xa = nd->src[0] >= 0 ? out[nd->src[0]] : NULL;
+        float *xb = nd->src[1] >= 0 ? out[nd->src[1]] : NULL;
+
+        switch (nd->op) {
             case OP_ADD:
             case OP_MUL:
-                for (u64 j = 0; j < n->out_elems; j++)
-                    out[j] = (n->op == OP_ADD) ? xa[j] + xb[j] : xa[j] * xb[j];
+                for (u64 j = 0; j < nd->out_elems; j++)
+                    o[j] = (nd->op == OP_ADD) ? xa[j] + xb[j] : xa[j] * xb[j];
                 break;
             case OP_SILU:
-                memcpy(out, xa, n->out_elems * sizeof(float));
-                silu(out, (int)n->out_elems);
+                memcpy(o, xa, nd->out_elems * sizeof(float));
+                silu(o, (int)nd->out_elems);
                 break;
             case OP_SOFTMAX: {
-                memcpy(out, xa, n->out_elems * sizeof(float));
-                u64 cols = n->out_ndim > 0 ? n->out_dim[n->out_ndim - 1] : 1;
-                u64 rows = cols ? n->out_elems / cols : 1;
-                per_row_softmax(out, rows, cols);
+                memcpy(o, xa, nd->out_elems * sizeof(float));
+                u64 cols = nd->out_ndim > 0 ? nd->out_dim[nd->out_ndim - 1] : 1;
+                u64 rows = cols ? nd->out_elems / cols : 1;
+                per_row_softmax(o, rows, cols);
                 break;
             }
             case OP_RMS_NORM: {
-                u64 ncols = n->weight ? n->weight->dim[0] : 1;
+                u64 ncols = nd->weight ? nd->weight->dim[0] : 1;
                 if (ncols == 0) ncols = 1;
-                u64 rows = n->out_elems / ncols;
+                u64 rows = nd->out_elems / ncols;
                 for (u64 r = 0; r < rows; r++)
-                    rms_norm(out + r * ncols, xa + r * ncols,
-                             n->weight, ctx->base, (int)ncols, ctx->eps);
+                    rms_norm(o + r * ncols, xa + r * ncols,
+                             nd->weight, ctx->base, (int)ncols, ctx->eps);
                 break;
             }
             case OP_MATMUL:
             case OP_MATMUL_T: {
                 u64 rows, cols;
-                bool trans = n->op == OP_MATMUL_T;
-                const GraphNode *an = &g->node[n->src[0]];
-                if (!shape_matvec(an, n->weight, trans, &rows, &cols)) {
+                bool trans = nd->op == OP_MATMUL_T;
+                const GraphNode *an = &g->node[nd->src[0]];
+                if (!shape_matvec(an, nd->weight, trans, &rows, &cols)) {
                     slog(WARN, "graph_compute: matvec shape mismatch at node %u", i);
-                    return false;
+                    ok = false;
+                    goto done;
                 }
-                mat_vec_mul(out, n->weight, ctx->base, xa, rows, cols, trans, ctx->pool);
+                mat_vec_mul(o, nd->weight, ctx->base, xa, rows, cols, trans, ctx->pool);
                 break;
             }
             case OP_MATMUL2: {
                 u64 batch, rows, cols;
-                const GraphNode *an = &g->node[n->src[0]];
-                if (!shape_matmat(an, n->weight, false, &batch, &rows, &cols)) {
+                const GraphNode *an = &g->node[nd->src[0]];
+                if (!shape_matmat(an, nd->weight, false, &batch, &rows, &cols)) {
                     slog(WARN, "graph_compute: matmat shape mismatch at node %u", i);
-                    return false;
+                    ok = false;
+                    goto done;
                 }
-                mat_mat_mul(out, n->weight, ctx->base, xa, batch, rows, cols, false, ctx->pool);
+                mat_mat_mul(o, nd->weight, ctx->base, xa, batch, rows, cols, false, ctx->pool);
                 break;
             }
             case OP_EMBED: {
-                float *tok = (float *)(work + p->off[n->src[0]]);
-                u64 n_embd = n->weight->dim[n->weight->ndim - 1];
-                u64 n_tok = n->out_elems / n_embd;
+                u64 n_embd = nd->weight->dim[nd->weight->ndim - 1];
+                u64 n_tok = nd->out_elems / n_embd;
                 for (u64 t = 0; t < n_tok; t++) {
-                    i64 id = (i64)tok[t];
-                    float *dst = out + t * n_embd;
+                    i64 id = (i64)xa[t];
+                    float *dst = o + t * n_embd;
                     if (id < 0) { memset(dst, 0, n_embd * sizeof(float)); continue; }
                     for (u64 j = 0; j < n_embd; j++)
-                        dst[j] = tensor_get_f32(n->weight, ctx->base, (u64)id * n_embd + j);
+                        dst[j] = tensor_get_f32(nd->weight, ctx->base, (u64)id * n_embd + j);
                 }
                 break;
             }
             case OP_ROPE_NEOX: {
-                memcpy(out, xa, n->out_elems * sizeof(float));
-                u64 n_tok = n->out_dim[0];
-                u32 per = (u32)(n->out_elems / n_tok);
+                memcpy(o, xa, nd->out_elems * sizeof(float));
+                u64 n_tok = nd->out_dim[0];
+                u32 per = (u32)(nd->out_elems / n_tok);
                 u32 nh = (ctx->head_dim && (u64)ctx->head_dim) ? per / ctx->head_dim : 1;
                 u32 hd = ctx->head_dim ? ctx->head_dim : per;
                 for (u64 t = 0; t < n_tok; t++)
-                    rope_partial(out + t * per, nh, hd, ctx->rope_dim,
+                    rope_partial(o + t * per, nh, hd, ctx->rope_dim,
                                  (u32)t, ctx->theta_base);
                 break;
             }
             case OP_ATTENTION: {
-                GraphAttnParam *ap = n->param;
-                float *q = (float *)(work + p->off[(u32)n->src[0]]);
-                float *k = (float *)(work + p->off[(u32)n->src[1]]);
-                float *v = (float *)(work + p->off[(u32)n->src[2]]);
-                if (!graph_attention_run(ap, q, k, v, out, ctx)) {
+                GraphAttnParam *ap = nd->param;
+                float *q = out[nd->src[0]];
+                float *k = out[nd->src[1]];
+                float *v = out[nd->src[2]];
+                if (!graph_attention_run(ap, q, k, v, o, ctx)) {
                     slog(WARN, "graph_compute: attention failed at node %u", i);
-                    return false;
+                    ok = false;
+                    goto done;
                 }
                 break;
             }
             default:
-                slog(WARN, "graph_compute: node %u unknown op %d", i, n->op);
-                return false;
+                slog(WARN, "graph_compute: node %u unknown op %d", i, nd->op);
+                ok = false;
+                goto done;
         }
     }
-    return true;
+
+done:
+    for (u32 i = 0; i < cnt; i++) sfree(out[i]);
+    sfree(out);
+    return ok;
 }
 
-/* ---------------------------------------------------------------- *
- * Attention kernel (fused, GQA, causal, + KV cache update)
- * ---------------------------------------------------------------- */
-
+/* Fused per-head causal attention + KV-cache update (OP_ATTENTION). */
 bool graph_attention_run(GraphAttnParam *p, float *q, const float *k,
                          const float *v, float *out, const GraphRunCtx *ctx) {
     u32 n_head = p->n_heads, n_kv = p->n_kv_head;
