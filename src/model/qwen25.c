@@ -102,6 +102,18 @@ static bool qwen25_init(Session *s) {
     return true;
 }
 
+/* Build the input graph for tokens[0..n_tokens) and run it.
+ * Falls back silently to the manual forward path if the graph
+ * cannot be built (e.g. fused-QKV models, missing tensors). */
+static Graph *qwen25_graph_build(Session *s, u32 *token, u32 n_tokens);
+static void qwen25_graph_run(Session *s, u32 *tokens, u32 n_tokens) {
+    Graph *g = qwen25_graph_build(s, tokens, n_tokens);
+    if (!g) return;
+    GraphPlan plan = graph_plan(g);
+    graph_compute(g, &plan, tokens, s);
+    graph_free(g);
+}
+
 static bool qwen25_generate(Session *s, u32 token, float *logits) {
     Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c  = &s->cfg;
@@ -119,6 +131,9 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
     u32 gqa_ratio   = n_head / n_kv_head;
     float scale     = 1.0f / sqrtf((float)kv_head_dim);
     float eps       = DEFAULT_EPS;
+
+    /* Enter: build the input graph (single token) before the manual path. */
+    qwen25_graph_run(s, &token, 1);
 
     /* ---- 1. Token embedding ---- */
     {
@@ -302,6 +317,9 @@ static bool qwen25_generate(Session *s, u32 token, float *logits) {
 static bool qwen25_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
     if (n_tokens == 0) return true;
     if (n_tokens == 1) return qwen25_generate(s, tokens[0], logits);
+
+    /* Enter: build the input graph (tokens + n_tokens) before the manual path. */
+    qwen25_graph_run(s, tokens, n_tokens);
 
     Qwen25Workspace *ws  = (Qwen25Workspace *)s->arch_data;
     ArchConfig     *c    = &s->cfg;
@@ -739,7 +757,11 @@ static Graph *qwen25_graph_build(Session *s, u32 *token, u32 n_tokens) {
     Graph *g = graph_new();
     if (!g) return NULL;
 
-    u32 cur = graph_embed(g, GRAPH_NODE_NONE, te, n_tokens);
+/* Input tokens → OP_INPUT leaf (shape only; values bound at compute). */
+    u32 in = graph_input(g, n_tokens);
+    if (in == GRAPH_NODE_NONE) goto fail;
+
+    u32 cur = graph_embed(g, in, te, n_tokens);
     if (cur == GRAPH_NODE_NONE) goto fail;
 
     for (u32 l = 0; l < c->n_layer; l++) {

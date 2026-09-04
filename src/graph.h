@@ -7,6 +7,7 @@
 Graph *graph_new(void);
 void graph_free(Graph *g);
 /* Op builders: append a node, return its index (a tensor handle). */
+u32 graph_input(Graph *g, u32 n_tokens);
 u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens);
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight);
 u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans);

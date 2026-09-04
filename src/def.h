@@ -357,9 +357,15 @@ typedef enum {
 
 typedef struct {
     GraphOp     op;
-    int         ne[4];     /* source node indices; -1 = unused */
-    TensorInfo *src[4];
+    int         src[4];                     /* source node indices; -1 = unused */
+    TensorInfo *weights[4];
     u32         params[64 / sizeof(u32)];
+    i64         ne[MAX_DIMS];               /* number of elements */
+    i64         nb[MAX_DIMS];               /* stride in bytes:
+                                               nb[0] = ggml_type_size(type)
+                                               nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type)) + padding
+                                               nb[i] = nb[i-1] * ne[i-1] */
+    void       *data;
 } GraphNode;
 
 /* Static DAG.  Nodes are appended in build order; because every edge

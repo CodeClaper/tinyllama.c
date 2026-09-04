@@ -25,44 +25,41 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
 }
 
 /* Append a node; output shapes are derived at execution time.
- * ne[]  = source node indices, src[] = per-source weight tensors,
+ * src[]   = source node indices, weights[] = per-source weight tensors,
  * params[] = op-specific parameters (unused ops may pass NULL). */
-static u32 node_add(Graph *g, GraphOp op, const int *ne, TensorInfo *const *src, const u32 *params) {
+static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *weights, const u32 *params) {
     if (!g) return GRAPH_NODE_NONE;
     if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
     GraphNode *n = &g->node[g->n_node];
     n->op = op;
     for (int i = 0; i < 4; i++) {
-        n->ne[i]  = ne ? ne[i] : -1;
-        n->src[i] = src ? src[i] : NULL;
+        n->src[i]     = src ? src[i] : -1;
+        n->weights[i] = weights ? weights[i] : NULL;
     }
     if (params) memcpy(n->params, params, sizeof(n->params));
     return g->n_node++;
 }
 
-/* Leaf input: carries a run of token ids; width stored in ne[0]. */
-static u32 graph_input(Graph *g, u32 n_element) {
-    if (!g || n_element == 0) return GRAPH_NODE_NONE;
-    return node_add(g, OP_INPUT, (int[]){ (int)n_element, -1, -1, -1 }, NULL, NULL);
-}
+/* Leaf input: carries a run of token ids.  Shape is recorded in the node
+ * itself (ne[0] = n_tokens, nb[0] = element size); the data buffer is
+ * allocated empty at build time and filled by graph_compute() at
+ * execution time with the concrete tokens. */
+u32 graph_input(Graph *g, u32 n_tokens) {
+    if (!g || n_tokens == 0) return GRAPH_NODE_NONE;
 
-/* mat-vec: rows from weight dims. */
-static bool shape_matvec(u64 a_elems, TensorInfo *w, bool trans, u64 *rows, u64 *cols) {
-    if (!w || w->ndim < 2) return false;
-    if (trans) { *rows = w->dim[1]; *cols = w->dim[0]; }
-    else       { *rows = w->dim[0]; *cols = w->dim[1]; }
-    if (a_elems != *cols) return false;
-    return true;
-}
+    void *data = scalloc(n_tokens, sizeof(u32));   /* filled at compute time */
+    if (!data) return GRAPH_NODE_NONE;
 
-/* mat-mat: batch is derived from src elems / cols. */
-static bool shape_matmat(u64 a_elems, TensorInfo *w, bool trans, u64 *batch, u64 *rows, u64 *cols) {
-    if (!w || w->ndim < 2) return false;
-    if (trans) { *rows = w->dim[1]; *cols = w->dim[0]; }
-    else       { *rows = w->dim[0]; *cols = w->dim[1]; }
-    if (*cols == 0 || a_elems % *cols != 0) return false;
-    *batch = a_elems / *cols;
-    return true;
+    u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL);
+    if (n == GRAPH_NODE_NONE) {
+        sfree(data);
+        return n;
+    }
+    GraphNode *nd = &g->node[n];
+    nd->ne[0]  = n_tokens;       /* [n_tokens]          */
+    nd->nb[0]  = sizeof(u32);    /* element stride      */
+    nd->data   = data;
+    return n;
 }
 
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
@@ -115,13 +112,12 @@ u32 graph_rope(Graph *g, u32 src) {
     return node_add(g, OP_ROPE_NEOX, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL);
 }
 
-u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
+u32 graph_embed(Graph *g, u32 src, TensorInfo *weight, u32 n_tokens) {
     if (!g || !weight || weight->ndim < 2 || n_tokens == 0) return GRAPH_NODE_NONE;
-    if (token_id == GRAPH_NODE_NONE) token_id = graph_input(g, n_tokens);
-    if (token_id == GRAPH_NODE_NONE || token_id >= g->n_node) return GRAPH_NODE_NONE;
-    const GraphNode *tok = &g->node[token_id];
+    if (src == GRAPH_NODE_NONE || src >= g->n_node) return GRAPH_NODE_NONE;
+    const GraphNode *tok = &g->node[src];
     if (tok->op != OP_INPUT || tok->ne[0] != (int)n_tokens) return GRAPH_NODE_NONE;
-    return node_add(g, OP_EMBED, (int[]){ (int)token_id, -1, -1, -1 },
+    return node_add(g, OP_EMBED, (int[]){ (int)src, -1, -1, -1 },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL);
 }
 
@@ -136,6 +132,11 @@ Graph *graph_new(void) {
 
 void graph_free(Graph *g) {
     if (!g) return;
+    /* OP_INPUT nodes own their input token buffer (data). */
+    for (u32 i = 0; i < g->n_node; i++) {
+        if (g->node[i].op != OP_INPUT) continue;
+        sfree(g->node[i].data);
+    }
     sfree(g->node);
     sfree(g);
 }
@@ -155,5 +156,13 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
         slog(WARN, "graph_compute: missing graph / session");
         return false;
     }
+    /* Bind the concrete tokens into the OP_INPUT node's data buffer. */
+    for (u32 i = 0; i < g->n_node; i++) {
+        GraphNode *nd = &g->node[i];
+        if (nd->op != OP_INPUT || !nd->data || !tokens) continue;
+        u32 n = (u32)nd->ne[0];
+        memcpy(nd->data, tokens, (size_t)n * sizeof(u32));
+    }
+    (void)plan;
     return true;
 }
