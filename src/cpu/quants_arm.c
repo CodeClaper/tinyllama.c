@@ -1218,6 +1218,20 @@ static float neon_dot_q4_k_block(const u8 *data, const float *x) {
     return d * dot_acc - dmin * sum_acc;
 }
 
+/* Per-byte logical right shift (vshrq_n needs a compile-time shift). */
+static uint8x16_t neon_u8_shr(uint8x16_t v, u32 k) {
+    switch (k) {
+        case 0:  return v;
+        case 1:  return vshrq_n_u8(v, 1);
+        case 2:  return vshrq_n_u8(v, 2);
+        case 3:  return vshrq_n_u8(v, 3);
+        case 4:  return vshrq_n_u8(v, 4);
+        case 5:  return vshrq_n_u8(v, 5);
+        case 6:  return vshrq_n_u8(v, 6);
+        default: return vshrq_n_u8(v, 7);
+    }
+}
+
 /*
  * Q5_K: result = d * Σ(sc[sb] * Σ(q * x)) - dmin * Σ(mn[sb] * Σ(x))
  *
@@ -1241,14 +1255,22 @@ static float neon_dot_q5_k_block(const u8 *data, const float *x) {
         const u8 *src_lo = qs + g * 32;
         u32 start = (u32)sb * 32;
 
-        /* Build combined values (lo nibble | hi<<4) for this sub-block. */
-        u8 vals[32];
-        for (int j = 0; j < 32; j++) {
-            u32 o  = start + (u32)j;
-            u32 hi = (qh[o & 31] >> (o >> 5)) & 1;
-            u32 lo = nb ? (src_lo[j] >> 4) : (src_lo[j] & 0xF);
-            vals[j] = (u8)(lo | (hi << 4));
-        }
+        /* Vectorised unpack, bit-identical to the scalar walk:
+         *  lo = 4-bit nibbles of 16 contiguous qs bytes (low or high
+         *       nibbles by sub-block parity);
+         *  hi = bit sb of qh[0..31], one byte per element. */
+        uint8x16_t n0 = vld1q_u8(src_lo);
+        uint8x16_t n1 = vld1q_u8(src_lo + 16);
+        uint8x16_t lo0 = nb ? vshrq_n_u8(n0, 4) : vandq_u8(n0, vdupq_n_u8(0x0F));
+        uint8x16_t lo1 = nb ? vshrq_n_u8(n1, 4) : vandq_u8(n1, vdupq_n_u8(0x0F));
+        uint8x16_t hb0 = vandq_u8(neon_u8_shr(vld1q_u8(qh), (u32)sb),
+                                  vdupq_n_u8(0x1));
+        uint8x16_t hb1 = vandq_u8(neon_u8_shr(vld1q_u8(qh + 16), (u32)sb),
+                                  vdupq_n_u8(0x1));
+        uint8x16_t val[2] = {
+            vorrq_u8(lo0, vshlq_n_u8(hb0, 4)),
+            vorrq_u8(lo1, vshlq_n_u8(hb1, 4))
+        };
 
         float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
         float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
@@ -1256,7 +1278,7 @@ static float neon_dot_q5_k_block(const u8 *data, const float *x) {
         float32x4_t sx2  = vdupq_n_f32(0), sx3  = vdupq_n_f32(0);
 
         for (int j = 0; j < 32; j += 16) {
-            uint8x16_t vu8 = vld1q_u8(vals + j);
+            uint8x16_t vu8 = val[j >> 4];
             int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
             int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
             float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
@@ -1380,15 +1402,32 @@ static float neon_dot_q2_k_block(const u8 *data, const float *x) {
         if (sb & 1) sc >>= 4; else sc &= 0xF;
 
         u32 start = (u32)sb * 16;
-        i8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o   = start + (u32)j;
-            u32 q2  = (data[(o >> 2)] >> ((o & 3) << 1)) & 0x3;
-            u32 sign = (data[(o >> 3)] >> (o & 7)) & 1;
-            vals[j] = (i8)((i32)q2 - (i32)sign * 4);
-        }
 
-        int8x16_t vs8  = vld1q_s8(vals);
+        /* Vectorised unpack, bit-identical to the scalar walk:
+         *  mag  = 2-bit value of element j from byte (j>>2) of the 4-byte
+         *         sub-block window at lane (j&3) — splat each of the 4
+         *         bytes to 4 lanes with a table lookup, then shift every
+         *         lane right by (j&3)*2 with a per-lane shift vector;
+         *  sign = bit (j&7) of byte (j>>3) of the 2-byte window.
+         *  val  = mag - 4*sign, mod 2^8 == the scalar i8 value. */
+        const uint8x16_t mag_idx = {
+            0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3
+        };
+        const int8x16_t mag_sh = {
+            0, -2, -4, -6, 0, -2, -4, -6, 0, -2, -4, -6, 0, -2, -4, -6
+        };
+        const uint8x16_t sg_idx = {
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1
+        };
+        const int8x16_t sg_sh = {
+            0, -1, -2, -3, -4, -5, -6, -7, 0, -1, -2, -3, -4, -5, -6, -7
+        };
+        uint8x16_t mags = vqtbl1q_u8(vld1q_u8(data + (sb << 2)), mag_idx);
+        mags = vandq_u8(vshlq_u8(mags, mag_sh), vdupq_n_u8(0x3));
+        uint8x16_t sg = vqtbl1q_u8(vld1q_u8(data + (sb << 1)), sg_idx);
+        sg = vandq_u8(vshlq_u8(sg, sg_sh), vdupq_n_u8(0x1));
+
+        int8x16_t vs8 = (int8x16_t)vsubq_u8(mags, vshlq_n_u8(sg, 2));
         int16x8_t v16_0 = vmovl_s8(vget_low_s8(vs8));
         int16x8_t v16_1 = vmovl_s8(vget_high_s8(vs8));
         float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
