@@ -74,9 +74,9 @@ static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *wei
     return g->n_node++;
 }
 
-/* Leaf input: carries a run of token ids.  Shape is recorded in the node
- * itself (ne[0] = n_tokens, nb[0] = element size); the data buffer is
- * allocated empty at build time and filled by graph_compute() at
+/* Leaf input: carries a run of token ids.  Shape (ne[0] = capacity,
+ * nb[0] = element size) is recorded in the node itself; the data slot
+ * lives in the graph arena and is filled by graph_compute() at
  * execution time with the concrete tokens. */
 u32 graph_input(Graph *g, u32 n_tokens) {
     if (!g || n_tokens == 0) return GRAPH_NODE_NONE;
@@ -84,14 +84,9 @@ u32 graph_input(Graph *g, u32 n_tokens) {
     u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL);
     if (n == GRAPH_NODE_NONE) return GRAPH_NODE_NONE;
 
-    void *data = scalloc(n_tokens, sizeof(u32));   /* filled at compute time */
-    if (!data) return GRAPH_NODE_NONE;
-
     GraphNode *nd = &g->node[n];
-    nd->ne[0]    = n_tokens;       /* capacity: [n_tokens]        */
-    nd->nb[0]    = sizeof(u32);    /* element stride              */
-    nd->data     = data;
-    nd->data_cap = (size_t)n_tokens * sizeof(u32);
+    nd->ne[0] = n_tokens;       /* capacity: [n_tokens]     */
+    nd->nb[0] = sizeof(u32);    /* element stride           */
     return n;
 }
 
@@ -180,13 +175,14 @@ void graph_free(Graph *g) {
                         100.0 * op_stat_secs[i] / total,
                         (unsigned long long)op_stat_calls[i]);
     }
+    if (g->arena)
+        fprintf(stderr, "graph arena: %.1f MB\n", (double)g->arena_size / 1048576.0);
     memset(op_stat_secs, 0, sizeof(op_stat_secs));
     memset(op_stat_calls, 0, sizeof(op_stat_calls));
 
-    /* The OP_INPUT buffer (u32 token ids) is allocated at build time;
-     * every other node's data buffer is owned by the executor. */
-    for (u32 i = 0; i < g->n_node; i++)
-        sfree(g->node[i].data);
+    /* Every node->data aliases a slot inside the arena. */
+    sfree(g->arena);
+    g->arena = NULL;
     sfree(g->node);
     sfree(g);
 }
@@ -215,14 +211,134 @@ GraphPlan graph_plan(Graph *g) {
  * The graph is built once at capacity (ctx_size rows); batches of any
  * n <= capacity reuse it.                                              */
 
-/* Grow a node output buffer to `need` bytes (grow-only; sessions only
- * ever grow their maximum batch size within one graph lifetime). */
-static bool ensure_data(GraphNode *nd, size_t need) {
-    if (nd->data_cap >= need) return true;
-    void *p = srealloc(nd->data, need);
-    if (!p) return false;
-    nd->data     = p;
-    nd->data_cap = need;
+/* ---------------------------------------------------------------- *
+ * Static arena plan
+ * ---------------------------------------------------------------- *
+ * Node output buffers are allocated once and reused across every
+ * execution: a node's slot is released as soon as its last consumer
+ * has run, so live memory tracks a few layers instead of the whole
+ * graph.  The plan (slot offsets inside one peak-sized arena) is
+ * computed lazily on the first execution and the node->data pointers
+ * are baked into the graph; executions of any n <= ctx_size reuse the
+ * same slots.  The sweep runs in build order (== execution order).  */
+
+static size_t align16(size_t x) { return (x + 15) & ~(size_t)15; }
+
+/* Capacity rows a node can ever be asked to produce. */
+static u32 node_cap_rows(const GraphNode *nd, bool sink, u32 ctx_size) {
+    if (nd->op == OP_INPUT) return (u32)nd->ne[0];
+    return sink ? 1u : ctx_size;
+}
+
+static bool arena_plan(Graph *g, Session *s) {
+    u32 n_node = g->n_node;
+    ArchConfig *c = &s->cfg;
+
+    /* Sink marks and per-node output widths (mirrors graph_compute). */
+    u32 sink[n_node], dims[n_node];
+    for (u32 i = 0; i < n_node; i++) sink[i] = 1;
+    for (u32 j = 0; j < n_node; j++)
+        for (int k = 0; k < 4; k++)
+            if (g->node[j].src[k] >= 0) sink[(u32)g->node[j].src[k]] = 0;
+    for (u32 i = 0; i < n_node; i++) {
+        GraphNode *nd = &g->node[i];
+        switch (nd->op) {
+            case OP_INPUT:
+                dims[i] = 0;
+                break;
+            case OP_MATMUL_T:
+            case OP_MATMUL:
+            case OP_MATMULARRY: {
+                TensorInfo *w = nd->weights[0];
+                dims[i] = (u32)(nd->op == OP_MATMUL_T ? w->dim[1] : w->dim[0]);
+                break;
+            }
+            case OP_EMBED: {
+                TensorInfo *w = nd->weights[0];
+                dims[i] = (u32)(w->dim[0] == (i64)c->n_vocab ? w->dim[1] : w->dim[0]);
+                break;
+            }
+            case OP_RMS_NORM:
+                dims[i] = (u32)nd->weights[0]->n_element;
+                break;
+            case OP_ATTN:
+                dims[i] = c->n_head * c->head_dim;
+                break;
+            default:
+                dims[i] = (u32)nd->src[0] >= 0 ? dims[(u32)nd->src[0]] : 0;
+        }
+    }
+
+    /* Byte needs at full capacity (INPUT slots hold u32 token ids). */
+    size_t need[n_node];
+    for (u32 i = 0; i < n_node; i++) {
+        const GraphNode *nd = &g->node[i];
+        u32 rows = node_cap_rows(nd, sink[i] != 0, s->ctx_size);
+        need[i] = align16((nd->op == OP_INPUT)
+                              ? (size_t)nd->ne[0] * sizeof(u32)
+                              : (size_t)rows * dims[i] * sizeof(float));
+    }
+
+    /* release[i] = index of the last node consuming node i. */
+    u32 release[n_node];
+    for (u32 i = 0; i < n_node; i++) release[i] = i;
+    for (u32 j = 0; j < n_node; j++)
+        for (int k = 0; k < 4; k++)
+            if (g->node[j].src[k] >= 0) {
+                u32 src = (u32)g->node[j].src[k];
+                if (j > release[src]) release[src] = j;
+            }
+
+    /* Sweep: reclaim slots whose last consumer already ran, then give
+     * the next node the smallest free chunk that fits (else extend). */
+    u64  node_off[n_node];
+    u64  foff[n_node];
+    u64  fsz[n_node];
+    u32  fcnt = 0;
+    u64  bump = 0;
+
+    for (u32 i = 0; i < n_node; i++) {
+        /* Node j's slot becomes free exactly at step release[j] + 1. */
+        if (i > 0) {
+            for (u32 j = 0; j < i; j++) {
+                if (release[j] + 1 != i) continue;
+                foff[fcnt] = node_off[j];
+                fsz[fcnt]  = (u64)need[j];
+                fcnt++;
+            }
+        }
+
+        u64 off;
+        u32 best = fcnt;                 /* smallest chunk that fits */
+        u64  best_sz = UINT64_MAX;
+        for (u32 f = 0; f < fcnt; f++) {
+            if (fsz[f] >= (u64)need[i] && fsz[f] < best_sz) {
+                best    = f;
+                best_sz = fsz[f];
+            }
+        }
+        if (best < fcnt) {
+            off = foff[best];
+            fsz[best]  = fsz[fcnt - 1];   /* swap-remove */
+            foff[best] = foff[fcnt - 1];
+            fcnt--;
+        } else {
+            off = bump;
+            bump += need[i];
+        }
+        node_off[i] = off;
+    }
+
+    if (bump == 0) return true;
+    g->arena      = smalloc((size_t)bump);
+    if (!g->arena) return false;
+    g->arena_size = (size_t)bump;
+
+    for (u32 i = 0; i < n_node; i++) {
+        GraphNode *nd = &g->node[i];
+        nd->data     = (u8 *)g->arena + node_off[i];
+        nd->data_cap = need[i];
+    }
     return true;
 }
 
@@ -239,6 +355,12 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
     if ((u64)pos + n > s->ctx_size) {
         slog(WARN, "graph_compute: batch pos=%u n=%u exceeds ctx_size=%u",
              pos, n, s->ctx_size);
+        return false;
+    }
+
+    /* One-time static slot plan for the execution arena. */
+    if (!g->arena && !arena_plan(g, s)) {
+        slog(WARN, "graph_compute: arena plan failed");
         return false;
     }
 
@@ -313,7 +435,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
         u32 r   = sink[i] ? 1u : n;             /* sink: last batch row only */
         u32 base = sink[i] ? n - 1 : 0;         /* batch row of local row 0  */
         if (od == 0 || r == 0) goto fail;
-        if (!ensure_data(nd, (size_t)r * od * sizeof(float))) goto fail;
+        if ((size_t)r * od * sizeof(float) > nd->data_cap) goto fail;
         float *dst = (float *)nd->data;
 
         int    st_cls = op_stat_class(nd->op);

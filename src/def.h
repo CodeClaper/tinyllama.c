@@ -369,8 +369,8 @@ typedef struct {
                                                nb[0] = ggml_type_size(type)
                                                nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type)) + padding
                                                nb[i] = nb[i-1] * ne[i-1] */
-    void       *data;                       /* output buffer, allocated lazily by the executor */
-    size_t      data_cap;                   /* bytes allocated for data */
+    void       *data;                       /* output buffer: slot inside the graph arena */
+    size_t      data_cap;                   /* bytes available at data */
 } GraphNode;
 
 /* Static DAG.  Nodes are appended in build order; because every edge
@@ -379,6 +379,11 @@ typedef struct Graph {
     GraphNode *node;
     u32        n_node;
     u32        cap;
+    /* Static peak-size execution arena (graph.c).  Every node->data
+     * aliases a slot inside it; slot offsets are assigned once by a
+     * lifetime analysis on the first execution. */
+    void      *arena;
+    size_t     arena_size;
 } Graph;
 
 typedef struct {
