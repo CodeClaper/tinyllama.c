@@ -1093,29 +1093,42 @@ static float neon_dot_q6_k_block(const u8 *data, const float *x) {
         i32 sc = (i8)scales[sb];
         u32 start = (u32)sb * 16;
 
-        /* Build 16 combined q values, then NEON-dot with x. */
-        u8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o     = start + (u32)j;
-            u32 half  = o >> 7;
-            u32 hl    = o & 127;
-            u32 which = hl >> 5;
-            u32 l     = hl & 31;
-            u32 ql_off = (half << 6) + ((which & 1) << 5) + l;
-            u32 lo = (which >= 2) ? ((ql[ql_off] >> 4) & 0xF) : (ql[ql_off] & 0xF);
-            u32 qh_off = (half << 5) + l;
-            u32 hi = (qh[qh_off] >> (which * 2)) & 0x3;
-            vals[j] = (u8)(lo | (hi << 4));
+        /* Vectorised unpack, bit-identical to the scalar walk:
+         *   lo = 4-bit nibbles, 2 elems per byte; 16 contiguous bytes
+         *        per sub-block, low or high nibbles depending on which
+         *        quarter of the 64-element half this sub-block is in.
+         *   hi = 2 extra bits, 4 elems per byte; the 16 bytes at
+         *        (half<<5) are shared by 4 quarters via a 2-bit shift. */
+        u32 sub7   = (u32)sb & 7;
+        u32 half   = (u32)sb >> 3;
+        u32 which  = sub7 >> 1;
+        u32 sbpar  = sub7 & 1;
+
+        const u8 *qsrc = ql + (half << 6) + ((which & 1) << 5) + (sbpar << 4);
+        uint8x16_t qb  = vld1q_u8(qsrc);
+        uint8x16_t lo  = (which >= 2) ? vshrq_n_u8(qb, 4)
+                                      : vandq_u8(qb, vdupq_n_u8(0x0F));
+
+        const u8 *hsrc = qh + (half << 5) + (sbpar << 4);
+        uint8x16_t hb  = vld1q_u8(hsrc);
+        uint8x16_t hi;
+        switch (which) {   /* vshrq_n requires a compile-time shift */
+            case 0:  hi = hb;                    break;
+            case 1:  hi = vshrq_n_u8(hb, 2);     break;
+            case 2:  hi = vshrq_n_u8(hb, 4);     break;
+            default: hi = vshrq_n_u8(hb, 6);     break;
         }
+        hi = vandq_u8(hi, vdupq_n_u8(0x3));
+
+        uint8x16_t vals = vorrq_u8(lo, vshlq_n_u8(hi, 4));
 
         /* NEON dot: Σ(vals[j] * x[j]) and Σ(x[j]). */
         float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
         float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
         float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
 
-        uint8x16_t vu8 = vld1q_u8(vals);
-        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
-        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
+        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vals));
+        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vals));
         float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
         float32x4_t vf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
         float32x4_t vf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
