@@ -1304,18 +1304,40 @@ static float neon_dot_q3_k_block(const u8 *data, const float *x) {
         i32 sc = (i32)(sc_low | (sc_high << 4)) - 32;
 
         u32 start = (u32)sb * 16;
-        u8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o   = start + (u32)j;
-            u32 g   = o >> 7;
-            u32 pr  = (o >> 5) & 3;
-            u32 bc  = o & 31;
-            u32 lo  = (qs[g * 32 + bc] >> (pr * 2)) & 0x3;
-            u32 hi  = (qh[o & 31] >> (o >> 5)) & 1;
-            vals[j]  = (u8)(lo | (hi << 2));
-        }
 
-        uint8x16_t vu8 = vld1q_u8(vals);
+        /* Vectorised unpack, bit-identical to the scalar walk:
+         *  lo = 2-bit pairs, 4 per byte; a sub-block reads 16 contiguous
+         *       qs bytes (window g = sb>>3 half, (sb&1)*16 offset) at the
+         *       2-bit lane ((sb>>1)&3).
+         *  hi = 1 extra bit per element from the 32 qh bytes, bit lane
+         *       (sb>>1), byte offset (sb&1)*16. */
+        const u8 *lsrc = qs + (((u32)sb >> 3) << 5) + (((u32)sb & 1) << 4);
+        uint8x16_t lb  = vld1q_u8(lsrc);
+        uint8x16_t lo;
+        switch (((u32)sb >> 1) & 3) {   /* vshrq_n needs a constant */
+            case 0:  lo = lb;                break;
+            case 1:  lo = vshrq_n_u8(lb, 2); break;
+            case 2:  lo = vshrq_n_u8(lb, 4); break;
+            default: lo = vshrq_n_u8(lb, 6); break;
+        }
+        lo = vandq_u8(lo, vdupq_n_u8(0x3));
+
+        const u8 *hsrc = qh + (((u32)sb & 1) << 4);
+        uint8x16_t hb  = vld1q_u8(hsrc);
+        uint8x16_t hi;
+        switch ((u32)sb >> 1) {         /* bit lane 0..7 */
+            case 0:  hi = hb;                break;
+            case 1:  hi = vshrq_n_u8(hb, 1); break;
+            case 2:  hi = vshrq_n_u8(hb, 2); break;
+            case 3:  hi = vshrq_n_u8(hb, 3); break;
+            case 4:  hi = vshrq_n_u8(hb, 4); break;
+            case 5:  hi = vshrq_n_u8(hb, 5); break;
+            case 6:  hi = vshrq_n_u8(hb, 6); break;
+            default: hi = vshrq_n_u8(hb, 7); break;
+        }
+        hi = vandq_u8(hi, vdupq_n_u8(0x1));
+
+        uint8x16_t vu8 = vorrq_u8(lo, vshlq_n_u8(hi, 2));
         int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vu8));
         int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vu8));
         float32x4_t vf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
