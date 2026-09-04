@@ -384,4 +384,15 @@ typedef struct Graph {
 typedef struct {
 
 } GraphPlan;
+
+/* Execution batch: `n` token ids starting at absolute position `pos`
+ * (row i of the batch == position pos+i).  The executor RoPEs each row
+ * at its absolute position and OP_ATTN extends the session KV cache
+ * with the batch, so calls with n=1 at consecutive positions perform
+ * incremental decoding without recomputing the history. */
+typedef struct {
+    const u32 *tokens;
+    u32        pos;
+    u32        n;
+} GraphBatch;
 #endif

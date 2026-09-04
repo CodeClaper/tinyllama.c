@@ -38,8 +38,8 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
     fprintf(file, "  -g  | --graph                      Use the experimental graph executor\n");
-    fprintf(file, "                                     (builds one static graph, recomputes the whole\n");
-    fprintf(file, "                                     context from scratch on every step)\n");
+    fprintf(file, "                                     (one static graph, incremental KV decode\n");
+    fprintf(file, "                                     via the session cache)\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
@@ -285,18 +285,25 @@ int main(int argc, char *argv[]) {
         /* Forward pass. */
         bool ok;
         if (session->graph) {
-            /* Model A: append the new turn to the history and recompute
-             * the whole context from scratch; row i == position i. */
-            u32 room = session->ctx_size - session->n_tokens;
+            /* Incremental batch prefill: append the turn at the current
+             * position and run it as one batch; the executor extends the
+             * session KV cache, so history is never recomputed. */
+            u32 pos0 = session->n_tokens;
+            u32 room = session->ctx_size - pos0;
             if (n_prompt > (int)room) {
                 fprintf(stderr, "Warning: prompt truncated to %u tokens (context full).\n", room);
                 n_prompt = (int)room;
                 if (n_prompt <= 0) fatal("Context full — use /clear to reset");
             }
-            memcpy(session->tokens + session->n_tokens, prompt_tokens,
+            memcpy(session->tokens + pos0, prompt_tokens,
                    (size_t)n_prompt * sizeof(u32));
-            session->n_tokens += (u32)n_prompt;
-            ok = graph_compute(session->graph, NULL, session->tokens, session);
+            GraphBatch batch = {
+                .tokens = session->tokens + pos0,
+                .pos    = pos0,
+                .n      = (u32)n_prompt
+            };
+            ok = graph_compute(session->graph, NULL, &batch, session);
+            session->n_tokens = pos0 + (u32)n_prompt;
         } else {
             ok = session->ops.prefill(session, prompt_tokens, n_prompt, session->logits);
         }
@@ -325,15 +332,22 @@ int main(int argc, char *argv[]) {
             }
             n_gen++;
             if (session->graph) {
-                /* Recompute over the extended history; positions must stay
-                 * contiguous, so generation stops at the context limit. */
-                if (session->n_tokens >= session->ctx_size) {
+                /* Incremental decode: one new row at the current
+                 * position; attention reads the cached history. */
+                u32 pos0 = session->n_tokens;
+                if (pos0 >= session->ctx_size) {
                     fprintf(stderr, "\n[context full — /clear to continue]\n");
                     break;
                 }
-                session->tokens[session->n_tokens++] = next_token;
-                if (!graph_compute(session->graph, NULL, session->tokens, session))
+                session->tokens[pos0] = next_token;
+                GraphBatch batch = {
+                    .tokens = &session->tokens[pos0],
+                    .pos    = pos0,
+                    .n      = 1
+                };
+                if (!graph_compute(session->graph, NULL, &batch, session))
                     break;
+                session->n_tokens = pos0 + 1;
             } else if (!session->ops.generate(session, next_token, session->logits)) {
                 break;
             }

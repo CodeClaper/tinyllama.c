@@ -799,7 +799,7 @@ static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
         k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
-        u32 attn = graph_attn(g, q, k, v);
+        u32 attn = graph_attn(g, q, k, v, l);
         if (attn == GRAPH_NODE_NONE) goto fail;
 
         u32 o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
