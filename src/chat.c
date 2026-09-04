@@ -221,6 +221,7 @@ int main(int argc, char *argv[]) {
     session->repeat_last_n    = co.repeat_last_n;
     session->frequency_penalty = co.frequency_penalty;
     session->presence_penalty  = co.presence_penalty;
+    session->graph = session->ops.graph_build(session, co.ctx_size);
 
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;

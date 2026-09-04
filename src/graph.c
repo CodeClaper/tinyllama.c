@@ -47,14 +47,12 @@ static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *wei
 u32 graph_input(Graph *g, u32 n_tokens) {
     if (!g || n_tokens == 0) return GRAPH_NODE_NONE;
 
+    u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL);
+    if (n == GRAPH_NODE_NONE) return GRAPH_NODE_NONE;
+
     void *data = scalloc(n_tokens, sizeof(u32));   /* filled at compute time */
     if (!data) return GRAPH_NODE_NONE;
 
-    u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL);
-    if (n == GRAPH_NODE_NONE) {
-        sfree(data);
-        return n;
-    }
     GraphNode *nd = &g->node[n];
     nd->ne[0]  = n_tokens;       /* [n_tokens]          */
     nd->nb[0]  = sizeof(u32);    /* element stride      */

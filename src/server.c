@@ -413,13 +413,13 @@ int main(int argc, char *argv[]) {
         engine_close(engine);
         slog(ERROR, "Failed to create session.");
     }
-    session->max_tokens     = (u32)so.default_tokens;
-    session->temperature    = so.temperature;
-    session->top_k          = so.top_k;
-    session->top_p          = so.top_p;
-    session->min_p          = so.min_p;
-    session->repeat_penalty   = so.repeat_penalty;
-    session->repeat_last_n    = so.repeat_last_n;
+    session->max_tokens        = so.default_tokens;
+    session->temperature       = so.temperature;
+    session->top_k             = so.top_k;
+    session->top_p             = so.top_p;
+    session->min_p             = so.min_p;
+    session->repeat_penalty    = so.repeat_penalty;
+    session->repeat_last_n     = so.repeat_last_n;
     session->frequency_penalty = so.frequency_penalty;
     session->presence_penalty  = so.presence_penalty;
 

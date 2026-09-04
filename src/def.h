@@ -295,13 +295,13 @@ typedef struct Session Session;
 typedef struct Graph Graph;
 
 typedef struct {
-    bool  (*init)                (Session *s);
-    void  (*free)                (Session *s);
-    bool  (*prefill)             (Session *s, u32 *tokens, u32 n_tokens, float *logits);
-    bool  (*generate)            (Session *s, u32 token, float *logits);
-    void  (*reset)               (Session *s);
-    int   (*decode)              (const u8 *raw, int raw_len, char *out, int max_len);
-    Graph* (*graph_build) (Session *s, u32 *token, u32 n_tokens);
+    bool  (*init)          (Session *s);
+    void  (*free)          (Session *s);
+    bool  (*prefill)       (Session *s, u32 *tokens, u32 n_tokens, float *logits);
+    bool  (*generate)      (Session *s, u32 token, float *logits);
+    void  (*reset)         (Session *s);
+    int   (*decode)        (const u8 *raw, int raw_len, char *out, int max_len);
+    Graph* (*graph_build)  (Session *s, u32 n_tokens);
 } ArchOps;
 
 struct Session {
@@ -334,6 +334,9 @@ struct Session {
     float      frequency_penalty;
     float      presence_penalty;
     u32        max_tokens;
+    
+    /* --- Graph --- */
+    Graph       *graph;
 };
 
 #define GRAPH_NODE_NONE ((u32)-1)  /* invalid node handle (builder return) */
