@@ -830,7 +830,7 @@ static u8 *gpu_cache_upload(TensorInfo *ti) {
 
 static u8 *gpu_cache_get(TensorInfo *ti) {
     for (int i = 0; i < g_cache_n; i++) {
-        if (g_cache_base[i] != ti->data || g_cache_ti[i] != ti) continue;
+        if (g_cache_base[i] != (const u8 *)ti->data || g_cache_ti[i] != ti) continue;
         if (g_cache_elems[i] == ti->n_element && g_cache_bytes[i] == ti->bytes &&
             g_cache_type[i] == ti->type && g_cache_off[i] == ti->offset)
             return g_cache_dev[i]; /* same identity, same content */
@@ -848,7 +848,7 @@ static u8 *gpu_cache_get(TensorInfo *ti) {
     if (g_cache_n >= GPU_CACHE_MAX || ti->bytes == 0) return NULL;
     u8 *d = gpu_cache_upload(ti);
     if (!d) return NULL;
-    g_cache_base[g_cache_n] = ti->data;
+    g_cache_base[g_cache_n] = (const u8 *)ti->data;
     g_cache_ti[g_cache_n]   = ti;
     g_cache_dev[g_cache_n]  = d;
     g_cache_elems[g_cache_n] = ti->n_element;
