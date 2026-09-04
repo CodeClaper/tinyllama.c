@@ -1,12 +1,46 @@
+#include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "graph.h"
 #include "core.h"
 #include "mm.h"
 #include "slog.h"
 
-/* RoPE frequency base (models without a metadata override). */
-#define GRAPH_ROPE_THETA 10000.0f
+/* ---- Per-op-class timing (debug aid, dumped by graph_free) ------- */
+enum {
+    ST_EMBED, ST_RMS, ST_MM, ST_MM_T, ST_ATTN, ST_ROPE,
+    ST_SILU, ST_BIAS, ST_BIN, ST_OTHER
+};
+static const char *const op_stat_name[] = {
+    "embed", "rms_norm", "matmul", "matmul_T", "attn",
+    "rope", "silu", "bias", "add/mul", "other"
+};
+static double op_stat_secs[sizeof(op_stat_name) / sizeof(op_stat_name[0])];
+static u64    op_stat_calls[sizeof(op_stat_name) / sizeof(op_stat_name[0])];
+
+static double graph_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static int op_stat_class(GraphOp op) {
+    switch (op) {
+        case OP_EMBED:     return ST_EMBED;
+        case OP_RMS_NORM:  return ST_RMS;
+        case OP_MATMUL:
+        case OP_MATMULARRY: return ST_MM;
+        case OP_MATMUL_T:  return ST_MM_T;
+        case OP_ATTN:      return ST_ATTN;
+        case OP_ROPE_NEOX: return ST_ROPE;
+        case OP_SILU:      return ST_SILU;
+        case OP_BIAS:      return ST_BIAS;
+        case OP_ADD:
+        case OP_MUL:       return ST_BIN;
+        default:           return ST_OTHER;
+    }
+}
 
 /* ---------------------------------------------------------------- *
  * Operators
@@ -129,6 +163,26 @@ Graph *graph_new(void) {
 
 void graph_free(Graph *g) {
     if (!g) return;
+    /* Dump the per-op timing accumulated over the graph's lifetime. */
+    double total = 0.0;
+    u64    calls = 0;
+    for (size_t i = 0; i < sizeof(op_stat_secs) / sizeof(op_stat_secs[0]); i++) {
+        total += op_stat_secs[i];
+        calls += op_stat_calls[i];
+    }
+    if (total > 1e-4) {
+        fprintf(stderr, "graph timing: total %.3fs over %llu node execs\n",
+                total, (unsigned long long)calls);
+        for (size_t i = 0; i < sizeof(op_stat_secs) / sizeof(op_stat_secs[0]); i++)
+            if (op_stat_secs[i] > 1e-5)
+                fprintf(stderr, "  %-9s %8.3fs %6.1f%%  (%llu calls)\n",
+                        op_stat_name[i], op_stat_secs[i],
+                        100.0 * op_stat_secs[i] / total,
+                        (unsigned long long)op_stat_calls[i]);
+    }
+    memset(op_stat_secs, 0, sizeof(op_stat_secs));
+    memset(op_stat_calls, 0, sizeof(op_stat_calls));
+
     /* The OP_INPUT buffer (u32 token ids) is allocated at build time;
      * every other node's data buffer is owned by the executor. */
     for (u32 i = 0; i < g->n_node; i++)
@@ -262,6 +316,8 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
         if (!ensure_data(nd, (size_t)r * od * sizeof(float))) goto fail;
         float *dst = (float *)nd->data;
 
+        int    st_cls = op_stat_class(nd->op);
+        double st_t0  = graph_now();
         switch (nd->op) {
             case OP_EMBED: {
                 TensorInfo *te = nd->weights[0];
@@ -429,6 +485,8 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
                 slog(WARN, "graph_compute: unhandled op %d", (int)nd->op);
                 goto fail;
         }
+        op_stat_secs[st_cls]  += graph_now() - st_t0;
+        op_stat_calls[st_cls]++;
     }
 
     /* Sink output (last row of the LM head) → session logits. */
