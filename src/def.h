@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifndef __DEF_H__
@@ -368,7 +369,8 @@ typedef struct {
                                                nb[0] = ggml_type_size(type)
                                                nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type)) + padding
                                                nb[i] = nb[i-1] * ne[i-1] */
-    void       *data;
+    void       *data;                       /* output buffer, allocated lazily by the executor */
+    size_t      data_cap;                   /* bytes allocated for data */
 } GraphNode;
 
 /* Static DAG.  Nodes are appended in build order; because every edge

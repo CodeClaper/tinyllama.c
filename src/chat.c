@@ -8,6 +8,7 @@
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
+#include "graph.h"
 #include "tokenizer.h"
 #include "sampler.h"
 #include "slog.h"
@@ -27,6 +28,7 @@ typedef struct {
     float presence_penalty;
     int nthread;
     const char *system;
+    int graph;
 } ChatOptions;
 
 /* Usage. */
@@ -35,6 +37,9 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Example: chat -m model.gguf -s \"You are a helpful assistant.\"\n");
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
+    fprintf(file, "  -g  | --graph                      Use the experimental graph executor\n");
+    fprintf(file, "                                     (builds one static graph, recomputes the whole\n");
+    fprintf(file, "                                     context from scratch on every step)\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
@@ -114,6 +119,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) co.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) co.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) co.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-g")  || !strcmp(arg, "--graph")) co.graph = 1;
         else if (!strcmp(arg, "-s")  || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
@@ -221,7 +227,11 @@ int main(int argc, char *argv[]) {
     session->repeat_last_n    = co.repeat_last_n;
     session->frequency_penalty = co.frequency_penalty;
     session->presence_penalty  = co.presence_penalty;
-    session->graph = session->ops.graph_build(session, co.ctx_size);
+    if (co.graph) {
+        session->graph = session->ops.graph_build(session, (u32)co.ctx_size);
+        if (!session->graph) fatal("Failed to build graph");
+        else printf("Build graph success.\n");
+    }
 
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
@@ -273,8 +283,24 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Warning: prompt truncated to %d tokens.\n", max_pt);
 
         /* Forward pass. */
-        if (!session->ops.prefill(session, prompt_tokens, n_prompt, session->logits))
-            fatal("Forward pass failed");
+        bool ok;
+        if (session->graph) {
+            /* Model A: append the new turn to the history and recompute
+             * the whole context from scratch; row i == position i. */
+            u32 room = session->ctx_size - session->n_tokens;
+            if (n_prompt > (int)room) {
+                fprintf(stderr, "Warning: prompt truncated to %u tokens (context full).\n", room);
+                n_prompt = (int)room;
+                if (n_prompt <= 0) fatal("Context full — use /clear to reset");
+            }
+            memcpy(session->tokens + session->n_tokens, prompt_tokens,
+                   (size_t)n_prompt * sizeof(u32));
+            session->n_tokens += (u32)n_prompt;
+            ok = graph_compute(session->graph, NULL, session->tokens, session);
+        } else {
+            ok = session->ops.prefill(session, prompt_tokens, n_prompt, session->logits);
+        }
+        if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
         u32 next_token = (co.temperature > 0.0f) 
@@ -298,8 +324,19 @@ int main(int argc, char *argv[]) {
                 fflush(stdout);
             }
             n_gen++;
-            if (!session->ops.generate(session, next_token, session->logits))
+            if (session->graph) {
+                /* Recompute over the extended history; positions must stay
+                 * contiguous, so generation stops at the context limit. */
+                if (session->n_tokens >= session->ctx_size) {
+                    fprintf(stderr, "\n[context full — /clear to continue]\n");
+                    break;
+                }
+                session->tokens[session->n_tokens++] = next_token;
+                if (!graph_compute(session->graph, NULL, session->tokens, session))
+                    break;
+            } else if (!session->ops.generate(session, next_token, session->logits)) {
                 break;
+            }
             if (co.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
                                            co.temperature, co.top_k, co.top_p, co.min_p,
@@ -316,6 +353,7 @@ int main(int argc, char *argv[]) {
 
     printf("Bye.\n");
     linenoiseFree(input);
+    graph_free(session->graph);
     session_free(session);
     engine_close(engine);
     return 0;
