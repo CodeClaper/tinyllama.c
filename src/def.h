@@ -4,11 +4,11 @@
 #ifndef __DEF_H__
 #define __DEF_H__
 
-#define MAX_DIMS 8
-#define VOCAB_ID_NONE ((u32)-1)
-#define DEFAULT_EPS (1e-6f)
-#define INT64CONST(x)  (x##L)
-#define UINT64CONST(x) (x##UL)
+#define MAX_DIMS        8
+#define VOCAB_ID_NONE   ((u32)-1)
+#define DEFAULT_EPS     (1e-6f)
+#define INT64CONST(x)   (x##L)
+#define UINT64CONST(x)  (x##UL)
 
 typedef uint8_t     u8;
 typedef uint16_t    u16;
@@ -357,8 +357,9 @@ typedef enum {
 
 typedef struct {
     GraphOp     op;
-    int         src[4];     /* source node indices; -1 = unused */
-    TensorInfo *weight;
+    int         ne[4];     /* source node indices; -1 = unused */
+    TensorInfo *src[4];
+    u32         params[64 / sizeof(u32)];
 } GraphNode;
 
 /* Static DAG.  Nodes are appended in build order; because every edge

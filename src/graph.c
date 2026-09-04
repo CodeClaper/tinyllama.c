@@ -24,27 +24,30 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
     return true;
 }
 
-/* Append a node; output shapes are derived at execution time. */
-static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *weight) {
+/* Append a node; output shapes are derived at execution time.
+ * ne[]  = source node indices, src[] = per-source weight tensors,
+ * params[] = op-specific parameters (unused ops may pass NULL). */
+static u32 node_add(Graph *g, GraphOp op, const int *ne, TensorInfo *const *src, const u32 *params) {
     if (!g) return GRAPH_NODE_NONE;
     if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
     GraphNode *n = &g->node[g->n_node];
-    n->op        = op;
-    n->weight    = weight;
-    for (int i = 0; i < 4; i++) 
-        n->src[i] = src ? src[i] : -1;
+    n->op = op;
+    for (int i = 0; i < 4; i++) {
+        n->ne[i]  = ne ? ne[i] : -1;
+        n->src[i] = src ? src[i] : NULL;
+    }
+    if (params) memcpy(n->params, params, sizeof(n->params));
     return g->n_node++;
 }
 
-/* Leaf input: carries a run of token ids; width stored in src[0]. */
+/* Leaf input: carries a run of token ids; width stored in ne[0]. */
 static u32 graph_input(Graph *g, u32 n_element) {
     if (!g || n_element == 0) return GRAPH_NODE_NONE;
-    return node_add(g, OP_INPUT, (int[]){ (int)n_element, -1, -1, -1 }, NULL);
+    return node_add(g, OP_INPUT, (int[]){ (int)n_element, -1, -1, -1 }, NULL, NULL);
 }
 
 /* mat-vec: rows from weight dims. */
-static bool shape_matvec(u64 a_elems, TensorInfo *w, bool trans,
-                         u64 *rows, u64 *cols) {
+static bool shape_matvec(u64 a_elems, TensorInfo *w, bool trans, u64 *rows, u64 *cols) {
     if (!w || w->ndim < 2) return false;
     if (trans) { *rows = w->dim[1]; *cols = w->dim[0]; }
     else       { *rows = w->dim[0]; *cols = w->dim[1]; }
@@ -53,8 +56,7 @@ static bool shape_matvec(u64 a_elems, TensorInfo *w, bool trans,
 }
 
 /* mat-mat: batch is derived from src elems / cols. */
-static bool shape_matmat(u64 a_elems, TensorInfo *w, bool trans,
-                         u64 *batch, u64 *rows, u64 *cols) {
+static bool shape_matmat(u64 a_elems, TensorInfo *w, bool trans, u64 *batch, u64 *rows, u64 *cols) {
     if (!w || w->ndim < 2) return false;
     if (trans) { *rows = w->dim[1]; *cols = w->dim[0]; }
     else       { *rows = w->dim[0]; *cols = w->dim[1]; }
@@ -65,48 +67,52 @@ static bool shape_matmat(u64 a_elems, TensorInfo *w, bool trans,
 
 u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
     if (!g || src >= g->n_node || !weight) return GRAPH_NODE_NONE;
-    return node_add(g, OP_RMS_NORM, (int[]){ (int)src, -1, -1, -1 }, weight);
+    return node_add(g, OP_RMS_NORM, (int[]){ (int)src, -1, -1, -1 },
+                    (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL);
 }
 
 u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans) {
     if (!g || src >= g->n_node || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
-    return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (int[]){ (int)src, -1, -1, -1 }, weight);
+    return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (int[]){ (int)src, -1, -1, -1 },
+                    (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL);
 }
 
 u32 graph_mul_mat2(Graph *g, u32 src, TensorInfo *weight) {
     if (!g || src >= g->n_node || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
-    return node_add(g, OP_MATMULARRY, (int[]){ (int)src, -1, -1, -1 }, weight);
+    return node_add(g, OP_MATMULARRY, (int[]){ (int)src, -1, -1, -1 },
+                    (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL);
 }
 
 u32 graph_binary(Graph *g, GraphOp op, u32 a_id, u32 b_id) {
     if (op != OP_ADD && op != OP_MUL) return GRAPH_NODE_NONE;
     if (!g || a_id >= g->n_node || b_id >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, op, (int[]){ (int)a_id, (int)b_id, -1, -1 }, NULL);
+    return node_add(g, op, (int[]){ (int)a_id, (int)b_id, -1, -1 }, NULL, NULL);
 }
 
 u32 graph_silu(Graph *g, u32 src) {
     if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SILU, (int[]){ (int)src, -1, -1, -1 }, NULL);
+    return node_add(g, OP_SILU, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL);
 }
 
 u32 graph_softmax(Graph *g, u32 src) {
     if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SOFTMAX, (int[]){ (int)src, -1, -1, -1 }, NULL);
+    return node_add(g, OP_SOFTMAX, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL);
 }
 
 u32 graph_bias(Graph *g, u32 src, TensorInfo *bias) {
     if (!g || src >= g->n_node || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
-    return node_add(g, OP_BIAS, (int[]){ (int)src, -1, -1, -1 }, bias);
+    return node_add(g, OP_BIAS, (int[]){ (int)src, -1, -1, -1 },
+                    (TensorInfo *[]){ bias, NULL, NULL, NULL }, NULL);
 }
 
 u32 graph_attn(Graph *g, u32 q, u32 k, u32 v) {
     if (!g || q >= g->n_node || k >= g->n_node || v >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_ATTN, (int[]){ (int)q, (int)k, (int)v, -1 }, NULL);
+    return node_add(g, OP_ATTN, (int[]){ (int)q, (int)k, (int)v, -1 }, NULL, NULL);
 }
 
 u32 graph_rope(Graph *g, u32 src) {
     if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_ROPE_NEOX, (int[]){ (int)src, -1, -1, -1 }, NULL);
+    return node_add(g, OP_ROPE_NEOX, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL);
 }
 
 u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
@@ -114,8 +120,9 @@ u32 graph_embed(Graph *g, u32 token_id, TensorInfo *weight, u32 n_tokens) {
     if (token_id == GRAPH_NODE_NONE) token_id = graph_input(g, n_tokens);
     if (token_id == GRAPH_NODE_NONE || token_id >= g->n_node) return GRAPH_NODE_NONE;
     const GraphNode *tok = &g->node[token_id];
-    if (tok->op != OP_INPUT || tok->src[0] != (int)n_tokens) return GRAPH_NODE_NONE;
-    return node_add(g, OP_EMBED, (int[]){ (int)token_id, -1, -1, -1 }, weight);
+    if (tok->op != OP_INPUT || tok->ne[0] != (int)n_tokens) return GRAPH_NODE_NONE;
+    return node_add(g, OP_EMBED, (int[]){ (int)token_id, -1, -1, -1 },
+                    (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL);
 }
 
 
@@ -177,7 +184,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
 
         switch (nd->op) {
             case OP_INPUT:
-                sh.elems = nd->src[0] > 0 ? (u64)nd->src[0] : 0;
+                sh.elems = nd->ne[0] > 0 ? (u64)nd->ne[0] : 0;
                 sh.dim0  = sh.elems;
                 sh.last  = sh.elems;
                 break;
@@ -186,13 +193,13 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
             case OP_ROPE_NEOX:
             case OP_RMS_NORM:
             case OP_BIAS: {
-                u32 a = nd->src[0];
+                u32 a = nd->ne[0];
                 if (a >= cnt) { ok = false; break; }
                 sh = shape[a];
                 break;
             }
             case OP_ATTN: {
-                u32 a = nd->src[0], b = nd->src[1], c = nd->src[2];
+                u32 a = nd->ne[0], b = nd->ne[1], c = nd->ne[2];
                 if (a >= cnt || b >= cnt || c >= cnt ||
                     shape[a].dim0 != shape[b].dim0 ||
                     shape[a].dim0 != shape[c].dim0) {
@@ -205,7 +212,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
             }
             case OP_ADD:
             case OP_MUL: {
-                u32 a = nd->src[0], b = nd->src[1];
+                u32 a = nd->ne[0], b = nd->ne[1];
                 if (a >= cnt || b >= cnt || shape[a].elems != shape[b].elems) {
                     slog(WARN, "graph_compute: binary op shape mismatch at node %u", i);
                     ok = false;
@@ -216,10 +223,10 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
             }
             case OP_MATMUL:
             case OP_MATMUL_T: {
-                u32 a = nd->src[0];
+                u32 a = nd->ne[0];
                 u64 rows, cols;
                 if (a >= cnt ||
-                    !shape_matvec(shape[a].elems, nd->weight, nd->op == OP_MATMUL_T, &rows, &cols)
+                    !shape_matvec(shape[a].elems, nd->src[0], nd->op == OP_MATMUL_T, &rows, &cols)
                 ) {
                     slog(WARN, "graph_compute: matvec shape mismatch at node %u", i);
                     ok = false;
@@ -231,10 +238,10 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                 break;
             }
             case OP_MATMULARRY: {
-                u32 a = nd->src[0];
+                u32 a = nd->ne[0];
                 u64 batch, rows, cols;
                 if (a >= cnt ||
-                    !shape_matmat(shape[a].elems, nd->weight, false, &batch, &rows, &cols)
+                    !shape_matmat(shape[a].elems, nd->src[0], false, &batch, &rows, &cols)
                 ) {
                     slog(WARN, "graph_compute: matmat shape mismatch at node %u", i);
                     ok = false;
@@ -246,13 +253,13 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                 break;
             }
             case OP_EMBED: {
-                u32 a = nd->src[0];
-                if (a >= cnt || !nd->weight || nd->weight->ndim < 2) {
+                u32 a = nd->ne[0];
+                if (a >= cnt || !nd->src[0] || nd->src[0]->ndim < 2) {
                     slog(WARN, "graph_compute: embed shape mismatch at node %u", i);
                     ok = false;
                     break;
                 }
-                u64 n_embd = nd->weight->dim[nd->weight->ndim - 1];
+                u64 n_embd = nd->src[0]->dim[nd->src[0]->ndim - 1];
                 u64 n_tok  = shape[a].elems;
                 sh.elems = n_tok * n_embd;
                 sh.dim0  = n_tok;
@@ -294,9 +301,9 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
 
             if (nd->op == OP_INPUT) continue; /* seeded above */
 
-            float *xa = nd->src[0] >= 0 ? out[nd->src[0]] : NULL;
-            float *xb = nd->src[1] >= 0 ? out[nd->src[1]] : NULL;
-            float *xc = nd->src[2] >= 0 ? out[nd->src[2]] : NULL;
+            float *xa = nd->ne[0] >= 0 ? out[nd->ne[0]] : NULL;
+            float *xb = nd->ne[1] >= 0 ? out[nd->ne[1]] : NULL;
+            float *xc = nd->ne[2] >= 0 ? out[nd->ne[2]] : NULL;
 
             switch (nd->op) {
                 case OP_ADD:
@@ -316,15 +323,15 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     break;
                 }
                 case OP_RMS_NORM: {
-                    u64 ncols = nd->weight ? nd->weight->dim[0] : 1;
+                    u64 ncols = nd->src[0] ? nd->src[0]->dim[0] : 1;
                     if (ncols == 0) ncols = 1;
                     u64 rows = sh->elems / ncols;
                     for (u64 r = 0; r < rows; r++)
-                        rms_norm(o + r * ncols, xa + r * ncols, nd->weight, (int)ncols, DEFAULT_EPS);
+                        rms_norm(o + r * ncols, xa + r * ncols, nd->src[0], (int)ncols, DEFAULT_EPS);
                     break;
                 }
                 case OP_BIAS: {
-                    u64 ncols = nd->weight ? nd->weight->n_element : 0;
+                    u64 ncols = nd->src[0] ? nd->src[0]->n_element : 0;
                     if (ncols == 0 || sh->elems % ncols != 0) {
                         slog(WARN, "graph_compute: bias shape mismatch at node %u", i);
                         ok = false;
@@ -332,7 +339,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     }
                     float *bias = smalloc(ncols * sizeof(float));
                     if (!bias) { ok = false; goto done; }
-                    tensor_get_f32_batch(nd->weight, 0, ncols, bias);
+                    tensor_get_f32_batch(nd->src[0], 0, ncols, bias);
                     u64 rows = sh->elems / ncols;
                     for (u64 r = 0; r < rows; r++) {
                         float *dst = o + r * ncols;
@@ -346,35 +353,35 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                 case OP_MATMUL_T: {
                     u64 rows, cols;
                     bool trans = nd->op == OP_MATMUL_T;
-                    if (!shape_matvec(shape[nd->src[0]].elems, nd->weight,
+                    if (!shape_matvec(shape[nd->ne[0]].elems, nd->src[0],
                                       trans, &rows, &cols)) {
                         slog(WARN, "graph_compute: matvec shape mismatch at node %u", i);
                         ok = false;
                         goto done;
                     }
-                    mat_vec_mul(o, nd->weight, xa, rows, cols, trans, s->pthreads);
+                    mat_vec_mul(o, nd->src[0], xa, rows, cols, trans, s->pthreads);
                     break;
                 }
                 case OP_MATMULARRY: {
                     u64 batch, rows, cols;
-                    if (!shape_matmat(shape[nd->src[0]].elems, nd->weight, false,
+                    if (!shape_matmat(shape[nd->ne[0]].elems, nd->src[0], false,
                                       &batch, &rows, &cols)) {
                         slog(WARN, "graph_compute: matmat shape mismatch at node %u", i);
                         ok = false;
                         goto done;
                     }
-                    mat_mat_mul(o, nd->weight, xa, batch, rows, cols, false, s->pthreads);
+                    mat_mat_mul(o, nd->src[0], xa, batch, rows, cols, false, s->pthreads);
                     break;
                 }
                 case OP_EMBED: {
-                    u64 n_embd = nd->weight->dim[nd->weight->ndim - 1];
+                    u64 n_embd = nd->src[0]->dim[nd->src[0]->ndim - 1];
                     u64 n_tok = sh->elems / n_embd;
                     for (u64 t = 0; t < n_tok; t++) {
                         i64 id = (i64)xa[t];
                         float *dst = o + t * n_embd;
                         if (id < 0) { memset(dst, 0, n_embd * sizeof(float)); continue; }
                         for (u64 j = 0; j < n_embd; j++)
-                            dst[j] = tensor_get_f32(nd->weight, (u64)id * n_embd + j);
+                            dst[j] = tensor_get_f32(nd->src[0], (u64)id * n_embd + j);
                     }
                     break;
                 }
@@ -403,7 +410,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const u32 *tokens, Session *s) {
                     float scale = 1.0f / sqrtf((float)kv_hd);
                     u64 n_tok = sh->dim0 ? sh->dim0 : 1;
                     u32 q_dim = (u32)(sh->elems / n_tok);
-                    u32 kv_dim = (u32)(shape[nd->src[1]].elems / n_tok);
+                    u32 kv_dim = (u32)(shape[nd->ne[1]].elems / n_tok);
                     float *scores = smalloc((u64)n_tok * sizeof(float));
                     if (!scores) { ok = false; goto done; }
                     memset(o, 0, sh->elems * sizeof(float));
