@@ -1014,43 +1014,6 @@ static float sse_dot_q8_k_block(const u8 *data, const float *x) {
     return d * acc;
 }
 
-/* Whole-register byte shift right (srli_si128 needs a constant). */
-static __m128i sse_bytes_srli(__m128i v, int s) {
-    switch (s) {
-        case 0:  return v;
-        case 1:  return _mm_srli_si128(v, 1);
-        case 2:  return _mm_srli_si128(v, 2);
-        case 3:  return _mm_srli_si128(v, 3);
-        case 4:  return _mm_srli_si128(v, 4);
-        case 5:  return _mm_srli_si128(v, 5);
-        case 6:  return _mm_srli_si128(v, 6);
-        default: return _mm_srli_si128(v, 7);
-    }
-}
-
-/* Per-byte logical right shift of every byte lane, then AND with m
- * (applied to the low byte of every 16-bit lane).  PSRLW shifts 16-bit
- * lanes: after _mm_srl_epi16(v, k) the low byte of lane m holds
- * (b_even>>k) | (b_odd << (8-k)), which the mask removes whenever
- * 8-k >= width(m); the high byte holds b_odd>>k.  Re-interleaving the
- * two halves yields the per-byte result at every byte position. */
-static __m128i sse_byte_shr(__m128i v, int k, int m) {
-    __m128i s    = _mm_srl_epi16(v, _mm_cvtsi32_si128(k));
-    __m128i even = _mm_and_si128(s, _mm_set1_epi16((short)m));
-    __m128i odd  = _mm_and_si128(_mm_srli_si128(s, 1), _mm_set1_epi16(0xFF));
-    return _mm_or_si128(even, _mm_slli_si128(odd, 1));
-}
-
-/* Per-byte logical left shift.  After PSLLW each lane's low byte holds
- * b_even<<k and its high byte (b_odd<<k) | (b_even >> (8-k)); masking
- * every byte with (0xFF<<k)&0xFF drops the b_even bleed from the high
- * byte (its bits land below k). */
-static __m128i sse_byte_shl(__m128i v, int k) {
-    int mb = (0xFF << k) & 0xFF;
-    return _mm_and_si128(_mm_sll_epi16(v, _mm_cvtsi32_si128(k)),
-                         _mm_set1_epi16((short)(mb | (mb << 8))));
-}
-
 /* Q6_K: sum = d * Σ(sc[sb] * Σ((q - 32) * x)) */
 static float sse_dot_q6_k_block(const u8 *data, const float *x) {
     float d = f16_to_f32(*(const u16 *)(data + 208));
@@ -1063,26 +1026,25 @@ static float sse_dot_q6_k_block(const u8 *data, const float *x) {
         i32 sc = (i8)scales[sb];
         u32 start = (u32)sb * 16;
 
-        /* Vectorised unpack, bit-identical to the scalar walk (see the
-         * NEON twin in quants_arm.c): lo = nibbles of 16 contiguous ql
-         * bytes (low/high nibbles by half-quarter), hi = 2-bit lane of
-         * 16 contiguous qh bytes. */
-        u32 sub7  = (u32)sb & 7;
-        u32 half  = (u32)sb >> 3;
-        u32 which = sub7 >> 1;
-        u32 sbpar = sub7 & 1;
-        const u8 *qsrc = ql + (half << 6) + ((which & 1) << 5) + (sbpar << 4);
-        const u8 *hsrc = qh + (half << 5) + (sbpar << 4);
+        u8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o     = start + (u32)j;
+            u32 half  = o >> 7;
+            u32 hl    = o & 127;
+            u32 which = hl >> 5;
+            u32 l     = hl & 31;
+            u32 ql_off = (half << 6) + ((which & 1) << 5) + l;
+            u32 lo = (which >= 2) ? ((ql[ql_off] >> 4) & 0xF) : (ql[ql_off] & 0xF);
+            u32 qh_off = (half << 5) + l;
+            u32 hi = (qh[qh_off] >> (which * 2)) & 0x3;
+            vals[j] = (u8)(lo | (hi << 4));
+        }
 
         __m128 dot0 = _mm_setzero_ps(), dot1 = _mm_setzero_ps();
         __m128 dot2 = _mm_setzero_ps(), dot3 = _mm_setzero_ps();
         __m128 sx0  = _mm_setzero_ps(), sx1  = _mm_setzero_ps();
 
-        __m128i vu8 = _mm_or_si128(
-            sse_byte_shr(_mm_loadu_si128((const __m128i *)qsrc),
-                         (which >= 2) ? 4 : 0, 0x0F),
-            sse_byte_shl(sse_byte_shr(_mm_loadu_si128((const __m128i *)hsrc),
-                                      which * 2, 0x3), 4));
+        __m128i vu8 = _mm_loadu_si128((const __m128i *)vals);
         __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
         __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
         __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
@@ -1188,19 +1150,12 @@ static float sse_dot_q5_k_block(const u8 *data, const float *x) {
         const u8 *src_lo = qs + g * 32;
         u32 start = (u32)sb * 32;
 
-        /* Vectorised unpack, bit-identical to the scalar walk (see the
-         * NEON twin in quants_arm.c): lo = nibbles of 16 contiguous qs
-         * bytes (low/high by sub-block parity), hi = bit sb of qh. */
-        __m128i val[2];
-        for (int c = 0; c < 2; c++) {
-            const u8 *qs16 = src_lo + c * 16;
-            const u8 *qh16 = qh + c * 16;
-            __m128i lo = sse_byte_shr(_mm_loadu_si128((const __m128i *)qs16),
-                                      nb ? 4 : 0, 0x0F);
-            __m128i hi = sse_byte_shl(
-                sse_byte_shr(_mm_loadu_si128((const __m128i *)qh16),
-                             (u32)sb, 0x1), 4);
-            val[c] = _mm_or_si128(lo, hi);
+        u8 vals[32];
+        for (int j = 0; j < 32; j++) {
+            u32 o  = start + (u32)j;
+            u32 hi = (qh[o & 31] >> (o >> 5)) & 1;
+            u32 lo = nb ? (src_lo[j] >> 4) : (src_lo[j] & 0xF);
+            vals[j] = (u8)(lo | (hi << 4));
         }
 
         __m128 dot0 = _mm_setzero_ps(), dot1 = _mm_setzero_ps();
@@ -1209,7 +1164,7 @@ static float sse_dot_q5_k_block(const u8 *data, const float *x) {
         __m128 sx2  = _mm_setzero_ps(), sx3  = _mm_setzero_ps();
 
         for (int j = 0; j < 32; j += 16) {
-            __m128i vu8 = val[j >> 4];
+            __m128i vu8 = _mm_loadu_si128((const __m128i *)(vals + j));
             __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
             __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
             __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
@@ -1254,24 +1209,18 @@ static float sse_dot_q3_k_block(const u8 *data, const float *x) {
         i32 sc = (i32)(sc_low | (sc_high << 4)) - 32;
 
         u32 start = (u32)sb * 16;
-
-        /* Vectorised unpack, bit-identical to the scalar walk (see the
-         * NEON twin in quants_arm.c): lo = 2-bit lane ((sb>>1)&3) of 16
-         * contiguous qs bytes, hi = bit lane (sb>>1) of 16 qh bytes. */
-        __m128i vu8;
-        {
-            u32 g   = (u32)sb >> 3;
-            u32 pr  = ((u32)sb >> 1) & 3;
-            u32 bc  = (u32)sb & 1;
-            const u8 *lsrc = qs + (g << 5) + (bc << 4);
-            const u8 *hsrc = qh + (bc << 4);
-            __m128i lo = sse_byte_shr(_mm_loadu_si128((const __m128i *)lsrc),
-                                      pr * 2, 0x3);
-            __m128i hi = sse_byte_shl(
-                sse_byte_shr(_mm_loadu_si128((const __m128i *)hsrc),
-                             (u32)sb >> 1, 0x1), 2);
-            vu8 = _mm_or_si128(lo, hi);
+        u8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o   = start + (u32)j;
+            u32 g   = o >> 7;
+            u32 pr  = (o >> 5) & 3;
+            u32 bc  = o & 31;
+            u32 lo  = (qs[g * 32 + bc] >> (pr * 2)) & 0x3;
+            u32 hi  = (qh[o & 31] >> (o >> 5)) & 1;
+            vals[j]  = (u8)(lo | (hi << 2));
         }
+
+        __m128i vu8 = _mm_loadu_si128((const __m128i *)vals);
         __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
         __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
         __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
@@ -1309,39 +1258,15 @@ static float sse_dot_q2_k_block(const u8 *data, const float *x) {
         if (sb & 1) sc >>= 4; else sc &= 0xF;
 
         u32 start = (u32)sb * 16;
-
-        /* Vectorised unpack, bit-identical to the scalar walk (see the
-         * NEON twin in quants_arm.c): 2-bit magnitudes from a 4-byte
-         * window splatted to lanes (j>>2) and shifted by 2*(j&3), and
-         * sign bits from a 2-byte window splatted to (j>>3) and shifted
-         * by (j&7).  SSE has no per-byte shifts, so each extraction is
-         * accumulated from uniform shifts selected by byte-position
-         * masks. */
-        __m128i vs8;
-        {
-            __m128i idx4 = _mm_setr_epi8(0, 0, 0, 0, 1, 1, 1, 1,
-                                         2, 2, 2, 2, 3, 3, 3, 3);
-            __m128i idx8 = _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0,
-                                         1, 1, 1, 1, 1, 1, 1, 1);
-            __m128i mags = _mm_shuffle_epi8(
-                _mm_loadu_si128((const __m128i *)(data + (sb << 2))), idx4);
-            __m128i base4 = _mm_set1_epi32(0xFF000000);        /* bytes 3,7,11,15 */
-            __m128i base8 = _mm_set_epi32(0, 0, 0xFF000000, 0xFF000000); /* bytes 7,15 */
-            __m128i mag = _mm_setzero_si128();
-            for (int l = 0; l < 4; l++) {       /* byte masks: j ≡ l (mod 4) */
-                mag = _mm_or_si128(mag, _mm_and_si128(
-                    sse_byte_shr(mags, 2 * l, 0x3), sse_bytes_srli(base4, 3 - l)));
-            }
-
-            __m128i sg = _mm_shuffle_epi8(
-                _mm_loadu_si128((const __m128i *)(data + (sb << 1))), idx8);
-            __m128i sign = _mm_setzero_si128();
-            for (int l = 0; l < 8; l++) {       /* byte masks: j ≡ l (mod 8) */
-                sign = _mm_or_si128(sign, _mm_and_si128(
-                    sse_byte_shr(sg, l, 0x1), sse_bytes_srli(base8, 7 - l)));
-            }
-            vs8 = _mm_sub_epi8(mag, sse_byte_shl(sign, 2));
+        i8 vals[16];
+        for (int j = 0; j < 16; j++) {
+            u32 o   = start + (u32)j;
+            u32 q2  = (data[(o >> 2)] >> ((o & 3) << 1)) & 0x3;
+            u32 sign = (data[(o >> 3)] >> (o & 7)) & 1;
+            vals[j] = (i8)((i32)q2 - (i32)sign * 4);
         }
+
+        __m128i vs8  = _mm_loadu_si128((const __m128i *)vals);
         __m128i v16_0 = _mm_cvtepi8_epi16(vs8);
         __m128i v16_1 = _mm_cvtepi8_epi16(_mm_srli_si128(vs8, 8));
         __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
