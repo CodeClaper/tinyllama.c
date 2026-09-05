@@ -1014,61 +1014,89 @@ static float sse_dot_q8_k_block(const u8 *data, const float *x) {
     return d * acc;
 }
 
-/* Q6_K: sum = d * Σ(sc[sb] * Σ((q - 32) * x)) */
+/* ================================================================
+ * Byte-lane unpack helpers
+ *
+ * The K-quant layouts pack several quant codes into one byte, so each
+ * element needs its own shift amount.  SSE has no per-byte shift, but
+ * a 16-bit lane multiply does the job: the high byte of x * 2^(8-k) is
+ * exactly x >> k, and x * 2^(8-k) < 2^16 for any byte x — so PMULLW
+ * cannot wrap.  Working in 16-bit lanes also halves the widening work
+ * on the way to float (CVTEPI16_EPI32 instead of CVTEPU8_EPI16 +
+ * CVTEPI16_EPI32).
+ * ================================================================ */
+
+/* Widen 8 bytes to 8 int16 lanes, shifting every byte right by k (0..7):
+ *   lane[n] = (u8)v[n] >> k
+ * `v8` holds the 8 bytes in its low half (e.g. from _mm_loadl_epi64). */
+static inline __m128i sse_u8_shr_x8(__m128i v8, u32 k) {
+    __m128i mul = _mm_set1_epi16((i16)(1u << (8 - k)));
+    return _mm_srli_epi16(_mm_mullo_epi16(_mm_cvtepu8_epi16(v8), mul), 8);
+}
+
+/* Same, with a per-lane shift: mul[n] holds 2^(8 - shift[n]) and `v8`
+ * must already carry zero-extended bytes in its 16-bit lanes. */
+static inline __m128i sse_u8_shr_x8_var(__m128i v8, __m128i mul) {
+    return _mm_srli_epi16(_mm_mullo_epi16(v8, mul), 8);
+}
+
+/* Σ (i16)v[n] * x[n] over the 8 lanes of v, as one __m128. */
+static inline __m128 sse_i16_dot_x8(__m128i v, const float *x) {
+    __m128 f0 = _mm_mul_ps(_mm_cvtepi32_ps(_mm_cvtepi16_epi32(v)),
+                           _mm_loadu_ps(x + 0));
+    __m128 f1 = _mm_mul_ps(
+        _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v, 8))),
+        _mm_loadu_ps(x + 4));
+    return _mm_add_ps(f0, f1);
+}
+
+/*
+ * Q6_K: sum = d * Σ(sc[sb] * Σ((q - 32) * x))
+ *
+ * 16 sub-blocks of 16 elements; the i8 scale is per sub-block.
+ */
 static float sse_dot_q6_k_block(const u8 *data, const float *x) {
     float d = f16_to_f32(*(const u16 *)(data + 208));
     const u8 *scales = data + 192;
     const u8 *ql     = data;
     const u8 *qh     = data + 128;
 
+    const __m128i nib = _mm_set1_epi16(0x0F);   /* low nibbles    */
+    const __m128i hi2 = _mm_set1_epi16(0x03);   /* high 2 bits    */
+    const __m128i bias = _mm_set1_epi16(32);    /* q - 32         */
+
     float acc = 0.0f;
     for (int sb = 0; sb < 16; sb++) {
         i32 sc = (i8)scales[sb];
         u32 start = (u32)sb * 16;
 
-        u8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o     = start + (u32)j;
-            u32 half  = o >> 7;
-            u32 hl    = o & 127;
-            u32 which = hl >> 5;
-            u32 l     = hl & 31;
-            u32 ql_off = (half << 6) + ((which & 1) << 5) + l;
-            u32 lo = (which >= 2) ? ((ql[ql_off] >> 4) & 0xF) : (ql[ql_off] & 0xF);
-            u32 qh_off = (half << 5) + l;
-            u32 hi = (qh[qh_off] >> (which * 2)) & 0x3;
-            vals[j] = (u8)(lo | (hi << 4));
+        /* Vectorised unpack, bit-identical to the scalar walk (see the NEON
+         * twin in quants_arm.c): 16 contiguous ql bytes carry the low nibbles
+         * (the high nibbles for the upper two quarters of each 128-element
+         * half) and 16 contiguous qh bytes carry the high 2 bits at lane
+         * `which`. */
+        u32 sub7  = (u32)sb & 7;
+        u32 half  = (u32)sb >> 3;
+        u32 which = sub7 >> 1;
+        u32 sbpar = sub7 & 1;
+        const u8 *qsrc = ql + (half << 6) + ((which & 1) << 5) + (sbpar << 4);
+        const u8 *hsrc = qh + (half << 5) + (sbpar << 4);
+
+        __m128 s = _mm_setzero_ps();
+        for (int c = 0; c < 2; c++) {
+            __m128i lo = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(qsrc + c * 8)),
+                              which >= 2 ? 4 : 0), nib);
+            __m128i hi = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(hsrc + c * 8)),
+                              which * 2), hi2);
+
+            /* q = lo | (hi << 4), then (q - 32) in int16. */
+            __m128i v = _mm_sub_epi16(_mm_or_si128(lo, _mm_slli_epi16(hi, 4)),
+                                      bias);
+            s = _mm_add_ps(s, sse_i16_dot_x8(v, x + start + c * 8));
         }
-
-        __m128 dot0 = _mm_setzero_ps(), dot1 = _mm_setzero_ps();
-        __m128 dot2 = _mm_setzero_ps(), dot3 = _mm_setzero_ps();
-        __m128 sx0  = _mm_setzero_ps(), sx1  = _mm_setzero_ps();
-
-        __m128i vu8 = _mm_loadu_si128((const __m128i *)vals);
-        __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
-        __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
-        __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-        __m128 vf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-        __m128 vf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-        __m128 vf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
-
-        __m128 xv0 = _mm_loadu_ps(x + start +  0);
-        __m128 xv1 = _mm_loadu_ps(x + start +  4);
-        __m128 xv2 = _mm_loadu_ps(x + start +  8);
-        __m128 xv3 = _mm_loadu_ps(x + start + 12);
-
-        dot0 = _mm_add_ps(dot0, _mm_mul_ps(vf0, xv0));
-        dot1 = _mm_add_ps(dot1, _mm_mul_ps(vf1, xv1));
-        dot2 = _mm_add_ps(dot2, _mm_mul_ps(vf2, xv2));
-        dot3 = _mm_add_ps(dot3, _mm_mul_ps(vf3, xv3));
-        sx0 = _mm_add_ps(sx0, xv0); sx1 = _mm_add_ps(sx1, xv1);
-
-        __m128 sx_all = _mm_add_ps(_mm_add_ps(_mm_add_ps(sx0, sx1), xv2), xv3);
-
-        float dot_q = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(dot0, dot1), _mm_add_ps(dot2, dot3)));
-        float sum_x = sse_hsum_f32x4(sx_all);
-
-        acc += (float)sc * (dot_q - 32.0f * sum_x);
+        acc += (float)sc * sse_hsum_f32x4(s);
     }
     return d * acc;
 }
@@ -1141,6 +1169,9 @@ static float sse_dot_q5_k_block(const u8 *data, const float *x) {
 
     float dot_acc = 0.0f, sum_acc = 0.0f;
 
+    const __m128i nib = _mm_set1_epi16(0x0F);   /* lo nibbles */
+    const __m128i hi1 = _mm_set1_epi16(0x01);   /* hi bit     */
+
     for (int sb = 0; sb < 8; sb++) {
         u8 sc, mn;
         q4k_scale_min(sm, (u32)sb, &sc, &mn);
@@ -1150,46 +1181,29 @@ static float sse_dot_q5_k_block(const u8 *data, const float *x) {
         const u8 *src_lo = qs + g * 32;
         u32 start = (u32)sb * 32;
 
-        u8 vals[32];
-        for (int j = 0; j < 32; j++) {
-            u32 o  = start + (u32)j;
-            u32 hi = (qh[o & 31] >> (o >> 5)) & 1;
-            u32 lo = nb ? (src_lo[j] >> 4) : (src_lo[j] & 0xF);
-            vals[j] = (u8)(lo | (hi << 4));
+        /* Vectorised unpack, bit-identical to the scalar walk (see the NEON
+         * twin in quants_arm.c): lo = nibbles of 32 contiguous qs bytes
+         * (high nibbles when the sub-block is odd), hi = bit sb of the 32 qh
+         * bytes, one byte per element. */
+        __m128 dot = _mm_setzero_ps(), sx = _mm_setzero_ps();
+
+        for (int c = 0; c < 4; c++) {
+            __m128i lo = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(src_lo + c * 8)),
+                              nb ? 4 : 0), nib);
+            __m128i hi = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(qh + c * 8)),
+                              (u32)sb), hi1);
+
+            __m128i v = _mm_or_si128(lo, _mm_slli_epi16(hi, 4));
+
+            dot = _mm_add_ps(dot, sse_i16_dot_x8(v, x + start + c * 8));
+            sx  = _mm_add_ps(sx, _mm_add_ps(_mm_loadu_ps(x + start + c * 8 + 0),
+                                            _mm_loadu_ps(x + start + c * 8 + 4)));
         }
 
-        __m128 dot0 = _mm_setzero_ps(), dot1 = _mm_setzero_ps();
-        __m128 dot2 = _mm_setzero_ps(), dot3 = _mm_setzero_ps();
-        __m128 sx0  = _mm_setzero_ps(), sx1  = _mm_setzero_ps();
-        __m128 sx2  = _mm_setzero_ps(), sx3  = _mm_setzero_ps();
-
-        for (int j = 0; j < 32; j += 16) {
-            __m128i vu8 = _mm_loadu_si128((const __m128i *)(vals + j));
-            __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
-            __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
-            __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-            __m128 vf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-            __m128 vf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-            __m128 vf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
-
-            __m128 xv0 = _mm_loadu_ps(x + start + j +  0);
-            __m128 xv1 = _mm_loadu_ps(x + start + j +  4);
-            __m128 xv2 = _mm_loadu_ps(x + start + j +  8);
-            __m128 xv3 = _mm_loadu_ps(x + start + j + 12);
-
-            dot0 = _mm_add_ps(dot0, _mm_mul_ps(vf0, xv0));
-            dot1 = _mm_add_ps(dot1, _mm_mul_ps(vf1, xv1));
-            dot2 = _mm_add_ps(dot2, _mm_mul_ps(vf2, xv2));
-            dot3 = _mm_add_ps(dot3, _mm_mul_ps(vf3, xv3));
-            sx0 = _mm_add_ps(sx0, xv0); sx1 = _mm_add_ps(sx1, xv1);
-            sx2 = _mm_add_ps(sx2, xv2); sx3 = _mm_add_ps(sx3, xv3);
-        }
-
-        float dot_q = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(dot0, dot1), _mm_add_ps(dot2, dot3)));
-        float sum_x = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(sx0, sx1), _mm_add_ps(sx2, sx3)));
-
-        dot_acc += (float)sc * dot_q;
-        sum_acc += (float)mn * sum_x;
+        dot_acc += (float)sc * sse_hsum_f32x4(dot);
+        sum_acc += (float)mn * sse_hsum_f32x4(sx);
     }
     return d * dot_acc - dmin * sum_acc;
 }
@@ -1201,6 +1215,10 @@ static float sse_dot_q3_k_block(const u8 *data, const float *x) {
     const u8 *qs     = data + 32;
     const u8 *scales = data + 96;
 
+    const __m128i lo2  = _mm_set1_epi16(0x03);  /* lo 2 bits   */
+    const __m128i hi1  = _mm_set1_epi16(0x01);  /* hi bit      */
+    const __m128i bias = _mm_set1_epi16(4);     /* q - 4       */
+
     float acc = 0.0f;
     for (int sb = 0; sb < 16; sb++) {
         u32 s = (u32)sb;
@@ -1209,36 +1227,29 @@ static float sse_dot_q3_k_block(const u8 *data, const float *x) {
         i32 sc = (i32)(sc_low | (sc_high << 4)) - 32;
 
         u32 start = (u32)sb * 16;
-        u8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o   = start + (u32)j;
-            u32 g   = o >> 7;
-            u32 pr  = (o >> 5) & 3;
-            u32 bc  = o & 31;
-            u32 lo  = (qs[g * 32 + bc] >> (pr * 2)) & 0x3;
-            u32 hi  = (qh[o & 31] >> (o >> 5)) & 1;
-            vals[j]  = (u8)(lo | (hi << 2));
+
+        /* Vectorised unpack, bit-identical to the scalar walk (see the NEON
+         * twin in quants_arm.c): lo = 2-bit lane ((sb>>1)&3) of 16
+         * contiguous qs bytes, hi = bit lane (sb>>1) of 16 qh bytes. */
+        const u8 *lsrc = qs + (((u32)sb >> 3) << 5) + (((u32)sb & 1) << 4);
+        const u8 *hsrc = qh + (((u32)sb & 1) << 4);
+
+        __m128 dot = _mm_setzero_ps();
+
+        for (int c = 0; c < 2; c++) {
+            __m128i lo = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(lsrc + c * 8)),
+                              (((u32)sb >> 1) & 3) * 2), lo2);
+            __m128i hi = _mm_and_si128(
+                sse_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(hsrc + c * 8)),
+                              (u32)sb >> 1), hi1);
+
+            /* q = lo | (hi << 2), then (q - 4) in int16. */
+            __m128i v = _mm_sub_epi16(_mm_or_si128(lo, _mm_slli_epi16(hi, 2)),
+                                      bias);
+            dot = _mm_add_ps(dot, sse_i16_dot_x8(v, x + start + c * 8));
         }
-
-        __m128i vu8 = _mm_loadu_si128((const __m128i *)vals);
-        __m128i v16_0 = _mm_cvtepu8_epi16(vu8);
-        __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vu8, 8));
-        __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-        __m128 vf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-        __m128 vf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-        __m128 vf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
-
-        __m128 xv0 = _mm_loadu_ps(x + start +  0);
-        __m128 xv1 = _mm_loadu_ps(x + start +  4);
-        __m128 xv2 = _mm_loadu_ps(x + start +  8);
-        __m128 xv3 = _mm_loadu_ps(x + start + 12);
-
-        __m128 dot0 = _mm_mul_ps(vf0, xv0), dot1 = _mm_mul_ps(vf1, xv1);
-        __m128 dot2 = _mm_mul_ps(vf2, xv2), dot3 = _mm_mul_ps(vf3, xv3);
-        float dot_q = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(dot0, dot1), _mm_add_ps(dot2, dot3)));
-        float sum_x = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(xv0, xv1), _mm_add_ps(xv2, xv3)));
-
-        acc += (float)sc * (dot_q - 4.0f * sum_x);
+        acc += (float)sc * sse_hsum_f32x4(dot);
     }
     return d * acc;
 }
@@ -1253,38 +1264,58 @@ static float sse_dot_q2_k_block(const u8 *data, const float *x) {
     __m128 total_sx0 = _mm_setzero_ps(), total_sx1 = _mm_setzero_ps();
     __m128 total_sx2 = _mm_setzero_ps(), total_sx3 = _mm_setzero_ps();
 
+    /* Per-lane shift multipliers: 2^(8 - shift) for the 2-bit magnitudes
+     * (shift = 2*(j&3)) and for the sign bits (shift = j&7). */
+    const __m128i mag_mul  = _mm_setr_epi16(256, 64, 16, 4, 256, 64, 16, 4);
+    const __m128i sgn_mul  = _mm_setr_epi16(256, 128, 64, 32, 16, 8, 4, 2);
+    /* Byte splats: element j reads byte (j>>2) of the 4-byte magnitude
+     * window and byte (j>>3) of the 2-byte sign window; index -1 (= 0)
+     * keeps the high byte of every 16-bit lane clear. */
+    const __m128i mag_idx[2] = {
+        _mm_setr_epi8( 0, -1,  0, -1,  0, -1,  0, -1,  1, -1,  1, -1,  1, -1,  1, -1),
+        _mm_setr_epi8( 2, -1,  2, -1,  2, -1,  2, -1,  3, -1,  3, -1,  3, -1,  3, -1),
+    };
+    const __m128i sgn_idx[2] = {
+        _mm_setr_epi8( 0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0, -1,  0, -1),
+        _mm_setr_epi8( 1, -1,  1, -1,  1, -1,  1, -1,  1, -1,  1, -1,  1, -1,  1, -1),
+    };
+    const __m128i mag2 = _mm_set1_epi16(0x03);
+    const __m128i sgn1 = _mm_set1_epi16(0x01);
+
     for (int sb = 0; sb < 16; sb++) {
         u32 sc = scales[sb >> 1];
         if (sb & 1) sc >>= 4; else sc &= 0xF;
 
         u32 start = (u32)sb * 16;
-        i8 vals[16];
-        for (int j = 0; j < 16; j++) {
-            u32 o   = start + (u32)j;
-            u32 q2  = (data[(o >> 2)] >> ((o & 3) << 1)) & 0x3;
-            u32 sign = (data[(o >> 3)] >> (o & 7)) & 1;
-            vals[j] = (i8)((i32)q2 - (i32)sign * 4);
+
+        /* Vectorised unpack, bit-identical to the scalar walk (see the NEON
+         * twin in quants_arm.c): the 16 magnitudes come from the 4 bytes at
+         * (sb<<2) and the 16 sign bits from the 2 bytes at (sb<<1), each
+         * splatted to 16-bit lanes and shifted by its own lane count. */
+        u32 mw, sw;
+        memcpy(&mw, data + (sb << 2), 4);
+        memcpy(&sw, data + (sb << 1), 2);
+        __m128i mwv = _mm_cvtsi32_si128((i32)mw);
+        __m128i swv = _mm_cvtsi32_si128((i32)sw);
+
+        __m128 s = _mm_setzero_ps();
+        for (int c = 0; c < 2; c++) {
+            __m128i mag = _mm_and_si128(
+                sse_u8_shr_x8_var(_mm_shuffle_epi8(mwv, mag_idx[c]), mag_mul), mag2);
+            __m128i sgn = _mm_and_si128(
+                sse_u8_shr_x8_var(_mm_shuffle_epi8(swv, sgn_idx[c]), sgn_mul), sgn1);
+
+            /* q = mag - 4 * sign, in [-4, 3]. */
+            __m128i v = _mm_sub_epi16(mag, _mm_slli_epi16(sgn, 2));
+            s = _mm_add_ps(s, sse_i16_dot_x8(v, x + start + c * 8));
         }
 
-        __m128i vs8  = _mm_loadu_si128((const __m128i *)vals);
-        __m128i v16_0 = _mm_cvtepi8_epi16(vs8);
-        __m128i v16_1 = _mm_cvtepi8_epi16(_mm_srli_si128(vs8, 8));
-        __m128 vf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-        __m128 vf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-        __m128 vf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-        __m128 vf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
+        dot_acc += (float)(i32)sc * sse_hsum_f32x4(s);
 
         __m128 xv0 = _mm_loadu_ps(x + start +  0);
         __m128 xv1 = _mm_loadu_ps(x + start +  4);
         __m128 xv2 = _mm_loadu_ps(x + start +  8);
         __m128 xv3 = _mm_loadu_ps(x + start + 12);
-
-        __m128 d0 = _mm_mul_ps(vf0, xv0), d1 = _mm_mul_ps(vf1, xv1);
-        __m128 d2 = _mm_mul_ps(vf2, xv2), d3 = _mm_mul_ps(vf3, xv3);
-
-        dot_acc += (float)(i32)sc * sse_hsum_f32x4(
-            _mm_add_ps(_mm_add_ps(d0, d1), _mm_add_ps(d2, d3)));
-
         total_sx0 = _mm_add_ps(total_sx0, xv0); total_sx1 = _mm_add_ps(total_sx1, xv1);
         total_sx2 = _mm_add_ps(total_sx2, xv2); total_sx3 = _mm_add_ps(total_sx3, xv3);
     }
