@@ -1,7 +1,7 @@
 #ifndef __QUANTS_CPU_H__
 #define __QUANTS_CPU_H__
 
-#include "../def.h"
+#include "../../def.h"
 
 /*
  * Batch dequantize nb elements starting at index i0 from tensor ti.

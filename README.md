@@ -211,14 +211,19 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tok
     - qwen35.c        — Qwen3.5 architecture
     - deepseek.c      — DeepSeek architecture
     - falcon.c        — Falcon architecture
-  - cpu/              — CPU-optimized kernels
-    - quants_cpu.c    — Kernel dispatcher
-    - quants_cpu.h
-    - quants_x86.c    — x86 SIMD optimizations
-    - quants_arm.c    — ARM NEON optimizations
-  - gpu/              — GPU-optimized kernels
-    - quants_gpu.cu   — CUDA persistent-weight dequant + matmul/matvec backend
-    - quants_gpu.h
+  - backend/          — Hardware backends
+    - cpu/            — CPU-optimized kernels
+      - cpu.c         — Kernel dispatcher
+      - cpu.h
+      - cpu_x86.c     — x86 SIMD optimizations
+      - cpu_arm.c     — ARM NEON optimizations
+    - gpu/            — GPU-optimized kernels
+      - gpu.cu        — CUDA persistent-weight dequant + matmul/matvec backend
+      - gpu.h
+    - metal/          — Metal GPU backend (macOS only)
+      - metal.m       — Objective-C host side
+      - metal.h
+      - metal.metal   — MSL kernels (embedded via generated metal_msl.h)
 
 - test/               — Unit tests
   - Makefile

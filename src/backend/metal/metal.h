@@ -2,13 +2,13 @@
 #define __QUANTS_METAL_H__
 
 #include <stdbool.h>
-#include "../def.h"
+#include "../../def.h"
 
 /*
  * Metal batch dequantization backend (macOS only).
  *
- * Mirrors the CPU API in cpu/quants_cpu.h and the CUDA backend in
- * gpu/quants_gpu.h so the backends are drop-in interchangeable:
+ * Mirrors the CPU API in backend/cpu/cpu.h and the CUDA backend in
+ * backend/gpu/gpu.h so the backends are drop-in interchangeable:
  *   metal_dequant_batch  — dequantize nb elements starting at i0 into out
  *   metal_dequant_tensor — dequantize an entire tensor into out
  *   metal_dot_batch      — fused dequant + dot product

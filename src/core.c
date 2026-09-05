@@ -13,12 +13,12 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include "core.h"
-#include "cpu/quants_cpu.h"
+#include "backend/cpu/cpu.h"
 #ifdef GPU_BUILD
-#include "gpu/quants_gpu.h"
+#include "backend/gpu/gpu.h"
 #endif
 #ifdef METAL_BUILD
-#include "metal/quants_metal.h"
+#include "backend/metal/metal.h"
 #endif
 #include "pthreads.h"
 #include "mm.h"

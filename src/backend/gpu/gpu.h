@@ -4,12 +4,12 @@
 #include <stdbool.h>
 #include <stdio.h>  /* CHECK uses printf() */
 #include <stdlib.h> /* CHECK uses exit() */
-#include "../def.h"
+#include "../../def.h"
 
 /*
  * GPU (CUDA) batch dequantization backend.
  *
- * Mirrors the CPU API in cpu/quants_cpu.h so the two backends are
+ * Mirrors the CPU API in backend/cpu/cpu.h so the two backends are
  * drop-in interchangeable:
  *   gpu_dequant_batch  — dequantize nb elements starting at i0 into out
  *   gpu_dequant_tensor — dequantize an entire tensor into out

@@ -1,5 +1,5 @@
 /*
- * quants_cpu.c — NEON SIMD batch dequantization
+ * cpu_arm.c — NEON SIMD batch dequantization
  *
  * One block-level dequant function per GGUF quant type.
  * The dispatcher gguf_dequant_batch() processes full blocks with
@@ -9,9 +9,9 @@
 #include <string.h>
 #include <math.h>
 
-#include "../def.h"
-#include "../quants.h"
-#include "quants_cpu.h"
+#include "../../def.h"
+#include "../../quants.h"
+#include "cpu.h"
 
 /* ================================================================
  * Block sizes

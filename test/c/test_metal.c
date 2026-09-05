@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "minunit.h"
-#include "metal/quants_metal.h"
+#include "backend/metal/metal.h"
 #include "quants.h"
 
 /* Short name for diagnostics (no such helper exists in the engine). */
@@ -71,7 +71,7 @@ static uint32_t rng_next(void) {
 }
 
 /* Per-type block geometry — must match metal_geom() in
- * quants_metal.m and gguf_types[] in core.c. */
+ * metal.m and gguf_types[] in core.c. */
 typedef struct { u32 type; u64 be; u64 bb; } TypeGeom;
 
 #define GEOM(T, BE, BB) { GGUF_TYPE_##T, BE, BB }

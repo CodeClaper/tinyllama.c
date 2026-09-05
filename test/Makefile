@@ -24,7 +24,7 @@ ifdef GPU
 	CFLAGS += -D GPU_BUILD
 	LDFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
 	GPU_TESTS += test_gpu
-	GPU_LINK  += gpu_quants_gpu.o
+	GPU_LINK  += gpu.o
 endif
 
 # Metal backend test (optional, macOS only).  Build with: METAL=1 make
@@ -39,7 +39,7 @@ ifdef METAL
 	CFLAGS += -D METAL_BUILD
 	LDFLAGS += -framework Metal -framework Foundation
 	METAL_TESTS += test_metal
-	METAL_LINK  += metal_quants_metal.o
+	METAL_LINK  += metal.o
 endif
 
 all: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
@@ -80,8 +80,8 @@ core.o: $(SRC_DIR)/core.c $(SRC_DIR)/core.h $(SRC_DIR)/def.h $(SRC_DIR)/model/mo
 quants.o: $(SRC_DIR)/quants.c $(SRC_DIR)/quants.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/quants.c -o $@
 
-quants_cpu.o: $(SRC_DIR)/cpu/quants_cpu.c $(SRC_DIR)/cpu/quants_cpu.h $(SRC_DIR)/def.h $(SRC_DIR)/quants.h
-	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/cpu/quants_cpu.c -o $@
+cpu.o: $(SRC_DIR)/backend/cpu/cpu.c $(SRC_DIR)/backend/cpu/cpu.h $(SRC_DIR)/backend/cpu/cpu_arm.c $(SRC_DIR)/backend/cpu/cpu_x86.c $(SRC_DIR)/def.h $(SRC_DIR)/quants.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/backend/cpu/cpu.c -o $@
 
 llama.o: $(SRC_DIR)/model/llama.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/llama.c -o $@
@@ -92,25 +92,25 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o quants_cpu.o pthreads.o mm.o asctx.o slog.o utils.o graph.o $(GPU_LINK)
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o cpu.o pthreads.o mm.o asctx.o slog.o utils.o graph.o $(GPU_LINK)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
-gpu_quants_gpu.o: $(SRC_DIR)/gpu/quants_gpu.cu $(SRC_DIR)/gpu/quants_gpu.h $(SRC_DIR)/def.h
-	$(NVCC) $(NVCCFLAGS) -c $(SRC_DIR)/gpu/quants_gpu.cu -o $@
+gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h
+	$(NVCC) $(NVCCFLAGS) -c $(SRC_DIR)/backend/gpu/gpu.cu -o $@
 
-test_gpu: c/test_gpu.c gpu_quants_gpu.o quants.o slog.o utils.o mm.o asctx.o
+test_gpu: c/test_gpu.c gpu.o quants.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
-$(SRC_DIR)/metal/quants_metal_msl.h: $(SRC_DIR)/metal/quants_metal.metal
+$(SRC_DIR)/backend/metal/metal_msl.h: $(SRC_DIR)/backend/metal/metal.metal
 	@echo "  GEN $@"
-	@printf '/* Generated from quants_metal.metal - do not edit. */\n#ifndef __QUANTS_METAL_MSL_H__\n#define __QUANTS_METAL_MSL_H__\nstatic const char *quants_metal_msl =\n' > $@
-	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(SRC_DIR)/metal/quants_metal.metal >> $@
-	@printf ';\n#endif /* __QUANTS_METAL_MSL_H__ */\n' >> $@
+	@printf '/* Generated from metal.metal - do not edit. */\n#ifndef __METAL_MSL_H__\n#define __METAL_MSL_H__\nstatic const char *metal_msl =\n' > $@
+	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(SRC_DIR)/backend/metal/metal.metal >> $@
+	@printf ';\n#endif /* __METAL_MSL_H__ */\n' >> $@
 
-metal_quants_metal.o: $(SRC_DIR)/metal/quants_metal.m $(SRC_DIR)/metal/quants_metal.h $(SRC_DIR)/metal/quants_metal_msl.h $(SRC_DIR)/def.h
-	$(CC) $(CFLAGS) -fobjc-arc -I$(SRC_DIR) -c $(SRC_DIR)/metal/quants_metal.m -o $@
+metal.o: $(SRC_DIR)/backend/metal/metal.m $(SRC_DIR)/backend/metal/metal.h $(SRC_DIR)/backend/metal/metal_msl.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -fobjc-arc -I$(SRC_DIR) -c $(SRC_DIR)/backend/metal/metal.m -o $@
 
-test_metal: c/test_metal.c metal_quants_metal.o quants.o slog.o utils.o mm.o asctx.o
+test_metal: c/test_metal.c metal.o quants.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 .PHONY: all check clean
@@ -127,4 +127,4 @@ ifdef METAL
 endif
 
 clean:
-	rm -f test_pthreads test_qwen25 gpu_quants_gpu.o test_gpu metal_quants_metal.o test_metal *.o
+	rm -f test_pthreads test_qwen25 gpu.o test_gpu metal.o test_metal *.o

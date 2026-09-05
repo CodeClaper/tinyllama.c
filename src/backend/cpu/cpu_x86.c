@@ -9,9 +9,9 @@
 #include <string.h>
 #include <math.h>
 
-#include "../def.h"
-#include "../quants.h"
-#include "quants_cpu.h"
+#include "../../def.h"
+#include "../../quants.h"
+#include "cpu.h"
 
 /* ================================================================
  * Block sizes

@@ -1,10 +1,10 @@
 /*
- * quants_gpu.cu — CUDA batch dequantization backend.
+ * gpu.cu — CUDA batch dequantization backend.
  *
  * Each thread dequantizes one element directly from the raw GGUF bytes
  * that were uploaded to device memory, mirroring the scalar reference
  * implementation in quants.c (and the SIMD CPU batch kernels in
- * cpu/quants_cpu.c) so GPU output is bit-for-bit comparable.
+ * backend/cpu/cpu.c) so GPU output is bit-for-bit comparable.
  *
  * The IQ importance grids / value tables live on the host in quants.c;
  * they are copied into __constant__ memory once at first use.
@@ -13,8 +13,8 @@
 #include <cuda_runtime.h>
 #include <stdlib.h>
 
-#include "../def.h"
-#include "quants_gpu.h"
+#include "../../def.h"
+#include "gpu.h"
 
 extern "C" {
 /* Scalar reference dequant, used only by the CPU fallback paths. */

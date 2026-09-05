@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "minunit.h"
-#include "gpu/quants_gpu.h"
+#include "backend/gpu/gpu.h"
 #include "quants.h"
 
 /* Short name for diagnostics (no such helper exists in the engine). */
@@ -70,7 +70,7 @@ static uint32_t rng_next(void) {
     return (uint32_t)((x * 0x2545F4914F6CDD1Dull) >> 32);
 }
 
-/* Per-type block geometry — must match gpu_geom() in quants_gpu.cu
+/* Per-type block geometry — must match gpu_geom() in gpu.cu
  * and gguf_types[] in core.c. */
 typedef struct { u32 type; u64 be; u64 bb; } TypeGeom;
 

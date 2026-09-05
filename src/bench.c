@@ -12,10 +12,10 @@
 #include "tokenizer.h"
 #include "sampler.h"
 #ifdef GPU_BUILD
-#include "gpu/quants_gpu.h"
+#include "backend/gpu/gpu.h"
 #endif
 #ifdef METAL_BUILD
-#include "metal/quants_metal.h"
+#include "backend/metal/metal.h"
 #endif
 
 typedef struct {
