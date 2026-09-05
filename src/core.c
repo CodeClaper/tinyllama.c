@@ -868,15 +868,14 @@ static ModelArch model_detect_arch(Model *m) {
     Key arch_name;
     if (!model_get_key(m, "general.architecture", &arch_name)) return ARCH_UNKNOWN;
     /* Store the architecture name for metadata key lookups. */
-    u32 n = arch_name.len < sizeof(m->arch_name) - 1 ? arch_name.len
-                                                      : (u32)sizeof(m->arch_name) - 1;
+    u32 n = arch_name.len < sizeof(m->arch_name) - 1 ? arch_name.len : (u32)sizeof(m->arch_name) - 1;
     memcpy(m->arch_name, arch_name.content, n);
     m->arch_name[n] = '\0';
-    if (key_streq(arch_name, "llama"))   return ARCH_LLAMA;
-    if (key_streq(arch_name, "qwen2"))   return ARCH_QWEN2;
-    if (key_streq(arch_name, "qwen35"))  return ARCH_QWEN3;
+    if (key_streq(arch_name, "llama"))     return ARCH_LLAMA;
+    if (key_streq(arch_name, "qwen2"))     return ARCH_QWEN2;
+    if (key_streq(arch_name, "qwen35"))    return ARCH_QWEN3;
     if (key_streq(arch_name, "deepseek2")) return ARCH_DEEPSEEK;
-    if (key_streq(arch_name, "falcon"))  return ARCH_FALCON;
+    if (key_streq(arch_name, "falcon"))    return ARCH_FALCON;
     slog(WARN, "Unknown architecture: %s, loading as generic.", get_key_name(arch_name));
     return ARCH_UNKNOWN;
 }
@@ -1317,61 +1316,97 @@ static const LayerTensorMap unknown_layer_map[] = {
     {TENSOR_FFN_UP,     "ffn_up",       false},
 };
 
-/* Build the per-layer weight table: match each "blk.{N}.{suffix}.weight"
- * tensor against the architecture's layer map and record its role. */
-static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) {
-    LayerWeights *layers = scalloc(n_layer, sizeof(LayerWeights));
+/* Select the non-layer tensor map for an architecture. */
+static const TensorMapEntry *arch_tensor_map(ModelArch arch, int *count) {
+    static const struct {
+        ModelArch arch;
+        const TensorMapEntry *entries;
+        int count;
+    } maps[] = {
+        {ARCH_LLAMA,    llama_tensor_map,    ARR_LEN(llama_tensor_map)},
+        {ARCH_QWEN2,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
+        {ARCH_QWEN3,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
+        {ARCH_DEEPSEEK, deepseek_tensor_map, ARR_LEN(deepseek_tensor_map)},
+        {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
+    };
+    for (int i = 0; i < ARR_LEN(maps); i++) {
+        if (maps[i].arch == arch) {
+            *count = maps[i].count;
+            return maps[i].entries;
+        }
+    }
+    /* Architectures without a dedicated map (e.g. falcon) fall back to
+     * the generic one, which only requires token_embd. */
+    *count = ARR_LEN(unknown_tensor_map);
+    return unknown_tensor_map;
+}
 
+/* Select the per-layer tensor map for an architecture. */
+static const LayerTensorMap *arch_layer_map(ModelArch arch, int *count) {
     static const struct {
         ModelArch arch;
         const LayerTensorMap *entries;
         int count;
-    } arch_layer_maps[] = {
+    } maps[] = {
         {ARCH_LLAMA,    llama_layer_map,     ARR_LEN(llama_layer_map)},
         {ARCH_QWEN2,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
         {ARCH_QWEN3,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
         {ARCH_DEEPSEEK, deepseek_layer_map,  ARR_LEN(deepseek_layer_map)},
         {ARCH_UNKNOWN,  unknown_layer_map,   ARR_LEN(unknown_layer_map)},
     };
-
-    const LayerTensorMap *map = NULL;
-    int map_count = 0;
-    for (int i = 0; i < ARR_LEN(arch_layer_maps); i++) {
-        if (arch_layer_maps[i].arch == arch) {
-            map = arch_layer_maps[i].entries;
-            map_count = arch_layer_maps[i].count;
-            break;
+    for (int i = 0; i < ARR_LEN(maps); i++) {
+        if (maps[i].arch == arch) {
+            *count = maps[i].count;
+            return maps[i].entries;
         }
     }
-    if (!map) {
-        map = unknown_layer_map;
-        map_count = ARR_LEN(unknown_layer_map);
-    }
+    *count = ARR_LEN(unknown_layer_map);
+    return unknown_layer_map;
+}
+
+/* Parse a "blk.{N}.{suffix}[.weight]" tensor name.  Returns false when
+ * the key is not a per-layer tensor.  On success sets *layer and the
+ * length / start of the suffix, with any trailing ".weight" stripped
+ * (most GGUF tensors carry it, but some like ssm_a / ssm_dt.bias do not). */
+static bool layer_tensor_parse(const Key *k, u32 *layer,
+                               const char **suffix, u32 *suffix_len) {
+    if (k->len < 7 || memcmp(k->content, "blk.", 4) != 0) return false;
+
+    u32 n = 0;
+    u32 j;
+    for (j = 4; j < k->len && k->content[j] >= '0' && k->content[j] <= '9'; j++)
+        n = n * 10 + (u32)(k->content[j] - '0');
+    if (j >= k->len || k->content[j] != '.') return false;
+
+    const char *s = (const char *)k->content + j + 1;
+    u32 len = k->len - j - 1;
+    if (len > 7 && memcmp(s + len - 7, ".weight", 7) == 0) len -= 7;
+
+    *layer = n;
+    *suffix = s;
+    *suffix_len = len;
+    return true;
+}
+
+/* Build the per-layer weight table: match each "blk.{N}.{suffix}.weight"
+ * tensor against the architecture's layer map and record its role. */
+static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) {
+    LayerWeights *layers = scalloc(n_layer, sizeof(LayerWeights));
+    int map_count = 0;
+    const LayerTensorMap *map = arch_layer_map(arch, &map_count);
 
     for (u64 i = 0; i < m->n_tensor; i++) {
-        Key *k = &m->tensor[i].key;
-        if (k->len < 7) continue;
-        if (memcmp(k->content, "blk.", 4) != 0) continue;
-
-        u32 n = 0;
-        u32 j;
-        for (j = 4; j < k->len && k->content[j] >= '0' && k->content[j] <= '9'; j++)
-            n = n * 10 + (u32)(k->content[j] - '0');
-        if (j >= k->len || k->content[j] != '.' || n >= n_layer) continue;
-
-        const char *suffix_start = (const char *)k->content + j + 1;
-        u32 suffix_len = k->len - j - 1;
-
-        /* Strip trailing ".weight" if present (most GGUF tensors have it,
-         * but some like ssm_a / ssm_dt.bias do not). */
-        u32 match_len = suffix_len;
-        if (suffix_len > 7 && memcmp(suffix_start + suffix_len - 7, ".weight", 7) == 0)
-            match_len = suffix_len - 7;
+        u32 n;
+        const char *suffix;
+        u32 suffix_len;
+        if (!layer_tensor_parse(&m->tensor[i].key, &n, &suffix, &suffix_len))
+            continue;
+        if (n >= n_layer) continue;
 
         for (int e = 0; e < map_count; e++) {
             const char *s = map[e].suffix;
             u32 slen = (u32)strlen(s);
-            if (slen == match_len && memcmp(suffix_start, s, slen) == 0) {
+            if (slen == suffix_len && memcmp(suffix, s, slen) == 0) {
                 layers[n].tensors[map[e].role] = &m->tensor[i];
                 break;
             }
@@ -1386,32 +1421,8 @@ static LayerWeights *layers_weights_load(Model *m, ModelArch arch, u32 n_layer) 
  * output.weight is absent. */
 static Weights *weights_load(Model *m) {
     Weights *w = smalloc(sizeof(*w));
-
-    static const struct {
-        ModelArch arch;
-        const TensorMapEntry *entries;
-        int count;
-    } arch_maps[] = {
-        {ARCH_LLAMA,    llama_tensor_map,    ARR_LEN(llama_tensor_map)},
-        {ARCH_QWEN2,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
-        {ARCH_QWEN3,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
-        {ARCH_DEEPSEEK, deepseek_tensor_map, ARR_LEN(deepseek_tensor_map)},
-        {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
-    };
-
-    const TensorMapEntry *map = NULL;
     int map_count = 0;
-    for (int i = 0; i < ARR_LEN(arch_maps); i++) {
-        if (arch_maps[i].arch == m->arch) {
-            map = arch_maps[i].entries;
-            map_count = arch_maps[i].count;
-            break;
-        }
-    }
-    if (!map) {
-        map = unknown_tensor_map;
-        map_count = ARR_LEN(unknown_tensor_map);
-    }
+    const TensorMapEntry *map = arch_tensor_map(m->arch, &map_count);
 
     for (int i = 0; i < map_count; i++) {
         TensorInfo *t = model_find_tensor(m, (char *)map[i].name);
@@ -1428,6 +1439,97 @@ static Weights *weights_load(Model *m) {
     w->n_layer = model_count_layers(m);
     w->layers  = layers_weights_load(m, m->arch, w->n_layer);
     return w;
+}
+
+/* Read an integer-typed metadata value into *out regardless of which
+ * GGUF int type the file uses (u8/i8/u16/i16/u32/i32/u64/i64).  Some
+ * writers store split.no / split.count as u16, others as u32, so a
+ * single type-specific getter is not enough.  Returns false when the
+ * key is absent or not integer-typed. */
+static bool model_get_int(Model *m, const char *key, i64 *out) {
+    KV *kv = model_find_kv(m, (char *)key);
+    if (!kv) return false;
+    Cursor c = cursor_at(m->map, m->size, kv->value_pos);
+    i64 v;
+    switch (kv->type) {
+        case GGUF_VALUE_UINT8:  { u8  x; if (!cursor_read(&c, &x, 1)) return false; v = x; break; }
+        case GGUF_VALUE_INT8:   { i8  x; if (!cursor_read(&c, &x, 1)) return false; v = x; break; }
+        case GGUF_VALUE_UINT16: { u16 x; if (!cursor_read(&c, &x, 2)) return false; v = x; break; }
+        case GGUF_VALUE_INT16:  { i16 x; if (!cursor_read(&c, &x, 2)) return false; v = x; break; }
+        case GGUF_VALUE_UINT32: { u32 x; if (!cursor_read(&c, &x, 4)) return false; v = x; break; }
+        case GGUF_VALUE_INT32:  { i32 x; if (!cursor_read(&c, &x, 4)) return false; v = x; break; }
+        case GGUF_VALUE_UINT64: { u64 x; if (!cursor_read(&c, &x, 8)) return false; v = (i64)x; break; }
+        case GGUF_VALUE_INT64:  { i64 x; if (!cursor_read(&c, &x, 8)) return false; v = x; break; }
+        default: return false;
+    }
+    *out = v;
+    return true;
+}
+
+/* Verify that the loaded model is a complete, self-contained GGUF:
+ *   1. split-shard metadata  — a file with split.count > 1 is one piece
+ *      of a multi-file model and cannot be used on its own;
+ *   2. required tensors      — every tensor the architecture marks as
+ *      required must be present, both top-level and per-layer;
+ *   3. payload bounds        — every tensor's data must lie entirely
+ *      inside the mapped file (catches truncated files).
+ * Any violation is fatal: slog(ERROR) prints and exits the process. */
+static void model_completeness_check(Model *m) {
+    /* ---- 1. Split-model shard check ---- */
+    i64 split_no = -1, split_count = 0;
+    model_get_int(m, "split.no", &split_no);
+    if (model_get_int(m, "split.count", &split_count) && split_count > 1)
+        slog(ERROR, "Incomplete model: this file is shard %d of %d "
+             "(split.count=%d); a split GGUF needs all %d parts to form a "
+             "complete model.",
+             (int)(split_no + 1), (int)split_count, (int)split_count,
+             (int)split_count);
+
+    /* ---- 2. Required tensors ---- */
+    int map_count = 0;
+    const TensorMapEntry *map = arch_tensor_map(m->arch, &map_count);
+    for (int i = 0; i < map_count; i++) {
+        if (map[i].required && !model_find_tensor(m, (char *)map[i].name))
+            slog(ERROR, "Incomplete model: required tensor %s is missing.",
+                 map[i].name);
+    }
+
+    int layer_count = 0;
+    const LayerTensorMap *lmap = arch_layer_map(m->arch, &layer_count);
+    u32 n_layer = model_count_layers(m);
+    for (u32 l = 0; l < n_layer; l++) {
+        for (int e = 0; e < layer_count; e++) {
+            if (!lmap[e].required) continue;
+            bool found = false;
+            u32 slen = (u32)strlen(lmap[e].suffix);
+            for (u64 i = 0; i < m->n_tensor && !found; i++) {
+                u32 tn;
+                const char *suffix;
+                u32 suffix_len;
+                if (!layer_tensor_parse(&m->tensor[i].key, &tn, &suffix, &suffix_len))
+                    continue;
+                if (tn == l && slen == suffix_len &&
+                    memcmp(suffix, lmap[e].suffix, slen) == 0)
+                    found = true;
+            }
+            if (!found) {
+                char name[96];
+                snprintf(name, sizeof(name), "blk.%u.%s.weight", l,
+                         lmap[e].suffix);
+                slog(ERROR, "Incomplete model: required tensor %s is missing.",
+                     name);
+            }
+        }
+    }
+
+    /* ---- 3. Tensor payload bounds ---- */
+    for (u64 i = 0; i < m->n_tensor; i++) {
+        TensorInfo *t = &m->tensor[i];
+        if (t->offset > m->size || t->bytes > m->size - t->offset)
+            slog(ERROR, "Incomplete model: tensor %s (offset=%" PRIu64
+                 ", bytes=%" PRIu64 ") exceeds file size %" PRIu64 ".",
+                 get_key_name(t->key), t->offset, t->bytes, m->size);
+    }
 }
 
 /* Load a GGUF v3 model: open + mmap the file, then parse the header,
@@ -1474,6 +1576,8 @@ Model *model_load(const char *path) {
     }
 
     m->arch = model_detect_arch(m);
+
+    model_completeness_check(m);
 
     return m;
 }
