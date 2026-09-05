@@ -351,12 +351,16 @@ typedef enum {
     OP_MATMULARRY, /* out[b] = W @ x[b]           (mat-mat, batch)   */
     OP_MATMUL_T,   /* out = W^T @ x               (mat-vec)          */
     OP_RMS_NORM,   /* out = rms(x) * w                               */
+    OP_RMS_NORM_HEADS, /* per-head rms(x)*w over [n_heads, head_dim] */
+    OP_SIGMOID_GATE,   /* out = a * sigmoid(gate half of b)          */
     OP_ROPE_NEOX,  /* out = rope(in)                                 */
     OP_SOFTMAX,    /* out = softmax(x)  (per-row over last dim)      */
     OP_SILU,       /* out = silu(x)                                  */
     OP_EMBED,      /* out = token_embd[token]                        */
     OP_BIAS,       /* out = x + bias      (per-row over weight)      */
     OP_ATTN,       /* out = attn(q, k, v) (causal multi-head, GQA)   */
+    OP_SSM_CONV,   /* depthwise causal conv1d (Gated DeltaNet)       */
+    OP_SSM_DELTA,  /* gated delta recurrence (Gated DeltaNet)        */
 } GraphOp;
 
 
@@ -385,6 +389,13 @@ typedef struct Graph {
      * lifetime analysis on the first execution. */
     void      *arena;
     size_t     arena_size;
+    /* Buffers borrowed from the arch workspace by stateful ops (e.g.
+     * the Gated DeltaNet conv ring + recurrent state).  Indexed by the
+     * handle graph_state() returns, which ops bake into params[].
+     * Borrowed only — graph_free() never frees the targets. */
+    void     **state;
+    u32        n_state;
+    u32        state_cap;
 } Graph;
 
 typedef struct {

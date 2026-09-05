@@ -35,19 +35,6 @@ typedef struct {
 
 /* ---- Arch ops --------------------------------------------------- */
 
-/* In-place RMS normalization of a single head_dim slice.
- * Equivalent to rms_norm(o, x, weight, epsilon) but operates
- * directly on the input buffer (o == x).  The caller has already
- * dequantised the weight array. */
-static void rms_norm_inplace(float *x, const float *weight, u32 n, float eps) {
-    float ss = 0.0f;
-    for (u32 j = 0; j < n; j++)
-        ss += x[j] * x[j];
-    ss = 1.0f / sqrtf(ss / (float)n + eps);
-    for (u32 j = 0; j < n; j++)
-        x[j] = x[j] * ss * weight[j];
-}
-
 /* Qwen3.5 K-norm: the K projection output has shape [n_kv_head, head_dim].
  * Apply RMS norm to each head_dim slice in-place. */
 static void qwen_k_norm(float *k, u32 n_kv_head, u32 head_dim,
@@ -55,127 +42,6 @@ static void qwen_k_norm(float *k, u32 n_kv_head, u32 head_dim,
     for (u32 h = 0; h < n_kv_head; h++) {
         float *hk = k + (u64)h * head_dim;
         rms_norm_inplace(hk, norm_weight, head_dim, eps);
-    }
-}
-
-/* L2-normalize each row of a [n_rows, dim] matrix in-place.
- * Used for Q and K in the Gated DeltaNet recurrence. */
-static void l2_norm_rows(float *x, u32 n_rows, u32 dim, float eps) {
-    for (u32 r = 0; r < n_rows; r++) {
-        float *row = x + (u64)r * dim;
-        float ss = 0.0f;
-        for (u32 i = 0; i < dim; i++)
-            ss += row[i] * row[i];
-        float inv = 1.0f / sqrtf(ss + eps);
-        for (u32 i = 0; i < dim; i++)
-            row[i] *= inv;
-    }
-}
-
-/* Depthwise causal Conv1d step for single-token inference.
- * Processes fused QKV output (channels) through a depthwise conv
- * with kernel_size taps, maintaining a ring buffer of previous inputs.
- * weight – [channels * kernel_size] dequantised weight (GGUF layout,
- *          PyTorch Conv1d convention), weight[c * kernel_size + k] for
- *          channel c, tap k.
- *          Tap k multiplies the input from k taps ago: tap 0 is the
- *          OLDEST input (x[t-(K-1)]), tap K-1 is the current input,
- *          matching ggml_ssm_conv and the reference implementation.
- * state  – [(kernel_size-1) * channels] ring buffer (oldest first).
- * On return, state is shifted and the new input is stored. */
-static void causal_conv1d_step(float *output, const float *input,
-                               const float *weight, float *state,
-                               u32 channels, u32 kernel_size) {
-    /* Callers run this in-place (output == input), which clobbers the
-     * raw inputs before the state update below.  The state must hold
-     * the RAW pre-conv inputs — storing the conv outputs there instead
-     * corrupts every subsequent token's window and silently diverges
-     * the whole recurrence.  Save a copy only when aliased. */
-    float *saved = NULL;
-    if (input == output) {
-        saved = smalloc((u64)channels * sizeof(float));
-        memcpy(saved, input, (u64)channels * sizeof(float));
-    }
-    const float *raw = saved ? saved : input;
-
-    /* State is stored [oldest, ..., newest] = [x[t-(K-1)], ..., x[t-1]]
-     * at positions [0, ..., K-2].  Weight tap k (GGUF convention)
-     * multiplies the input at lag (K-1-k): state position k for
-     * k < K-1, and the current input for k == K-1. */
-    for (u32 c = 0; c < channels; c++) {
-        float sum = 0.0f;
-        for (u32 k = 0; k < kernel_size; k++) {
-            float x = (k == kernel_size - 1) ? raw[c]
-                                             : state[k * channels + c];
-            sum += x * weight[c * kernel_size + k];
-        }
-        output[c] = sum;
-    }
-    /* Shift state: drop oldest (index 0), shift remaining left,
-     * store current input at the end. */
-    if (kernel_size > 1) {
-        u32 shift_len = (kernel_size - 2) * channels;
-        if (shift_len > 0)
-            memmove(state, state + channels, shift_len * sizeof(float));
-        memcpy(state + shift_len, raw, channels * sizeof(float));
-    }
-    if (saved) sfree(saved);
-}
-
-/* Single-step Gated DeltaNet recurrence.
- * Q, K, V     – [n_groups * d_ssm] each
- * state       – [n_groups * d_ssm * d_ssm] recurrent state (updated in-place)
- * g           – [n_groups] decay gate, pre-computed as exp(g_raw)
- * beta        – [n_groups] update gate, pre-computed as sigmoid(beta_raw)
- * kv_mem      – [n_groups * d_ssm] scratch buffer
- * output      – [n_groups * d_ssm] result */
-static void gated_delta_step(const float *Q, const float *K, const float *V,
-                             float *state, const float *g, const float *beta,
-                             float *kv_mem, float *output,
-                             u32 n_groups, u32 d_ssm) {
-    u64 d2 = (u64)d_ssm * d_ssm;
-    for (u32 grp = 0; grp < n_groups; grp++) {
-        const float *Qg = Q + (u64)grp * d_ssm;
-        const float *Kg = K + (u64)grp * d_ssm;
-        const float *Vg = V + (u64)grp * d_ssm;
-        float *Sg       = state + (u64)grp * d2;
-        float *mem      = kv_mem + (u64)grp * d_ssm;
-
-        float decay = g[grp];
-        float upd   = beta[grp];
-
-        /* 1. Decay: S *= decay */
-        for (u64 i = 0; i < d2; i++)
-            Sg[i] *= decay;
-
-        /* 2. kv_mem = S^T @ K  →  mem[j] = sum_i Sg[i][j] * Kg[i] */
-        memset(mem, 0, d_ssm * sizeof(float));
-        for (u32 i = 0; i < d_ssm; i++) {
-            float ki = Kg[i];
-            float *row = Sg + (u64)i * d_ssm; /* Sg[i][:] */
-            for (u32 j = 0; j < d_ssm; j++)
-                mem[j] += row[j] * ki;
-        }
-
-        /* 3. Compute delta vector: delta[j] = (Vg[j] - mem[j]) * beta */
-        float delta_j[d_ssm];
-        for (u32 j = 0; j < d_ssm; j++)
-            delta_j[j] = (Vg[j] - mem[j]) * upd;
-
-        /* 4. S += K @ delta^T (outer product)
-         * 5. output = S^T @ Q (readout) */
-        float out_j[d_ssm];
-        memset(out_j, 0, d_ssm * sizeof(float));
-        for (u32 i = 0; i < d_ssm; i++) {
-            float qi = Qg[i];
-            float ki = Kg[i];
-            float *row = Sg + (u64)i * d_ssm;
-            for (u32 j = 0; j < d_ssm; j++) {
-                row[j] += ki * delta_j[j];         /* 4. S[i][j] += K[i] * delta[j] */
-                out_j[j] += row[j] * qi;            /* 5. readout */
-            }
-        }
-        memcpy(output + (u64)grp * d_ssm, out_j, d_ssm * sizeof(float));
     }
 }
 
@@ -1450,23 +1316,32 @@ static int qwen35_decode(const u8 *raw, int raw_len, char *out, int max_len) {
 }
 
 /* Build a static execution graph for a batch of n_tokens tokens.
- * Mirrors the standard-attention pathway of qwen35_generate /
- * qwen35_prefill: token embedding, per-layer RMS norm, separate Q/K/V
- * projections (+bias, RoPE), causal GQA attention, attention output
- * gating and projection, residuals, SwiGLU FFN, final norm and LM head.
- * OP_ATTN writes the batch's K/V through to the session KV cache and
- * attends causally, so the graph is reusable for any n <= n_tokens.
+ * Mirrors qwen35_prefill / qwen35_generate across both Qwen3.5 layer
+ * kinds:
  *
- * Configurations the graph executor cannot express are rejected up
- * front (build fails; the eager path must be used instead):
- *   - SSM (Gated DeltaNet) layers: causal Conv1d, L2 norms, the gated
- *     delta recurrence and the sigmoid output gate have no graph ops;
- *   - fused QKV: OP_MATMUL yields a single tensor and there is no split;
- *   - Q-norm / K-norm: per-head RMS norm over slices is not a graph op
- *     (and Q-norm implies the fused-QG sigmoid gate);
- *   - gated attention output weight (2*n_embd rows): SiLU-split gate;
- *   - partial RoPE: OP_ROPE_NEOX always rotates the full head, the
- *     eager path uses rope_partial (rope_dim != head_dim differs). */
+ *   - SSM (Gated DeltaNet) layers: fused QKV projection, depthwise
+ *     causal Conv1d, SiLU, the gated delta recurrence, the per-group
+ *     RMS norm, the SiLU output gate and the ssm_out projection;
+ *
+ *   - dense attention layers: separate Q/K/V projections (+bias,
+ *     optional per-head Q/K-norm, partial RoPE), causal GQA attention,
+ *     an optional SiLU output gate and/or the sigmoid gate folded into
+ *     a fused [q, gate] Q projection, then the output projection.
+ *
+ * Both branches are followed by the residual add, the post-attention
+ * norm, the SwiGLU FFN and its residual.  OP_ATTN writes the batch's
+ * K/V through to the session KV cache and attends causally, so the
+ * graph is reusable for any n <= n_tokens.
+ *
+ * The two SSM state buffers per layer (the conv ring and the recurrent
+ * [groups * d_state * d_state] matrix) are borrowed from the workspace
+ * via graph_state(): the graph only holds the pointer, so qwen35_reset
+ * keeps zeroing them and qwen35_free keeps owning them.
+ *
+ * The one configuration still rejected (build fails; the eager path
+ * must be used instead) is a gated attention output weight
+ * (2*n_embd rows with q_dim columns): the SiLU-split gate it implies
+ * has no graph op. */
 static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     Qwen35Workspace *ws   = (Qwen35Workspace *)s->arch_data;
     ArchConfig      *c    = &s->cfg;
@@ -1481,10 +1356,14 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     u32 q_dim   = c->n_head * c->head_dim;
     u32 fh      = ws->ffn_hidden;
     float theta = ws->rope_theta;
+    u32 n_g     = ws->ssm_groups;
+    u32 d_s     = ws->ssm_dim;
+    u32 qkv_d   = n_g * d_s;
 
-    /* rope_partial degenerates to rope_neox only for a full-width rope. */
-    if (c->rope_dim != c->head_dim) {
-        slog(WARN, "graph_build: partial RoPE (rope_dim=%u of head_dim=%u) unsupported",
+    /* rope_partial needs a sane rotation width (it degenerates to
+     * rope_neox when rope_dim == head_dim). */
+    if (c->rope_dim == 0 || c->rope_dim > c->head_dim) {
+        slog(WARN, "graph_build: invalid rope_dim=%u for head_dim=%u",
              c->rope_dim, c->head_dim);
         return NULL;
     }
@@ -1508,11 +1387,8 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     for (u32 l = 0; l < c->n_layer; l++) {
         LayerWeights *lw = &w->layers[l];
 
-        if (lw->tensors[TENSOR_SSM_CONV1D]) {
-            slog(WARN, "graph_build: layer %u is an SSM (Gated DeltaNet) layer, unsupported", l);
-            goto fail;
-        }
-
+        TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
+        TensorInfo *t_conv = lw->tensors[TENSOR_SSM_CONV1D];
         TensorInfo *t_q   = lw->tensors[TENSOR_ATTN_Q];
         TensorInfo *t_k   = lw->tensors[TENSOR_ATTN_K];
         TensorInfo *t_v   = lw->tensors[TENSOR_ATTN_V];
@@ -1521,71 +1397,165 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
         TensorInfo *t_g   = lw->tensors[TENSOR_FFN_GATE];
         TensorInfo *t_u   = lw->tensors[TENSOR_FFN_UP];
         TensorInfo *t_d   = lw->tensors[TENSOR_FFN_DOWN];
-        if (!t_q || !t_k || !t_v || !t_o || !t_g || !t_u || !t_d) {
-            slog(WARN, "graph_build: layer %u missing tensors (fused QKV unsupported)", l);
-            goto fail;
-        }
-        if (lw->tensors[TENSOR_ATTN_QKV]) {
-            slog(WARN, "graph_build: layer %u uses fused QKV, unsupported", l);
-            goto fail;
-        }
-        /* Q-norm implies the fused Q+gate projection (Qwen3.5) whose
-         * per-head norm and sigmoid gate have no graph ops. */
-        if (lw->tensors[TENSOR_ATTN_Q_NORM] || lw->tensors[TENSOR_ATTN_K_NORM]) {
-            slog(WARN, "graph_build: layer %u uses per-head Q/K norm, unsupported", l);
-            goto fail;
-        }
-        if (t_o->ndim >= 2 && t_o->dim[0] == 2 * (i64)n_embd && t_o->dim[1] == (i64)q_dim) {
-            slog(WARN, "graph_build: layer %u uses gated output weight, unsupported", l);
+        if (!t_g || !t_u || !t_d) {
+            slog(WARN, "graph_build: layer %u missing FFN tensors", l);
             goto fail;
         }
 
-        /* ---- Attention block ---- */
+        /* ---- Attention norm ---- */
         u32 n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
         if (n == GRAPH_NODE_NONE) goto fail;
 
-        u32 q = graph_mul_mat(g, n, t_q, (q_dim != n_embd) && t_q->dim[0] == (i64)n_embd);
-        u32 k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
-        u32 v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
-        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
+        if (t_conv) {
+            /* ======== SSM (Gated DeltaNet) layer ======== */
+            TensorInfo *t_a  = lw->tensors[TENSOR_SSM_ALPHA];
+            TensorInfo *t_b  = lw->tensors[TENSOR_SSM_BETA];
+            TensorInfo *t_A  = lw->tensors[TENSOR_SSM_A];
+            TensorInfo *t_dt = lw->tensors[TENSOR_SSM_DT_BIAS];
+            TensorInfo *t_sn = lw->tensors[TENSOR_SSM_NORM];
+            TensorInfo *t_so = lw->tensors[TENSOR_SSM_OUT];
+            if (!t_qkv || !t_a || !t_b || !t_A || !t_dt || !t_so) {
+                slog(WARN, "graph_build: layer %u is an SSM layer with missing tensors", l);
+                goto fail;
+            }
+            if (!ws->conv_state[l] || !ws->ssm_state[l]) {
+                slog(WARN, "graph_build: layer %u has no SSM state", l);
+                goto fail;
+            }
 
-        /* Qwen3.5 attention biases (bias=True); skip when absent. */
-        if (lw->tensors[TENSOR_ATTN_Q_BIAS]) {
-            q = graph_bias(g, q, lw->tensors[TENSOR_ATTN_Q_BIAS]);
+            /* Borrow the per-layer conv ring + recurrent state. */
+            u32 conv_st = graph_state(g, ws->conv_state[l]);
+            u32 ssm_st  = graph_state(g, ws->ssm_state[l]);
+            if (conv_st == GRAPH_NODE_NONE || ssm_st == GRAPH_NODE_NONE) goto fail;
+
+            /* Fused QKV → conv → SiLU (reference: conv → silu → split). */
+            u32 f = graph_mul_mat(g, n, t_qkv, t_qkv->dim[0] == (i64)n_embd);
+            if (f == GRAPH_NODE_NONE) goto fail;
+            f = graph_ssm_conv(g, f, t_conv, conv_st, ws->conv_kernel);
+            if (f == GRAPH_NODE_NONE) goto fail;
+            f = graph_silu(g, f);
+            if (f == GRAPH_NODE_NONE) goto fail;
+
+            /* Decay / update gates are projected from the same normed input. */
+            u32 a = graph_mul_mat(g, n, t_a, t_a->dim[0] == (i64)n_embd);
+            u32 b = graph_mul_mat(g, n, t_b, t_b->dim[0] == (i64)n_embd);
+            if (a == GRAPH_NODE_NONE || b == GRAPH_NODE_NONE) goto fail;
+
+            u32 d = graph_ssm_delta(g, f, a, b, t_A, t_dt, t_sn, ssm_st, n_g, d_s);
+            if (d == GRAPH_NODE_NONE) goto fail;
+
+            /* Output gate: silu(gate @ n) * delta_out. */
+            if (t_ag) {
+                u32 ag = graph_silu(g, graph_mul_mat(g, n, t_ag, t_ag->dim[0] == (i64)n_embd));
+                if (ag == GRAPH_NODE_NONE) goto fail;
+                d = graph_binary(g, OP_MUL, d, ag);
+                if (d == GRAPH_NODE_NONE) goto fail;
+            }
+
+            u32 y = graph_mul_mat(g, d, t_so, t_so->dim[0] == (i64)qkv_d);
+            if (y == GRAPH_NODE_NONE) goto fail;
+            cur = graph_binary(g, OP_ADD, cur, y);
+            if (cur == GRAPH_NODE_NONE) goto fail;
+
+        } else if (t_q && t_k && t_v) {
+            /* ======== Dense attention layer ======== */
+            TensorInfo *t_qn = lw->tensors[TENSOR_ATTN_Q_NORM];
+            TensorInfo *t_kn = lw->tensors[TENSOR_ATTN_K_NORM];
+            TensorInfo *tb_q = lw->tensors[TENSOR_ATTN_Q_BIAS];
+            TensorInfo *tb_k = lw->tensors[TENSOR_ATTN_K_BIAS];
+            TensorInfo *tb_v = lw->tensors[TENSOR_ATTN_V_BIAS];
+            if (!t_o) {
+                slog(WARN, "graph_build: layer %u missing attn output tensor", l);
+                goto fail;
+            }
+            if (t_o->ndim >= 2 && t_o->dim[0] == 2 * (i64)n_embd
+                && t_o->dim[1] == (i64)q_dim) {
+                slog(WARN, "graph_build: layer %u uses a gated attention output weight, unsupported", l);
+                goto fail;
+            }
+
+            /* Q projection.  Qwen3.5 dense layers emit n_head * 2 *
+             * head_dim columns: the first head_dim of each head is Q,
+             * the second half is the raw attention gate (fused QG). */
+            u32 q_proj = (u32)(t_q->dim[0] == (i64)n_embd ? t_q->dim[1] : t_q->dim[0]);
+            bool q_tr  = (q_proj != n_embd) && t_q->dim[0] == (i64)n_embd;
+            u32 fq = graph_mul_mat(g, n, t_q, q_tr);
+            if (fq == GRAPH_NODE_NONE) goto fail;
+            /* Bias goes on before the norm, as in the eager path. */
+            if (tb_q) {
+                fq = graph_bias(g, fq, tb_q);
+                if (fq == GRAPH_NODE_NONE) goto fail;
+            }
+
+            u32 q;
+            if (t_qn) {
+                if (q_proj != 2 * q_dim) {
+                    slog(WARN, "graph_build: layer %u has Q-norm but q_proj=%u (expected %u)",
+                         l, q_proj, 2 * q_dim);
+                    goto fail;
+                }
+                /* Norm the Q half, drop the gate half (read back later). */
+                q = graph_rms_norm_heads(g, fq, t_qn, c->n_head, c->head_dim,
+                                         2 * c->head_dim, c->head_dim);
+            } else {
+                if (q_proj != q_dim) {
+                    slog(WARN, "graph_build: layer %u has q_proj=%u (expected q_dim=%u)",
+                         l, q_proj, q_dim);
+                    goto fail;
+                }
+                q = fq;
+            }
             if (q == GRAPH_NODE_NONE) goto fail;
-        }
-        if (lw->tensors[TENSOR_ATTN_K_BIAS]) {
-            k = graph_bias(g, k, lw->tensors[TENSOR_ATTN_K_BIAS]);
-            if (k == GRAPH_NODE_NONE) goto fail;
-        }
-        if (lw->tensors[TENSOR_ATTN_V_BIAS]) {
-            v = graph_bias(g, v, lw->tensors[TENSOR_ATTN_V_BIAS]);
-            if (v == GRAPH_NODE_NONE) goto fail;
-        }
 
-        q = graph_rope(g, q, theta, c->n_head, c->head_dim);
-        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim);
-        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
+            u32 k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
+            u32 v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
+            if (k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
+            if (tb_k) {
+                k = graph_bias(g, k, tb_k);
+                if (k == GRAPH_NODE_NONE) goto fail;
+            }
+            if (tb_v) {
+                v = graph_bias(g, v, tb_v);
+                if (v == GRAPH_NODE_NONE) goto fail;
+            }
+            if (t_kn) {
+                k = graph_rms_norm_heads(g, k, t_kn, c->n_kv_head, c->kv_head_dim,
+                                         c->kv_head_dim, c->kv_head_dim);
+                if (k == GRAPH_NODE_NONE) goto fail;
+            }
 
-        u32 attn = graph_attn(g, q, k, v, l);
-        if (attn == GRAPH_NODE_NONE) goto fail;
+            q = graph_rope(g, q, theta, c->n_head, c->head_dim, c->rope_dim);
+            k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->rope_dim);
+            if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
-        /* Qwen3.5 attention output gating: silu(gate @ x) * attn. */
-        if (t_ag) {
-            u32 gate = graph_silu(g, graph_mul_mat(g, n, t_ag, t_ag->dim[0] == (i64)n_embd));
-            if (gate == GRAPH_NODE_NONE) goto fail;
-            attn = graph_binary(g, OP_MUL, attn, gate);
+            u32 attn = graph_attn(g, q, k, v, l);
             if (attn == GRAPH_NODE_NONE) goto fail;
+
+            /* Attention output gate: silu(gate @ n) * attn. */
+            if (t_ag) {
+                u32 ag = graph_silu(g, graph_mul_mat(g, n, t_ag, t_ag->dim[0] == (i64)n_embd));
+                if (ag == GRAPH_NODE_NONE) goto fail;
+                attn = graph_binary(g, OP_MUL, attn, ag);
+                if (attn == GRAPH_NODE_NONE) goto fail;
+            }
+            /* Fused QG: attn *= sigmoid(gate half of the Q projection). */
+            if (t_qn) {
+                attn = graph_sigmoid_gate(g, attn, fq, c->n_head, c->head_dim);
+                if (attn == GRAPH_NODE_NONE) goto fail;
+            }
+
+            u32 o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
+            if (o == GRAPH_NODE_NONE) goto fail;
+            cur = graph_binary(g, OP_ADD, cur, o);
+            if (cur == GRAPH_NODE_NONE) goto fail;
+
+        } else {
+            slog(WARN, "graph_build: layer %u missing QKV / Q,K,V tensors", l);
+            goto fail;
         }
-
-        u32 o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
-        if (o == GRAPH_NODE_NONE) goto fail;
-
-        u32 h = graph_binary(g, OP_ADD, cur, o);
-        if (h == GRAPH_NODE_NONE) goto fail;
 
         /* ---- SwiGLU FFN ---- */
-        u32 hn = graph_rms_norm(g, h, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        u32 hn = graph_rms_norm(g, cur, lw->tensors[TENSOR_POST_ATTN_NORM]);
         if (hn == GRAPH_NODE_NONE) goto fail;
 
         u32 gate = graph_silu(g, graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd));
@@ -1598,7 +1568,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
         u32 down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
         if (down == GRAPH_NODE_NONE) goto fail;
 
-        cur = graph_binary(g, OP_ADD, h, down);
+        cur = graph_binary(g, OP_ADD, cur, down);
         if (cur == GRAPH_NODE_NONE) goto fail;
     }
 

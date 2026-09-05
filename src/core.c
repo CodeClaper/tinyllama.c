@@ -536,6 +536,143 @@ float sigmoid(float x) {
     return 1.0f / (1.0f + expf(-x));
 }
 
+/* ---- SSM (Gated DeltaNet) kernels ----
+ * Shared by the eager arch implementations and the graph executor. */
+
+/* In-place RMS normalization of one slice.
+ * Equivalent to rms_norm(o, x, weight, eps) with o == x, but takes an
+ * already-dequantised weight so callers can hoist the dequant out of
+ * their per-row loops. */
+void rms_norm_inplace(float *x, const float *weight, u32 n, float eps) {
+    float ss = 0.0f;
+    for (u32 j = 0; j < n; j++)
+        ss += x[j] * x[j];
+    ss = 1.0f / sqrtf(ss / (float)n + eps);
+    for (u32 j = 0; j < n; j++)
+        x[j] = x[j] * ss * weight[j];
+}
+
+/* L2-normalize each row of a [n_rows, dim] matrix in place.
+ * Used for Q and K in the Gated DeltaNet recurrence. */
+void l2_norm_rows(float *x, u32 n_rows, u32 dim, float eps) {
+    for (u32 r = 0; r < n_rows; r++) {
+        float *row = x + (u64)r * dim;
+        float ss = 0.0f;
+        for (u32 i = 0; i < dim; i++)
+            ss += row[i] * row[i];
+        float inv = 1.0f / sqrtf(ss + eps);
+        for (u32 i = 0; i < dim; i++)
+            row[i] *= inv;
+    }
+}
+
+/* Depthwise causal Conv1d step for single-token inference.
+ * Processes fused QKV output (channels) through a depthwise conv
+ * with kernel_size taps, maintaining a ring buffer of previous inputs.
+ * weight – [channels * kernel_size] dequantised weight (GGUF layout,
+ *          PyTorch Conv1d convention), weight[c * kernel_size + k] for
+ *          channel c, tap k.
+ *          Tap k multiplies the input from k taps ago: tap 0 is the
+ *          OLDEST input (x[t-(K-1)]), tap K-1 is the current input,
+ *          matching ggml_ssm_conv and the reference implementation.
+ * state  – [(kernel_size-1) * channels] ring buffer (oldest first).
+ * On return, state is shifted and the new input is stored. */
+void causal_conv1d_step(float *output, const float *input,
+                        const float *weight, float *state,
+                        u32 channels, u32 kernel_size) {
+    /* Callers run this in-place (output == input), which clobbers the
+     * raw inputs before the state update below.  The state must hold
+     * the RAW pre-conv inputs — storing the conv outputs there instead
+     * corrupts every subsequent token's window and silently diverges
+     * the whole recurrence.  Save a copy only when aliased. */
+    float *saved = NULL;
+    if (input == output) {
+        saved = smalloc((u64)channels * sizeof(float));
+        memcpy(saved, input, (u64)channels * sizeof(float));
+    }
+    const float *raw = saved ? saved : input;
+
+    /* State is stored [oldest, ..., newest] = [x[t-(K-1)], ..., x[t-1]]
+     * at positions [0, ..., K-2].  Weight tap k (GGUF convention)
+     * multiplies the input at lag (K-1-k): state position k for
+     * k < K-1, and the current input for k == K-1. */
+    for (u32 c = 0; c < channels; c++) {
+        float sum = 0.0f;
+        for (u32 k = 0; k < kernel_size; k++) {
+            float x = (k == kernel_size - 1) ? raw[c]
+                                             : state[k * channels + c];
+            sum += x * weight[c * kernel_size + k];
+        }
+        output[c] = sum;
+    }
+    /* Shift state: drop oldest (index 0), shift remaining left,
+     * store current input at the end. */
+    if (kernel_size > 1) {
+        u32 shift_len = (kernel_size - 2) * channels;
+        if (shift_len > 0)
+            memmove(state, state + channels, shift_len * sizeof(float));
+        memcpy(state + shift_len, raw, channels * sizeof(float));
+    }
+    sfree(saved);
+}
+
+/* Single-step Gated DeltaNet recurrence.
+ * Q, K, V     – [n_groups * d_ssm] each
+ * state       – [n_groups * d_ssm * d_ssm] recurrent state (updated in-place)
+ * g           – [n_groups] decay gate, pre-computed as exp(g_raw)
+ * beta        – [n_groups] update gate, pre-computed as sigmoid(beta_raw)
+ * kv_mem      – [n_groups * d_ssm] scratch buffer
+ * output      – [n_groups * d_ssm] result */
+void gated_delta_step(const float *Q, const float *K, const float *V,
+                      float *state, const float *g, const float *beta,
+                      float *kv_mem, float *output,
+                      u32 n_groups, u32 d_ssm) {
+    u64 d2 = (u64)d_ssm * d_ssm;
+    for (u32 grp = 0; grp < n_groups; grp++) {
+        const float *Qg = Q + (u64)grp * d_ssm;
+        const float *Kg = K + (u64)grp * d_ssm;
+        const float *Vg = V + (u64)grp * d_ssm;
+        float *Sg       = state + (u64)grp * d2;
+        float *mem      = kv_mem + (u64)grp * d_ssm;
+
+        float decay = g[grp];
+        float upd   = beta[grp];
+
+        /* 1. Decay: S *= decay */
+        for (u64 i = 0; i < d2; i++)
+            Sg[i] *= decay;
+
+        /* 2. kv_mem = S^T @ K  →  mem[j] = sum_i Sg[i][j] * Kg[i] */
+        memset(mem, 0, d_ssm * sizeof(float));
+        for (u32 i = 0; i < d_ssm; i++) {
+            float ki = Kg[i];
+            float *row = Sg + (u64)i * d_ssm; /* Sg[i][:] */
+            for (u32 j = 0; j < d_ssm; j++)
+                mem[j] += row[j] * ki;
+        }
+
+        /* 3. Compute delta vector: delta[j] = (Vg[j] - mem[j]) * beta */
+        float delta_j[d_ssm];
+        for (u32 j = 0; j < d_ssm; j++)
+            delta_j[j] = (Vg[j] - mem[j]) * upd;
+
+        /* 4. S += K @ delta^T (outer product)
+         * 5. output = S^T @ Q (readout) */
+        float out_j[d_ssm];
+        memset(out_j, 0, d_ssm * sizeof(float));
+        for (u32 i = 0; i < d_ssm; i++) {
+            float qi = Qg[i];
+            float ki = Kg[i];
+            float *row = Sg + (u64)i * d_ssm;
+            for (u32 j = 0; j < d_ssm; j++) {
+                row[j] += ki * delta_j[j];   /* 4. S[i][j] += K[i] * delta[j] */
+                out_j[j] += row[j] * qi;      /* 5. readout */
+            }
+        }
+        memcpy(output + (u64)grp * d_ssm, out_j, d_ssm * sizeof(float));
+    }
+}
+
 
 /* Byte cursor over the mmap'd model file: sequential, bounds-checked
  * reader.  base = mapped bytes, size = file size, post = current

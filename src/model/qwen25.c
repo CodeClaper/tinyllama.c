@@ -794,8 +794,9 @@ static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
             if (v == GRAPH_NODE_NONE) goto fail;
         }
 
-        q = graph_rope(g, q, theta, c->n_head, c->head_dim);
-        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim);
+        /* qwen25 uses full-width neox RoPE, so rope_dim == head_dim. */
+        q = graph_rope(g, q, theta, c->n_head, c->head_dim, c->head_dim);
+        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->kv_head_dim);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
         u32 attn = graph_attn(g, q, k, v, l);
