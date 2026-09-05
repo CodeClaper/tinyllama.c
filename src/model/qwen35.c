@@ -2,11 +2,13 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "model.h"
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
 #include "../utils.h"
+#include "../graph.h"
 
 typedef struct {
     float *x;               /* [n_embd] hidden state                        */
@@ -1447,11 +1449,182 @@ static int qwen35_decode(const u8 *raw, int raw_len, char *out, int max_len) {
     return w;
 }
 
+/* Build a static execution graph for a batch of n_tokens tokens.
+ * Mirrors the standard-attention pathway of qwen35_generate /
+ * qwen35_prefill: token embedding, per-layer RMS norm, separate Q/K/V
+ * projections (+bias, RoPE), causal GQA attention, attention output
+ * gating and projection, residuals, SwiGLU FFN, final norm and LM head.
+ * OP_ATTN writes the batch's K/V through to the session KV cache and
+ * attends causally, so the graph is reusable for any n <= n_tokens.
+ *
+ * Configurations the graph executor cannot express are rejected up
+ * front (build fails; the eager path must be used instead):
+ *   - SSM (Gated DeltaNet) layers: causal Conv1d, L2 norms, the gated
+ *     delta recurrence and the sigmoid output gate have no graph ops;
+ *   - fused QKV: OP_MATMUL yields a single tensor and there is no split;
+ *   - Q-norm / K-norm: per-head RMS norm over slices is not a graph op
+ *     (and Q-norm implies the fused-QG sigmoid gate);
+ *   - gated attention output weight (2*n_embd rows): SiLU-split gate;
+ *   - partial RoPE: OP_ROPE_NEOX always rotates the full head, the
+ *     eager path uses rope_partial (rope_dim != head_dim differs). */
+static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
+    Qwen35Workspace *ws   = (Qwen35Workspace *)s->arch_data;
+    ArchConfig      *c    = &s->cfg;
+    Weights         *w    = s->en->weights;
+
+    if (!s || !w || !ws || n_tokens == 0 || n_tokens > s->ctx_size) return NULL;
+
+    /* Dims for the matmul direction flags.  Each trans below must mirror
+     * the expression used by qwen35_prefill / qwen35_generate for the
+     * same weight, otherwise the executor dequantises the wrong axis. */
+    u32 n_embd  = c->n_embd;
+    u32 q_dim   = c->n_head * c->head_dim;
+    u32 fh      = ws->ffn_hidden;
+    float theta = ws->rope_theta;
+
+    /* rope_partial degenerates to rope_neox only for a full-width rope. */
+    if (c->rope_dim != c->head_dim) {
+        slog(WARN, "graph_build: partial RoPE (rope_dim=%u of head_dim=%u) unsupported",
+             c->rope_dim, c->head_dim);
+        return NULL;
+    }
+
+    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+    if (!te || te->ndim < 2) {
+        slog(WARN, "graph_build: missing token embedding");
+        return NULL;
+    }
+
+    Graph *g = graph_new();
+    if (!g) return NULL;
+
+    /* Input tokens → OP_INPUT leaf (shape only; values bound at compute). */
+    u32 in = graph_input(g, n_tokens);
+    if (in == GRAPH_NODE_NONE) goto fail;
+
+    u32 cur = graph_embed(g, in, te, n_tokens);
+    if (cur == GRAPH_NODE_NONE) goto fail;
+
+    for (u32 l = 0; l < c->n_layer; l++) {
+        LayerWeights *lw = &w->layers[l];
+
+        if (lw->tensors[TENSOR_SSM_CONV1D]) {
+            slog(WARN, "graph_build: layer %u is an SSM (Gated DeltaNet) layer, unsupported", l);
+            goto fail;
+        }
+
+        TensorInfo *t_q   = lw->tensors[TENSOR_ATTN_Q];
+        TensorInfo *t_k   = lw->tensors[TENSOR_ATTN_K];
+        TensorInfo *t_v   = lw->tensors[TENSOR_ATTN_V];
+        TensorInfo *t_o   = lw->tensors[TENSOR_ATTN_OUT];
+        TensorInfo *t_ag  = lw->tensors[TENSOR_ATTN_GATE];
+        TensorInfo *t_g   = lw->tensors[TENSOR_FFN_GATE];
+        TensorInfo *t_u   = lw->tensors[TENSOR_FFN_UP];
+        TensorInfo *t_d   = lw->tensors[TENSOR_FFN_DOWN];
+        if (!t_q || !t_k || !t_v || !t_o || !t_g || !t_u || !t_d) {
+            slog(WARN, "graph_build: layer %u missing tensors (fused QKV unsupported)", l);
+            goto fail;
+        }
+        if (lw->tensors[TENSOR_ATTN_QKV]) {
+            slog(WARN, "graph_build: layer %u uses fused QKV, unsupported", l);
+            goto fail;
+        }
+        /* Q-norm implies the fused Q+gate projection (Qwen3.5) whose
+         * per-head norm and sigmoid gate have no graph ops. */
+        if (lw->tensors[TENSOR_ATTN_Q_NORM] || lw->tensors[TENSOR_ATTN_K_NORM]) {
+            slog(WARN, "graph_build: layer %u uses per-head Q/K norm, unsupported", l);
+            goto fail;
+        }
+        if (t_o->ndim >= 2 && t_o->dim[0] == 2 * (i64)n_embd && t_o->dim[1] == (i64)q_dim) {
+            slog(WARN, "graph_build: layer %u uses gated output weight, unsupported", l);
+            goto fail;
+        }
+
+        /* ---- Attention block ---- */
+        u32 n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
+        if (n == GRAPH_NODE_NONE) goto fail;
+
+        u32 q = graph_mul_mat(g, n, t_q, (q_dim != n_embd) && t_q->dim[0] == (i64)n_embd);
+        u32 k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
+        u32 v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
+
+        /* Qwen3.5 attention biases (bias=True); skip when absent. */
+        if (lw->tensors[TENSOR_ATTN_Q_BIAS]) {
+            q = graph_bias(g, q, lw->tensors[TENSOR_ATTN_Q_BIAS]);
+            if (q == GRAPH_NODE_NONE) goto fail;
+        }
+        if (lw->tensors[TENSOR_ATTN_K_BIAS]) {
+            k = graph_bias(g, k, lw->tensors[TENSOR_ATTN_K_BIAS]);
+            if (k == GRAPH_NODE_NONE) goto fail;
+        }
+        if (lw->tensors[TENSOR_ATTN_V_BIAS]) {
+            v = graph_bias(g, v, lw->tensors[TENSOR_ATTN_V_BIAS]);
+            if (v == GRAPH_NODE_NONE) goto fail;
+        }
+
+        q = graph_rope(g, q, theta, c->n_head, c->head_dim);
+        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
+
+        u32 attn = graph_attn(g, q, k, v, l);
+        if (attn == GRAPH_NODE_NONE) goto fail;
+
+        /* Qwen3.5 attention output gating: silu(gate @ x) * attn. */
+        if (t_ag) {
+            u32 gate = graph_silu(g, graph_mul_mat(g, n, t_ag, t_ag->dim[0] == (i64)n_embd));
+            if (gate == GRAPH_NODE_NONE) goto fail;
+            attn = graph_binary(g, OP_MUL, attn, gate);
+            if (attn == GRAPH_NODE_NONE) goto fail;
+        }
+
+        u32 o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
+        if (o == GRAPH_NODE_NONE) goto fail;
+
+        u32 h = graph_binary(g, OP_ADD, cur, o);
+        if (h == GRAPH_NODE_NONE) goto fail;
+
+        /* ---- SwiGLU FFN ---- */
+        u32 hn = graph_rms_norm(g, h, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        if (hn == GRAPH_NODE_NONE) goto fail;
+
+        u32 gate = graph_silu(g, graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd));
+        u32 up   = graph_mul_mat(g, hn, t_u, t_u->dim[0] == (i64)n_embd);
+        if (gate == GRAPH_NODE_NONE || up == GRAPH_NODE_NONE) goto fail;
+
+        u32 mul = graph_binary(g, OP_MUL, gate, up);
+        if (mul == GRAPH_NODE_NONE) goto fail;
+
+        u32 down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
+        if (down == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_binary(g, OP_ADD, h, down);
+        if (cur == GRAPH_NODE_NONE) goto fail;
+    }
+
+    /* ---- Final norm ---- */
+    TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
+    if (!t_norm) t_norm = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
+    u32 fn = graph_rms_norm(g, cur, t_norm);
+    if (fn == GRAPH_NODE_NONE) goto fail;
+
+    /* ---- LM head (tied to token embeddings when absent) ---- */
+    TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+    if (!t_out) t_out = te;
+    if (graph_mul_mat(g, fn, t_out, t_out->dim[0] == (i64)n_embd) == GRAPH_NODE_NONE) goto fail;
+
+    return g;
+fail:
+    graph_free(g);
+    return NULL;
+}
+
 const ArchOps qwen35_ops = {
-    .init    = qwen35_init,
-    .free    = qwen35_free,
-    .prefill = qwen35_prefill,
-    .generate = qwen35_generate,
-    .reset   = qwen35_reset,
-    .decode  = qwen35_decode,
+    .init        = qwen35_init,
+    .free        = qwen35_free,
+    .prefill     = qwen35_prefill,
+    .generate    = qwen35_generate,
+    .reset       = qwen35_reset,
+    .decode      = qwen35_decode,
+    .graph_build = qwen35_graph_build,
 };
