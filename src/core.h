@@ -37,7 +37,8 @@ void causal_conv1d_step(float *output, const float *input, const float *weight,
                         float *state, u32 channels, u32 kernel_size);
 void gated_delta_step(const float *Q, const float *K, const float *V,
                       float *state, const float *g, const float *beta,
-                      float *kv_mem, float *output, u32 n_groups, u32 d_ssm);
+                      float *kv_mem, float *output,
+                      u32 n_v_heads, u32 n_k_heads, u32 head_dim);
 
 /* ---- Tensor dequant accessors ---- */
 float tensor_get_f32(TensorInfo *ti, u64 i);

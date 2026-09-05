@@ -37,11 +37,12 @@ u32 graph_sigmoid_gate(Graph *g, u32 a, u32 gate, u32 n_heads, u32 head_dim);
 u32 graph_ssm_conv(Graph *g, u32 src, TensorInfo *weight, u32 state, u32 kernel);
 /* Gated DeltaNet recurrence: reads the SiLU'd fused [q|k|v] block plus the
  * alpha/beta projections, updates the recurrent state in place and yields
- * the normed delta output [n_groups * d_state].  `state` is a graph_state()
- * handle for [n_groups * d_state * d_state]. */
+ * the normed delta output [n_v_heads * head_dim].  Q/K carry n_k_heads heads
+ * and V carries n_v_heads; when they differ, Q/K heads are reused (GVA).
+ * `state` is a graph_state() handle for [n_v_heads * head_dim * head_dim]. */
 u32 graph_ssm_delta(Graph *g, u32 fused, u32 alpha, u32 beta,
                     TensorInfo *ssm_a, TensorInfo *dt_bias, TensorInfo *norm,
-                    u32 state, u32 n_groups, u32 d_state);
+                    u32 state, u32 n_v_heads, u32 n_k_heads, u32 head_dim);
 /* Register a buffer owned by the caller (typically the arch workspace) for
  * use by stateful ops; returns a handle to bake into op params.  The graph
  * borrows the pointer: graph_free() does not free it. */

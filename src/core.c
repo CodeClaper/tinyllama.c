@@ -617,23 +617,30 @@ void causal_conv1d_step(float *output, const float *input,
 }
 
 /* Single-step Gated DeltaNet recurrence.
- * Q, K, V     – [n_groups * d_ssm] each
- * state       – [n_groups * d_ssm * d_ssm] recurrent state (updated in-place)
- * g           – [n_groups] decay gate, pre-computed as exp(g_raw)
- * beta        – [n_groups] update gate, pre-computed as sigmoid(beta_raw)
- * kv_mem      – [n_groups * d_ssm] scratch buffer
- * output      – [n_groups * d_ssm] result */
+ * Q, K, V     – [n_k_heads * head_dim] for Q/K, [n_v_heads * head_dim] for V
+ * state       – [n_v_heads * head_dim * head_dim] recurrent state (in-place)
+ * g           – [n_v_heads] decay gate, pre-computed as exp(g_raw)
+ * beta        – [n_v_heads] update gate, pre-computed as sigmoid(beta_raw)
+ * kv_mem      – [n_v_heads * head_dim] scratch buffer
+ * output      – [n_v_heads * head_dim] result
+ *
+ * Grouped-value attention (GVA): when n_v_heads > n_k_heads the Q/K heads
+ * are reused, value head h reading Q/K head `h % n_k_heads`.  That is the
+ * mapping ggml_repeat_4d produces in the reference implementation
+ * (llama.cpp src/models/qwen35.cpp), which tiles the whole Q/K head block.
+ * n_v_heads is always a multiple of n_k_heads. */
 void gated_delta_step(const float *Q, const float *K, const float *V,
                       float *state, const float *g, const float *beta,
                       float *kv_mem, float *output,
-                      u32 n_groups, u32 d_ssm) {
-    u64 d2 = (u64)d_ssm * d_ssm;
-    for (u32 grp = 0; grp < n_groups; grp++) {
-        const float *Qg = Q + (u64)grp * d_ssm;
-        const float *Kg = K + (u64)grp * d_ssm;
-        const float *Vg = V + (u64)grp * d_ssm;
+                      u32 n_v_heads, u32 n_k_heads, u32 head_dim) {
+    u64 d2 = (u64)head_dim * head_dim;
+    for (u32 grp = 0; grp < n_v_heads; grp++) {
+        u32 kh = n_k_heads ? grp % n_k_heads : 0;   /* GVA head reuse */
+        const float *Qg = Q + (u64)kh * head_dim;
+        const float *Kg = K + (u64)kh * head_dim;
+        const float *Vg = V + (u64)grp * head_dim;
         float *Sg       = state + (u64)grp * d2;
-        float *mem      = kv_mem + (u64)grp * d_ssm;
+        float *mem      = kv_mem + (u64)grp * head_dim;
 
         float decay = g[grp];
         float upd   = beta[grp];
@@ -643,33 +650,33 @@ void gated_delta_step(const float *Q, const float *K, const float *V,
             Sg[i] *= decay;
 
         /* 2. kv_mem = S^T @ K  →  mem[j] = sum_i Sg[i][j] * Kg[i] */
-        memset(mem, 0, d_ssm * sizeof(float));
-        for (u32 i = 0; i < d_ssm; i++) {
+        memset(mem, 0, head_dim * sizeof(float));
+        for (u32 i = 0; i < head_dim; i++) {
             float ki = Kg[i];
-            float *row = Sg + (u64)i * d_ssm; /* Sg[i][:] */
-            for (u32 j = 0; j < d_ssm; j++)
+            float *row = Sg + (u64)i * head_dim; /* Sg[i][:] */
+            for (u32 j = 0; j < head_dim; j++)
                 mem[j] += row[j] * ki;
         }
 
         /* 3. Compute delta vector: delta[j] = (Vg[j] - mem[j]) * beta */
-        float delta_j[d_ssm];
-        for (u32 j = 0; j < d_ssm; j++)
+        float delta_j[head_dim];
+        for (u32 j = 0; j < head_dim; j++)
             delta_j[j] = (Vg[j] - mem[j]) * upd;
 
         /* 4. S += K @ delta^T (outer product)
          * 5. output = S^T @ Q (readout) */
-        float out_j[d_ssm];
-        memset(out_j, 0, d_ssm * sizeof(float));
-        for (u32 i = 0; i < d_ssm; i++) {
+        float out_j[head_dim];
+        memset(out_j, 0, head_dim * sizeof(float));
+        for (u32 i = 0; i < head_dim; i++) {
             float qi = Qg[i];
             float ki = Kg[i];
-            float *row = Sg + (u64)i * d_ssm;
-            for (u32 j = 0; j < d_ssm; j++) {
+            float *row = Sg + (u64)i * head_dim;
+            for (u32 j = 0; j < head_dim; j++) {
                 row[j] += ki * delta_j[j];   /* 4. S[i][j] += K[i] * delta[j] */
                 out_j[j] += row[j] * qi;      /* 5. readout */
             }
         }
-        memcpy(output + (u64)grp * d_ssm, out_j, d_ssm * sizeof(float));
+        memcpy(output + (u64)grp * head_dim, out_j, head_dim * sizeof(float));
     }
 }
 

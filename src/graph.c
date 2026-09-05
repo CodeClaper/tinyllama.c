@@ -161,15 +161,16 @@ u32 graph_ssm_conv(Graph *g, u32 src, TensorInfo *weight, u32 state, u32 kernel)
 
 u32 graph_ssm_delta(Graph *g, u32 fused, u32 alpha, u32 beta,
                     TensorInfo *ssm_a, TensorInfo *dt_bias, TensorInfo *norm,
-                    u32 state, u32 n_groups, u32 d_state) {
+                    u32 state, u32 n_v_heads, u32 n_k_heads, u32 head_dim) {
     if (!g || fused >= g->n_node || alpha >= g->n_node || beta >= g->n_node)
         return GRAPH_NODE_NONE;
-    if (!ssm_a || !dt_bias || n_groups == 0 || d_state == 0) return GRAPH_NODE_NONE;
+    if (!ssm_a || !dt_bias || n_v_heads == 0 || head_dim == 0) return GRAPH_NODE_NONE;
+    if (n_k_heads == 0 || n_v_heads % n_k_heads != 0) return GRAPH_NODE_NONE;
     if (state >= g->n_state) return GRAPH_NODE_NONE;
-    u32 params[] = { state, n_groups, d_state };
+    u32 params[] = { state, n_v_heads, n_k_heads, head_dim };
     return node_add(g, OP_SSM_DELTA,
                     (int[]){ (int)fused, (int)alpha, (int)beta, -1 },
-                    (TensorInfo *[]){ ssm_a, dt_bias, norm, NULL }, params, 3);
+                    (TensorInfo *[]){ ssm_a, dt_bias, norm, NULL }, params, 4);
 }
 
 /* Caller-owned state buffers.  The graph only borrows the pointer, so the
@@ -329,7 +330,7 @@ static bool arena_plan(Graph *g, Session *s) {
                 dims[i] = nd->params[0] * nd->params[1];   /* n_heads * head_dim  */
                 break;
             case OP_SSM_DELTA:
-                dims[i] = nd->params[1] * nd->params[2];   /* n_groups * d_state  */
+                dims[i] = nd->params[1] * nd->params[3];   /* n_v_heads * head_dim */
                 break;
             case OP_ATTN:
                 dims[i] = c->n_head * c->head_dim;
@@ -486,7 +487,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
                 dims[i] = nd->params[0] * nd->params[1];   /* n_heads * head_dim  */
                 break;
             case OP_SSM_DELTA:
-                dims[i] = nd->params[1] * nd->params[2];   /* n_groups * d_state  */
+                dims[i] = nd->params[1] * nd->params[3];   /* n_v_heads * head_dim */
                 break;
             case OP_ATTN:
                 dims[i] = c->n_head * c->head_dim;
@@ -680,10 +681,12 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
             case OP_SSM_DELTA: {
                 /* Gated DeltaNet recurrence.  Sequential over rows by
                  * construction: each row advances the recurrent state. */
-                u32 st = nd->params[0], ng = nd->params[1], ds = nd->params[2];
+                u32 st = nd->params[0], n_v = nd->params[1];
+                u32 n_k = nd->params[2], hd = nd->params[3];
                 if (st >= g->n_state) goto fail;
-                u64 qkv_d = (u64)ng * ds;
-                if (od != (u32)qkv_d) goto fail;
+                u32 key_dim = n_k * hd;
+                u64 val_dim = (u64)n_v * hd;
+                if (od != (u32)val_dim) goto fail;
                 float *state = (float *)g->state[st];
                 float *fused = (float *)g->node[(u32)nd->src[0]].data;
                 float *alpha = (float *)g->node[(u32)nd->src[1]].data;
@@ -692,51 +695,54 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
                 /* Per-call scratch: gates, dequantised params, and a
                  * private [q|k|v] copy (the fused source is shared with
                  * other consumers and must not be mutated). */
-                float *gv    = smalloc((u64)ng * sizeof(float));
-                float *bv    = smalloc((u64)ng * sizeof(float));
-                float *a_log = smalloc((u64)ng * sizeof(float));
-                float *dt_bi = smalloc((u64)ng * sizeof(float));
-                float *nw    = smalloc((u64)ds * sizeof(float));
-                float *mem   = smalloc(qkv_d * sizeof(float));
-                float *qkv   = smalloc(3 * qkv_d * sizeof(float));
+                float *gv    = smalloc((u64)n_v * sizeof(float));
+                float *bv    = smalloc((u64)n_v * sizeof(float));
+                float *a_log = smalloc((u64)n_v * sizeof(float));
+                float *dt_bi = smalloc((u64)n_v * sizeof(float));
+                float *nw    = smalloc((u64)hd * sizeof(float));
+                float *mem   = smalloc(val_dim * sizeof(float));
+                float *qkv   = smalloc((2 * (u64)key_dim + val_dim) * sizeof(float));
                 if (!gv || !bv || !a_log || !dt_bi || !nw || !mem || !qkv) {
                     sfree(gv); sfree(bv); sfree(a_log); sfree(dt_bi);
                     sfree(nw); sfree(mem); sfree(qkv);
                     goto fail;
                 }
-                tensor_get_f32_batch(nd->weights[0], 0, ng, a_log);
-                tensor_get_f32_batch(nd->weights[1], 0, ng, dt_bi);
-                if (nd->weights[2]) tensor_get_f32_batch(nd->weights[2], 0, ds, nw);
+                tensor_get_f32_batch(nd->weights[0], 0, n_v, a_log);
+                tensor_get_f32_batch(nd->weights[1], 0, n_v, dt_bi);
+                if (nd->weights[2]) tensor_get_f32_batch(nd->weights[2], 0, hd, nw);
 
                 for (u32 p = 0; p < r; p++) {
-                    const float *fp = fused + ((u64)base + p) * 3 * qkv_d;
-                    const float *ap = alpha + ((u64)base + p) * ng;
-                    const float *bp = beta  + ((u64)base + p) * ng;
+                    u64 fstride = 2 * (u64)key_dim + val_dim;
+                    const float *fp = fused + ((u64)base + p) * fstride;
+                    const float *ap = alpha + ((u64)base + p) * n_v;
+                    const float *bp = beta  + ((u64)base + p) * n_v;
                     float *dp = dst + (u64)p * od;
 
                     /* ssm.a already stores -exp(A_log) in the GGUF
                      * (converter: A_log → -exp(A_log)), so the decay
                      * gate is g = exp(ssm.a * softplus(alpha + dt_bias)). */
-                    for (u32 i = 0; i < ng; i++) {
+                    for (u32 i = 0; i < n_v; i++) {
                         gv[i] = expf(a_log[i] * softplus(ap[i] + dt_bi[i]));
                         bv[i] = sigmoid(bp[i]);
                     }
 
-                    memcpy(qkv, fp, 3 * qkv_d * sizeof(float));
-                    float *q_d = qkv, *k_d = qkv + qkv_d, *v_d = qkv + 2 * qkv_d;
-                    l2_norm_rows(q_d, ng, ds, DEFAULT_EPS);
-                    l2_norm_rows(k_d, ng, ds, DEFAULT_EPS);
-                    float qs = 1.0f / sqrtf((float)ds);
-                    for (u64 i = 0; i < qkv_d; i++)
-                        q_d[i] *= qs;
+                    memcpy(qkv, fp, fstride * sizeof(float));
+                    float *q_d = qkv, *k_d = qkv + key_dim, *v_d = qkv + 2 * key_dim;
+                    l2_norm_rows(q_d, n_k, hd, DEFAULT_EPS);
+                    l2_norm_rows(k_d, n_k, hd, DEFAULT_EPS);
+                    /* Q *= 1/sqrt(head_dim): the S^T q readout carries no
+                     * 1/sqrt(d) of its own, so the scale lives on q. */
+                    float q_scale = 1.0f / sqrtf((float)hd);
+                    for (u32 i = 0; i < key_dim; i++)
+                        q_d[i] *= q_scale;
 
                     gated_delta_step(q_d, k_d, v_d, state, gv, bv, mem,
-                                     dp, ng, ds);
+                                     dp, n_v, n_k, hd);
 
-                    /* Per-group RMS norm on the delta output. */
+                    /* Per-value-head RMS norm on the delta output. */
                     if (nd->weights[2])
-                        for (u32 grp = 0; grp < ng; grp++)
-                            rms_norm_inplace(dp + (u64)grp * ds, nw, ds, DEFAULT_EPS);
+                        for (u32 grp = 0; grp < n_v; grp++)
+                            rms_norm_inplace(dp + (u64)grp * hd, nw, hd, DEFAULT_EPS);
                 }
                 sfree(gv); sfree(bv); sfree(a_log); sfree(dt_bi);
                 sfree(nw); sfree(mem); sfree(qkv);
