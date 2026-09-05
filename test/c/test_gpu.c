@@ -90,8 +90,11 @@ static const TypeGeom type_geoms[] = {
 
 /* Tensor shapes: [rows, cols] (nontrans).  The first is not
  * block-aligned (forces cross-row blocks); the third exercises
- * trans rows > 256. */
-static const u64 shapes[][2] = { {37, 120}, {64, 256}, {300, 256} };
+ * trans rows > 256.  The last two give the K-quants more than one
+ * block per row, which is the case the block-cooperative GEMV fast
+ * path loops over (cols == 256 would only ever produce bpr == 1). */
+static const u64 shapes[][2] = { {37, 120}, {64, 256}, {300, 256},
+                                 {64, 768}, {37, 512} };
 #define N_SHAPES (sizeof(shapes) / sizeof(shapes[0]))
 
 /* Build a random weight tensor.  buf holds ceil(rows*cols/be)*bb
@@ -205,6 +208,52 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
     return bad;
 }
 
+/* Part C — decode identity for the block-cooperative GEMV fast path.
+ *
+ * The matvec fast path (cols % block_elems == 0) decodes each quant
+ * block's scale/min header once per lane instead of once per element.
+ * A wrong per-lane element mapping would still land inside Part B's
+ * loose tolerance, so compare against a reference built from the
+ * per-element decode (which Part A proves bit-exact) and accumulated
+ * in double.  Only f32 accumulation order — not decode — may then
+ * separate the two, so the tolerance can be tight. */
+static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
+    float *w = malloc(ti->n_element * sizeof(float));
+    float *x = malloc(cols * sizeof(float));
+    float *got = malloc(rows * sizeof(float));
+    if (!w || !x || !got) { free(w); free(x); free(got); return 1; }
+
+    if (gpu_dequant_batch(ti, 0, ti->n_element, w) != 0) {
+        printf("    gpu_dequant_batch failed\n");
+        free(w); free(x); free(got);
+        return 1;
+    }
+    for (u64 i = 0; i < cols; i++)
+        x[i] = (float)((int32_t)rng_next() % 2000001 - 1000000) / 1000000.0f;
+
+    int bad = 0;
+    if (gpu_matvec(ti, x, got, rows, cols, false) != 0) {
+        printf("    gpu_matvec failed\n");
+        bad++;
+    } else {
+        for (u64 r = 0; r < rows; r++) {
+            double ref = 0.0;
+            for (u64 c = 0; c < cols; c++)
+                ref += (double)w[r * cols + c] * (double)x[c];
+            double tol = 1e-3 * (fabs(ref) + 1.0) + 1e-4 * (double)cols;
+            double err = fabs((double)got[r] - ref);
+            if (err > tol) {
+                if (bad < 5)
+                    printf("    [r=%llu] got=%g ref=%g err=%g tol=%g\n",
+                           (unsigned long long)r, got[r], ref, err, tol);
+                bad++;
+            }
+        }
+    }
+    free(w); free(x); free(got);
+    return bad;
+}
+
 /* Run every check for one type; returns total failures. */
 static int run_type(u32 type, u64 be, u64 bb) {
     int fails = 0;
@@ -225,6 +274,17 @@ static int run_type(u32 type, u64 be, u64 bb) {
             printf("  [%s %llux%llu] matvec: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
+
+        /* Fast path (block-aligned cols) must decode identically to the
+         * per-element path. */
+        if (cols % be == 0) {
+            bad = check_decode_identity(&ti, rows, cols);
+            if (bad)
+                printf("  [%s %llux%llu] decode identity: %d mismatches\n",
+                       type_name(type), (unsigned long long)rows,
+                       (unsigned long long)cols, bad);
+            fails += bad;
+        }
 
         /* trans: tensor reinterpreted as [cols x rows] */
         bad = check_matmul(&ti, cols, rows, true, 1);

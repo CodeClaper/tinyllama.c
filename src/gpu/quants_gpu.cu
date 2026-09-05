@@ -296,6 +296,233 @@ __device__ static inline float dequant_q2_k(const u8 *data, u64 i) {
 }
 
 /* ================================================================
+ * Block-cooperative GEMV
+ *
+ * The per-element helpers above take a flat element index, so they must
+ * re-derive (and re-convert) their quant block's scale/min header on
+ * every call: two software f16_to_f32() calls, plus the header loads,
+ * per ELEMENT.  On K-quants that decode work is the whole kernel —
+ * matmul_kernel_nontrans() plateaued near 40 GB/s on a card capable of
+ * ~170 GB/s, because it spent its time converting the same two f16
+ * headers 256 times per block.
+ *
+ * The helpers below split decode in two, so the header is converted
+ * once per lane per block instead of once per element:
+ *
+ *   blk_scale<TYPE>()  block scale/min for this lane's element range
+ *   blk_elem <TYPE>()  one element, given the already-decoded scale
+ *
+ * Lane `lane` owns the EPT consecutive elements
+ *   [lane*EPT, lane*EPT + EPT)
+ * of a block of QK elements, so a 32-lane warp covers a whole block
+ * (32 * EPT == QK) and every byte of the block is read by exactly the
+ * lanes that need it.  Each quant type's sub-block scale is chosen so
+ * that it is constant across a lane's EPT elements — verified for
+ * every type below, since blk_scale() indexes it with the lane's first
+ * element only.
+ *
+ * Requires cols % QK == 0 so no block straddles a row; matmul_launch()
+ * checks that and falls back to the per-element kernels otherwise.
+ * ================================================================ */
+
+/* Decoded per-lane block header.  Slot meanings are type-specific; most
+ * types use v[0] as the block scale and v[1] as the block minimum. */
+struct BlkS { float v[4]; };
+
+/* Per-type block geometry.  QK is the element count of one quant block;
+ * EPT is the number of elements one lane decodes from that block.
+ *
+ * Only quantized types are listed.  The unquantized ones (F32/F16/BF16/
+ * I8/I16/I32/I64/F64) have no block header, so there is nothing for
+ * blk_scale() to hoist: their per-element decode is already one load +
+ * one convert + one FMA, and measured against a 220 GB/s read ceiling
+ * on the reference card the plain warp-per-row kernel already reaches
+ * ~205 GB/s on BF16 (94%).  Leaving QK = 0 for them keeps them on that
+ * kernel, which measured 7% faster than this one (the returned BlkS is
+ * dead weight the compiler cannot always sink). */
+template<int TYPE> struct QT { enum { QK = 0, BS = 0, EPT = 0 }; };
+
+#define QT_DEF(T, qk, bs)                                 \
+    template<> struct QT<GGUF_TYPE_##T> {                 \
+        enum { QK = (qk), BS = (bs), EPT = (qk) / 32 };   \
+    };
+
+QT_DEF(Q4_0,  32,  18)
+QT_DEF(Q4_1,  32,  20)
+QT_DEF(Q5_0,  32,  22)
+QT_DEF(Q5_1,  32,  24)
+QT_DEF(Q8_0,  32,  34)
+QT_DEF(Q8_1,  32,  40)
+QT_DEF(Q2_K, 256,  84)
+QT_DEF(Q3_K, 256, 110)
+QT_DEF(Q4_K, 256, 144)
+QT_DEF(Q5_K, 256, 176)
+QT_DEF(Q6_K, 256, 210)
+QT_DEF(Q8_K, 256, 292)
+#undef QT_DEF
+
+/* Block header for the element range this lane owns. */
+template<int TYPE>
+__device__ __forceinline__ BlkS blk_scale(const u8 *blk, u32 lane) {
+    constexpr int EPT = QT<TYPE>::EPT;
+    const u32 o0 = lane * (u32)EPT;   /* first element owned by this lane */
+    BlkS s = {};   /* unquantized types have no header; leave it zeroed */
+
+    if constexpr (TYPE == GGUF_TYPE_Q4_K || TYPE == GGUF_TYPE_Q5_K) {
+        /* sb = o >> 5 is lane >> 2 across the lane's EPT = 8 elements. */
+        s.v[0] = f16_to_f32(ld_u16(blk));
+        s.v[1] = f16_to_f32(ld_u16(blk + 2));
+        u8 sc, mn;
+        q4k_scale_min(blk + 4, o0 >> 5, &sc, &mn);
+        s.v[2] = (float)sc;
+        s.v[3] = (float)mn;
+    } else if constexpr (TYPE == GGUF_TYPE_Q6_K) {
+        s.v[0] = f16_to_f32(ld_u16(blk + 208));
+        s.v[1] = (float)(i8)blk[192 + (o0 >> 4)];
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_K) {
+        /* Sub-block scale covers 16 elements -> constant over EPT = 8. */
+        s.v[0] = ld_f32(blk);
+        s.v[1] = f16_to_f32(ld_u16(blk + 4 + 2 * (o0 >> 4)));
+    } else if constexpr (TYPE == GGUF_TYPE_Q2_K) {
+        /* Sub-block scale covers 16 elements -> constant over EPT = 8. */
+        u32 sb = o0 >> 4;
+        u32 sc = blk[64 + (sb >> 1)];
+        sc = (sb & 1) ? (sc >> 4) : (sc & 0xF);
+        s.v[0] = f16_to_f32(ld_u16(blk + 80));
+        s.v[1] = f16_to_f32(ld_u16(blk + 82));
+        s.v[2] = (float)(i32)sc;
+    } else if constexpr (TYPE == GGUF_TYPE_Q3_K) {
+        /* 6-bit scale, sub-block covers 16 elements -> constant over 8. */
+        u32 t = o0 >> 4;
+        u32 sc_low  = (blk[96 + (t & 7)]  >> (t >= 8 ? 4 : 0)) & 0xF;
+        u32 sc_high = (blk[104 + (t & 3)] >> ((t >> 2) * 2))    & 0x3;
+        s.v[0] = f16_to_f32(ld_u16(blk + 108));
+        s.v[1] = (float)((i32)(sc_low | (sc_high << 4)) - 32);
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_0 || TYPE == GGUF_TYPE_Q4_0 ||
+                         TYPE == GGUF_TYPE_Q5_0) {
+        s.v[0] = f16_to_f32(ld_u16(blk));
+    } else if constexpr (TYPE == GGUF_TYPE_Q4_1 || TYPE == GGUF_TYPE_Q5_1) {
+        s.v[0] = f16_to_f32(ld_u16(blk));
+        s.v[1] = f16_to_f32(ld_u16(blk + 2));
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_1) {
+        s.v[0] = ld_f32(blk);
+    }
+    return s;
+}
+
+/* Element `lane*EPT + j` of the block, given the header from
+ * blk_scale().  Every byte read here is one this lane owns, so a warp's
+ * reads for fixed j are contiguous within the block. */
+template<int TYPE>
+__device__ __forceinline__ float blk_elem(const u8 *blk, u32 lane, u32 j, const BlkS &s) {
+    constexpr int EPT = QT<TYPE>::EPT;
+    const u32 o = lane * (u32)EPT + j;
+
+    if constexpr (TYPE == GGUF_TYPE_Q4_K || TYPE == GGUF_TYPE_Q5_K) {
+        /* g = o >> 6 == lane >> 3, nb = (o >> 5) & 1 == (lane >> 2) & 1,
+         * bc = o & 31 == 8*(lane & 3) + j  -> 8 contiguous payload bytes. */
+        const u32 g  = lane >> 3;
+        const u32 bc = 8u * (lane & 3u) + j;
+        const u32 nb = (lane >> 2) & 1u;
+        u32 q;
+        if constexpr (TYPE == GGUF_TYPE_Q4_K) {
+            q = (blk[16 + g * 32 + bc] >> (nb * 4)) & 0xF;
+        } else {
+            const u32 lo = (blk[48 + g * 32 + bc] >> (nb * 4)) & 0xF;
+            const u32 hi = (blk[16 + bc] >> (lane >> 2)) & 1u;
+            q = lo | (hi << 4);
+        }
+        return s.v[0] * s.v[2] * (float)q - s.v[1] * s.v[3];
+    } else if constexpr (TYPE == GGUF_TYPE_Q6_K) {
+        /* half = o >> 7 == lane >> 4, m = lane & 15, which = m >> 2,
+         * l_idx = 8*(m & 3) + j. */
+        const u32 m     = lane & 15u;
+        const u32 which = m >> 2;
+        const u32 l     = 8u * (m & 3u) + j;
+        const u32 ql    = 64u * (lane >> 4) + ((which & 1u) << 5) + l;
+        const u32 lo    = (which >= 2) ? ((blk[ql] >> 4) & 0xF) : (blk[ql] & 0xF);
+        const u32 hi    = (blk[128 + (lane >> 4) * 32 + l] >> (which * 2)) & 0x3;
+        return s.v[0] * s.v[1] * (float)((i32)(lo | (hi << 4)) - 32);
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_K) {
+        return (float)(i8)blk[36 + o] * s.v[1] * s.v[0];
+    } else if constexpr (TYPE == GGUF_TYPE_Q2_K) {
+        /* o = 8*lane + j: q2 lives in blk[2*lane + j/2], the sign bit in
+         * blk[lane] -> three bytes cover all 8 elements. */
+        const u32 q2 = (blk[2u * lane + (j >> 2)] >> ((j & 3u) << 1)) & 0x3;
+        const i32 q  = (i32)q2 - (i32)((blk[lane] >> j) & 1u) * 4;
+        return s.v[0] * s.v[2] * (float)q - s.v[1];
+    } else if constexpr (TYPE == GGUF_TYPE_Q3_K) {
+        /* g = o >> 7 == lane >> 4, pr = (o >> 5) & 3 == (lane >> 2) & 3,
+         * bc = o & 31 == 8*(lane & 3) + j. */
+        const u32 bc = 8u * (lane & 3u) + j;
+        const u32 lo = (blk[32 + (lane >> 4) * 32 + bc] >> (((lane >> 2) & 3u) * 2)) & 0x3;
+        const u32 hi = (blk[bc] >> (lane >> 2)) & 1u;
+        return s.v[0] * s.v[1] * (float)((i32)(lo | (hi << 2)) - 4);
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_0) {
+        return (float)(i8)blk[2 + o] * s.v[0];
+    } else if constexpr (TYPE == GGUF_TYPE_Q8_1) {
+        return (float)(i8)blk[8 + o] * s.v[0];
+    } else if constexpr (TYPE == GGUF_TYPE_Q4_0) {
+        const u32 nib = (blk[2 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        return ((float)(i32)nib - 8.0f) * s.v[0];
+    } else if constexpr (TYPE == GGUF_TYPE_Q4_1) {
+        const u32 nib = (blk[4 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        return (float)nib * s.v[0] + s.v[1];
+    } else if constexpr (TYPE == GGUF_TYPE_Q5_0) {
+        const u32 qh = ld_u32(blk + 2);
+        const u32 hi = (qh >> o) & 1u;
+        const u32 lo = (blk[6 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        return ((float)(i32)((hi << 4) | lo) - 16.0f) * s.v[0];
+    } else if constexpr (TYPE == GGUF_TYPE_Q5_1) {
+        const u32 qh = ld_u32(blk + 4);
+        const u32 hi = (qh >> o) & 1u;
+        const u32 lo = (blk[8 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        return (float)((hi << 4) | lo) * s.v[0] + s.v[1];
+    }
+    /* No branch for the unquantized types (F32/F16/BF16/I8/I16/I32/I64/
+     * F64): QT<TYPE>::QK == 0 keeps them off this kernel entirely. */
+    return 0.0f;
+}
+
+/* One warp per output row: y[b*rows + r] = sum_c w[r*cols + c] * x[b*cols + c].
+ *
+ * Rows are covered grid-stride so the launch works for any `rows`
+ * (lm_head is ~152k rows).  Within a row the warp walks the row's
+ * quant blocks, decoding each block header once per lane. */
+template<int TYPE>
+__global__ void gemv_block_kernel(const u8 *__restrict__ w,
+                                  const float *__restrict__ x,
+                                  float *__restrict__ y,
+                                  u64 rows, u64 cols) {
+    constexpr int QK  = QT<TYPE>::QK;
+    constexpr int BS  = QT<TYPE>::BS;
+    constexpr int EPT = QT<TYPE>::EPT;
+
+    const u32 lane = threadIdx.x & 31u;
+    const u64 bpr  = cols / (u64)QK;                  /* blocks per row  */
+    const float *xr = x + (u64)blockIdx.y * cols;
+    float *yr       = y + (u64)blockIdx.y * rows;
+
+    for (u64 r = (u64)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+         r < rows;
+         r += (u64)gridDim.x * (blockDim.x >> 5)) {
+        u64 blk0 = (r * cols) / (u64)QK;              /* first block of row */
+        float sum = 0.0f;
+        for (u64 b = 0; b < bpr; b++) {
+            const u8 *bp = w + (blk0 + b) * (u64)BS;
+            const BlkS s = blk_scale<TYPE>(bp, lane);
+            #pragma unroll
+            for (int j = 0; j < EPT; j++)
+                sum += blk_elem<TYPE>(bp, lane, j, s) * xr[b * (u64)QK + lane * (u64)EPT + j];
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+            sum += __shfl_down_sync(0xffffffffu, sum, o);
+        if (lane == 0) yr[r] = sum;
+    }
+}
+
+/* ================================================================
  * IQ (importance-matrix-aware) types
  * ================================================================ */
 
@@ -768,6 +995,21 @@ typedef void (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
 template<int TYPE>
 static void matmul_launch(const u8 *w, const float *x, float *y,
                           u64 rows, u64 cols, u64 batch, bool trans) {
+    /* Fast path — one warp per output row, with each quant block's
+     * header decoded once per lane instead of once per element.  Only
+     * the non-transposed orientation has that layout, and it needs
+     * cols % QK == 0 so no block straddles a row.  Everything else
+     * falls through to the per-element kernels below. */
+    if constexpr (QT<TYPE>::QK > 0) {
+        if (!trans && cols % (u64)QT<TYPE>::QK == 0) {
+            u64 want = (rows + 7) / 8;   /* 8 warps per block */
+            dim3 grid((unsigned)(want < GPU_MAX_BLOCKS ? want : GPU_MAX_BLOCKS),
+                      (unsigned)batch);
+            gemv_block_kernel<TYPE><<<grid, 256>>>(w, x, y, rows, cols);
+            CHECK(cudaGetLastError());
+            return;
+        }
+    }
     dim3 block(256);
     dim3 grid(trans ? (unsigned)((rows + 255) / 256) : (unsigned)((rows + 7) / 8), (unsigned)batch);
     if (trans) matmul_kernel_trans<TYPE><<<grid, block>>>(w, x, y, rows, cols, batch);
