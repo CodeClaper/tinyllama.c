@@ -1112,6 +1112,29 @@ static int gpu_matmul_prep(TensorInfo *ti, u8 **d_w_out) {
     return 0;
 }
 
+/* Persistent scratch for the decode hot path.
+ *
+ * gpu_matvec runs ~150-200 times per token with only a handful of
+ * distinct shapes, and each cudaMalloc/cudaFree is a driver round trip:
+ * measured 48 µs + 20 µs on the reference card, i.e. ~11 ms of every
+ * token on a 248k-vocab model.  Growing two buffers once removes all of
+ * it.  Buffers past GPU_SCRATCH_MAX_FLOATS are still allocated per call
+ * so an unusually wide vocab cannot pin unbounded memory. */
+#define GPU_SCRATCH_MAX_FLOATS (8u << 20)   /* 32 MB */
+
+static float *g_sx = NULL; static u64 g_sx_n = 0;
+static float *g_sy = NULL; static u64 g_sy_n = 0;
+
+static float *gpu_scratch(float **buf, u64 *cap, u64 n) {
+    if (n > GPU_SCRATCH_MAX_FLOATS) return NULL;
+    if (n > *cap) {
+        if (*buf) CHECK(cudaFree(*buf));
+        CHECK(cudaMalloc(buf, n * sizeof(float)));
+        *cap = n;
+    }
+    return *buf;
+}
+
 int gpu_matvec(TensorInfo *ti, const float *x, float *y,
                u64 rows, u64 cols, bool trans) {
     if (!ti || !ti->data || !x || !y || rows == 0 || cols == 0) return -1;
@@ -1120,14 +1143,15 @@ int gpu_matvec(TensorInfo *ti, const float *x, float *y,
     u8 *d_w;
     if (gpu_matmul_prep(ti, &d_w) != 0) return -1;
 
-    float *d_x = NULL, *d_y = NULL;
-    CHECK(cudaMalloc(&d_x, cols * sizeof(float)));
-    CHECK(cudaMalloc(&d_y, rows * sizeof(float)));
+    float *d_x = gpu_scratch(&g_sx, &g_sx_n, cols);
+    float *d_y = gpu_scratch(&g_sy, &g_sy_n, rows);
+    bool own = false;
+    if (!d_x) { CHECK(cudaMalloc(&d_x, cols * sizeof(float))); own = true; }
+    if (!d_y) { CHECK(cudaMalloc(&d_y, rows * sizeof(float))); own = true; }
     CHECK(cudaMemcpy(d_x, x, cols * sizeof(float), cudaMemcpyHostToDevice));
     gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans);
     CHECK(cudaMemcpy(y, d_y, rows * sizeof(float), cudaMemcpyDeviceToHost));
-    cudaFree(d_x);
-    cudaFree(d_y);
+    if (own) { if (d_x != g_sx) cudaFree(d_x); if (d_y != g_sy) cudaFree(d_y); }
     return 0;
 }
 
@@ -1154,4 +1178,6 @@ void gpu_shutdown(void) {
     for (int i = 0; i < g_cache_n; i++)
         if (g_cache_dev[i]) cudaFree(g_cache_dev[i]);
     g_cache_n = 0;
+    if (g_sx) { cudaFree(g_sx); g_sx = NULL; g_sx_n = 0; }
+    if (g_sy) { cudaFree(g_sy); g_sy = NULL; g_sy_n = 0; }
 }
