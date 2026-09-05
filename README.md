@@ -159,18 +159,18 @@ The benchmark runs the prompt through prefill and generation phases, repeating `
 
 ## Benchmark
 
-Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tokens, 35 generated tokens). Offloading matmuls to the GPU speeds up generation roughly 4-6x over CPU-only:
+Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tokens, 128 generated tokens). Offloading matmuls to the GPU speeds up generation by roughly 6-14x over CPU-only:
 
 | Model | Device | Quant | Peak Mem | TTFT | Prefill | Generate | tok/s |
 |---|---|---|---|---|---|---|---|
-| Qwen2.5 1.5B Instruct | CPU | Q4_K_M | 976 MB | 356.5 ms | 356.5 ms (36.5 tok/s) | 7193.6 ms | 4.9 |
-| Qwen2.5 1.5B Instruct | CUDA | Q4_K_M | 1157 MB | 738.8 ms | 738.8 ms (17.6 tok/s) | 1763.9 ms | 19.8 |
-| Qwen2.5 1.5B Instruct | CPU | Q3_K_M | 822 MB | 427.4 ms | 427.4 ms (30.4 tok/s) | 11327.3 ms | 3.1 |
-| Qwen2.5 1.5B Instruct | CUDA | Q3_K_M | 1002 MB | 741.0 ms | 741.0 ms (17.5 tok/s) | 1746.6 ms | 20.0 |
-| Qwen3.5 0.8B | CPU | BF16 | 1502 MB | 844.3 ms | 844.3 ms (15.4 tok/s) | 7461.0 ms | 4.7 |
-| Qwen3.5 0.8B | CUDA | BF16 | 1681 MB | 595.1 ms | 595.1 ms (21.8 tok/s) | 1677.3 ms | 20.9 |
+| Qwen2.5 1.5B Instruct | CPU | Q4_K_M | 1198 MB | 341.0 ms | 341.0 ms (38.1 tok/s) | 11386.6 ms | 11.2 |
+| Qwen2.5 1.5B Instruct | CUDA | Q4_K_M | 1403 MB | 480.8 ms | 480.8 ms (27.0 tok/s) | 1739.0 ms | 73.6 |
+| Qwen2.5 1.5B Instruct | CPU | Q3_K_M | 1043 MB | 427.9 ms | 427.9 ms (30.4 tok/s) | 10054.4 ms | 9.8 |
+| Qwen2.5 1.5B Instruct | CUDA | Q3_K_M | 1249 MB | 374.7 ms | 374.7 ms (34.7 tok/s) | 1772.0 ms | 72.2 |
+| Qwen3.5 0.8B | CPU | BF16 | 1883 MB | 799.2 ms | 799.2 ms (16.3 tok/s) | 24080.8 ms | 5.3 |
+| Qwen3.5 0.8B | CUDA | BF16 | 2087 MB | 414.2 ms | 414.2 ms (31.4 tok/s) | 1665.0 ms | 76.9 |
 
-> CUDA row built with `GPU=1 make`; matmuls above a size threshold run on the GPU, smaller ones fall back to CPU. Note the GPU path trades slower prefill (fixed kernel-launch overhead per op) for a large generation throughput win.
+> CUDA row built with `GPU=1 make`; matmuls above a size threshold run on the GPU, smaller ones fall back to CPU. The GPU path trades slower prefill on the small prompt (fixed kernel-launch overhead per op) for a large generation throughput win.
 
 ## Project Structure
 
