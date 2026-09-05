@@ -726,12 +726,11 @@ static int qwen25_decode(const u8 *raw, int raw_len, char *out, int max_len) {
  * batch row indices (0 .. n_tokens-1), so the graph performs a standalone
  * forward pass that does not consult the session KV cache. */
 static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
-    ArchConfig *c = &s->cfg;
-    Weights    *w = s->en->weights;
-
-    if (!s || !w || n_tokens == 0 || n_tokens > s->ctx_size) return NULL;
+    ArchConfig *c       = &s->cfg;
+    Weights    *w       = s->en->weights;
     Qwen25Workspace *ws = (Qwen25Workspace *)s->arch_data;
-    if (!ws) return NULL;
+
+    if (!s || !w || !ws|| n_tokens == 0 || n_tokens > s->ctx_size) return NULL;
 
     /* Dims for the matmul direction flags.  Each trans below must mirror
      * the expression used by qwen25_prefill / qwen25_generate for the
