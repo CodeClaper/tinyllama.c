@@ -9,6 +9,7 @@
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
+#include "graph.h"
 #include "tokenizer.h"
 #include "sampler.h"
 #ifdef GPU_BUILD
@@ -32,6 +33,7 @@ typedef struct {
     const char *output;
     int repeat;
     int nthread;
+    int graph;
 } BenchOptions;
 
 /* Usage. */
@@ -50,6 +52,9 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -i  | --input   <string>  User input\n");
     fprintf(file, "  -o  | --output  <string>  Output file for generated text (optional)\n");
     fprintf(file, "  -r  | --repeat  <int>     Repeat count, default 1\n");
+    fprintf(file, "  -g  | --graph             Use the experimental graph executor\n");
+    fprintf(file, "                            (one static graph, incremental KV decode\n");
+    fprintf(file, "                            via the session cache)\n");
     exit(exit_code);
 }
 
@@ -88,6 +93,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-i") || !strcmp(arg, "--input")) bo.input = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-o") || !strcmp(arg, "--output")) bo.output = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-r") || !strcmp(arg, "--repeat")) bo.repeat = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-g") || !strcmp(arg, "--graph")) bo.graph = 1;
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
             usage(stderr, 2);
@@ -156,6 +162,15 @@ int main(int argc, char *argv[]) {
     session->top_p = opts.top_p;
     session->min_p = opts.min_p;
 
+    if (opts.graph) {
+        if (!session->ops.graph_build)
+            slog(ERROR, "Graph executor is not supported for architecture '%s'",
+                 engine->model->arch_name);
+        session->graph = session->ops.graph_build(session, (u32)opts.ctx_size);
+        if (!session->graph) slog(ERROR, "Failed to build graph");
+        slog(INFO, "Graph executor enabled.");
+    }
+
     Vocab *v = engine->vocab;
 
     /* Tokenize input. */
@@ -192,7 +207,22 @@ int main(int argc, char *argv[]) {
 
         /* --- Prefill --- */
         double t0 = time_sec();
-        if (!session->ops.prefill(session, prompt_tokens, (u32)n_prompt, session->logits))
+        bool ok;
+        if (session->graph) {
+            u32 pos0 = session->n_tokens;
+            memcpy(session->tokens + pos0, prompt_tokens,
+                   (size_t)n_prompt * sizeof(u32));
+            GraphBatch batch = {
+                .tokens = session->tokens + pos0,
+                .pos    = pos0,
+                .n      = (u32)n_prompt
+            };
+            ok = graph_compute(session->graph, NULL, &batch, session);
+            session->n_tokens = pos0 + (u32)n_prompt;
+        } else {
+            ok = session->ops.prefill(session, prompt_tokens, (u32)n_prompt, session->logits);
+        }
+        if (!ok)
             slog(ERROR, "Forward pass failed at prefill");
         double t1 = time_sec();
         prefill_times[r] = (t1 - t0) * 1000.0; /* ms */
@@ -230,8 +260,21 @@ int main(int argc, char *argv[]) {
             }
 
             n_gen++;
-            if (!session->ops.generate(session, next_token, session->logits))
+            if (session->graph) {
+                u32 pos0 = session->n_tokens;
+                if (pos0 >= session->ctx_size) break;
+                session->tokens[pos0] = next_token;
+                GraphBatch batch = {
+                    .tokens = &session->tokens[pos0],
+                    .pos    = pos0,
+                    .n      = 1
+                };
+                if (!graph_compute(session->graph, NULL, &batch, session))
+                    break;
+                session->n_tokens = pos0 + 1;
+            } else if (!session->ops.generate(session, next_token, session->logits)) {
                 break;
+            }
 
             if (opts.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
@@ -341,6 +384,7 @@ int main(int argc, char *argv[]) {
     sfree(gen_times);
     sfree(gen_counts);
     sfree(output_text);
+    graph_free(session->graph);
     session_free(session);
     engine_close(engine);
 

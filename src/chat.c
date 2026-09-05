@@ -228,6 +228,9 @@ int main(int argc, char *argv[]) {
     session->frequency_penalty = co.frequency_penalty;
     session->presence_penalty  = co.presence_penalty;
     if (co.graph) {
+        if (!session->ops.graph_build)
+            slog(ERROR, "Graph executor is not supported for architecture '%s'",
+                 engine->model->arch_name);
         session->graph = session->ops.graph_build(session, (u32)co.ctx_size);
         if (!session->graph) fatal("Failed to build graph");
         else printf("Build graph success.\n");
