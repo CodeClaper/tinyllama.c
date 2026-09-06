@@ -387,7 +387,7 @@ static bool arena_plan(Graph *g, Session *s) {
 
         u64 off;
         u32 best = fcnt;                 /* smallest chunk that fits */
-        u64  best_sz = UINT64_MAX;
+        u64 best_sz = UINT64_MAX;
         for (u32 f = 0; f < fcnt; f++) {
             if (fsz[f] >= (u64)need[i] && fsz[f] < best_sz) {
                 best    = f;
