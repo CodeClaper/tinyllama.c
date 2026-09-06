@@ -425,22 +425,8 @@ static bool arena_plan(Graph *g, Session *s) {
  * is a valid topological order.  Returning false aborts the execution;
  * an operator must free whatever scratch it allocated before returning. */
 
-typedef struct {
-    Graph      *g;
-    Session    *s;
-    ArchConfig *cfg;
-    GraphNode  *node;  /* node being executed                        */
-    float      *dst;   /* node->data: output slot                    */
-    u32         od;    /* output row width (floats)                  */
-    u32         r;     /* rows to produce (sinks: 1)                 */
-    u32         base;  /* batch row of local row 0                   */
-    u32         pos;   /* absolute position of batch row 0           */
-    u32         n;     /* batch rows                                 */
-    float      *scr;   /* [pos + n] attention score scratch          */
-    float       scale; /* 1 / sqrt(kv_head_dim)                      */
-    u32         q_dim; /* n_head    * head_dim                       */
-    u32         kv_dim;/* n_kv_head * kv_head_dim                    */
-} OpCtx;
+/* The per-node execution context (OpCtx) lives in def.h next to Graph /
+ * GraphBatch, so CPU and device backends share one type. */
 
 /* Row-major source tensor of edge `k`. */
 static float *op_src(const OpCtx *c, int k) {

@@ -39,10 +39,10 @@ static inline unsigned op_block_count(u64 n) {
 }
 
 /* Mirror op_src()/op_param() in graph.c. */
-static inline float *op_src(const GpuOpCtx *c, int k) {
+static inline float *op_src(const OpCtx *c, int k) {
     return (float *)c->g->node[(u32)c->node->src[k]].data;
 }
-static inline u32 op_param(const GpuOpCtx *c, int k) {
+static inline u32 op_param(const OpCtx *c, int k) {
     return c->node->params[k];
 }
 
@@ -489,7 +489,7 @@ __global__ void k_attn(const float *__restrict__ qd, const float *__restrict__ c
  * Op entry points (mirror the op_* functions in graph.c)
  * ================================================================ */
 
-static bool gpu_op_embed(GpuOpCtx *c) {
+static bool gpu_op_embed(OpCtx *c) {
     TensorInfo *te = c->node->weights[0];
     bool te_trans  = (te->dim[0] == (i64)c->cfg->n_vocab);
     const u32 *tok = (const u32 *)c->g->node[(u32)c->node->src[0]].data;
@@ -503,7 +503,7 @@ static bool gpu_op_embed(GpuOpCtx *c) {
                                   base_mul, stride, c->dst) == 0;
 }
 
-static bool gpu_op_rms_norm(GpuOpCtx *c) {
+static bool gpu_op_rms_norm(OpCtx *c) {
     TensorInfo *tw = c->node->weights[0];
     const float *w = gpu_op_weight_f32(tw);
     if (!w) return false;
@@ -514,7 +514,7 @@ static bool gpu_op_rms_norm(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_rms_norm_heads(GpuOpCtx *c) {
+static bool gpu_op_rms_norm_heads(OpCtx *c) {
     u32 nh = op_param(c, 0), hd = op_param(c, 1);
     u32 is = op_param(c, 2), os = op_param(c, 3);
     const float *nw = gpu_op_weight_f32(c->node->weights[0]);
@@ -527,7 +527,7 @@ static bool gpu_op_rms_norm_heads(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_matmul(GpuOpCtx *c) {
+static bool gpu_op_matmul(OpCtx *c) {
     TensorInfo *w = c->node->weights[0];
     bool tr       = (c->node->op == OP_MATMUL_T);
     u64 rows      = tr ? w->dim[1] : w->dim[0];
@@ -536,7 +536,7 @@ static bool gpu_op_matmul(GpuOpCtx *c) {
     return gpu_matmul_dev(w, x, c->dst, c->r, rows, cols, tr) == 0;
 }
 
-static bool gpu_op_bias(GpuOpCtx *c) {
+static bool gpu_op_bias(OpCtx *c) {
     TensorInfo *tb = c->node->weights[0];
     const float *bw = gpu_op_weight_f32(tb);
     if (!bw) return false;
@@ -547,7 +547,7 @@ static bool gpu_op_bias(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_binary(GpuOpCtx *c) {
+static bool gpu_op_binary(OpCtx *c) {
     bool add = (c->node->op == OP_ADD);
     k_binary<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
         op_src(c, 0), op_src(c, 1), c->dst, add ? 1 : 0,
@@ -556,20 +556,20 @@ static bool gpu_op_binary(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_silu(GpuOpCtx *c) {
+static bool gpu_op_silu(OpCtx *c) {
     k_silu<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
         op_src(c, 0), c->dst, c->od, c->base, (u64)c->r * c->od);
     CHECK(cudaGetLastError());
     return true;
 }
 
-static bool gpu_op_softmax(GpuOpCtx *c) {
+static bool gpu_op_softmax(OpCtx *c) {
     k_softmax<<<c->r, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, c->od, c->base);
     CHECK(cudaGetLastError());
     return true;
 }
 
-static bool gpu_op_rope_neox(GpuOpCtx *c) {
+static bool gpu_op_rope_neox(OpCtx *c) {
     u32 bits = op_param(c, 0);
     float theta;
     memcpy(&theta, &bits, sizeof(theta));
@@ -584,7 +584,7 @@ static bool gpu_op_rope_neox(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_sigmoid_gate(GpuOpCtx *c) {
+static bool gpu_op_sigmoid_gate(OpCtx *c) {
     u32 nh = op_param(c, 0), hd = op_param(c, 1);
     if (c->od != nh * hd) return false;
     k_sigmoid_gate<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
@@ -594,7 +594,7 @@ static bool gpu_op_sigmoid_gate(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_ssm_conv(GpuOpCtx *c) {
+static bool gpu_op_ssm_conv(OpCtx *c) {
     u32 st = op_param(c, 0), ck = op_param(c, 1);
     if (st >= c->g->n_state) return false;
     float *state = (float *)c->g->state[st];
@@ -607,7 +607,7 @@ static bool gpu_op_ssm_conv(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_ssm_delta(GpuOpCtx *c) {
+static bool gpu_op_ssm_delta(OpCtx *c) {
     u32 st = op_param(c, 0), n_v = op_param(c, 1);
     u32 n_k = op_param(c, 2), hd = op_param(c, 3);
     if (st >= c->g->n_state) return false;
@@ -641,7 +641,7 @@ static bool gpu_op_ssm_delta(GpuOpCtx *c) {
     return true;
 }
 
-static bool gpu_op_attn(GpuOpCtx *c) {
+static bool gpu_op_attn(OpCtx *c) {
     if (!c->s->cache.std) {
         slog(WARN, (char *)"gpu_op_attn: OP_ATTN requires the std KV cache");
         return false;
@@ -679,7 +679,7 @@ static bool gpu_op_attn(GpuOpCtx *c) {
  * Dispatch — the GPU twin of graph.c's op_table
  * ================================================================ */
 
-bool gpu_graph_op(GpuOpCtx *c) {
+bool gpu_graph_op(OpCtx *c) {
     if (!c || !c->g || !c->s || !c->cfg || !c->node || !c->dst || c->od == 0)
         return false;
     switch (c->node->op) {

@@ -63,6 +63,14 @@ typedef enum {
     TOKENIZER_TYPE_WHISPER
 } TokenizerType;
 
+/* Compute backend selection for tensor operations (CPU SIMD,
+ * CUDA GPU, Metal GPU). */
+typedef enum {
+    BACKEND_CPU,
+    BACKEND_CUDA,
+    BACKEND_METAL,
+} BackendType;
+
 typedef struct {
     const char *model_path;
     bool inspect;
@@ -374,7 +382,6 @@ typedef enum {
     OP_D2H,
 } GraphOp;
 
-
 typedef struct {
     GraphOp     op;
     int         src[GRAPH_NODE_MAX_SRC];     /* source node indices; -1 = unused */
@@ -419,4 +426,27 @@ typedef struct {
     u32        pos;
     u32        n;
 } GraphBatch;
+
+/* Per-node execution context, shared by every operator backend.
+ * Mirrors graph.c's executor fields: the node, its output slot, and
+ * the row window to fill (r rows starting at batch row `base`, whose
+ * absolute position is pos + base).  On the CPU path the pointers are
+ * host addresses; on device backends (CUDA/Metal graph ops) the same
+ * fields carry VRAM pointers — the struct is backend-agnostic. */
+typedef struct {
+    Graph      *g;
+    Session    *s;
+    ArchConfig *cfg;
+    GraphNode  *node;  /* node being executed                        */
+    float      *dst;   /* node->data: output slot                    */
+    u32         od;    /* output row width (floats)                  */
+    u32         r;     /* rows to produce (sinks: 1)                 */
+    u32         base;  /* batch row of local row 0                   */
+    u32         pos;   /* absolute position of batch row 0           */
+    u32         n;     /* batch rows                                 */
+    float      *scr;   /* [pos + n] attention score scratch          */
+    float       scale; /* 1 / sqrt(kv_head_dim)                      */
+    u32         q_dim; /* n_head    * head_dim                       */
+    u32         kv_dim;/* n_kv_head * kv_head_dim                    */
+} OpCtx;
 #endif
