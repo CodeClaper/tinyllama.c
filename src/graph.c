@@ -792,13 +792,13 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
 
     /* Bind the batch's token ids into each OP_INPUT leaf. */
     for (u32 i = 0; i < g->n_node; i++) {
-        GraphNode *nd = &g->node[i];
-        if (nd->op != OP_INPUT) continue;
-        if (n > (u32)nd->ne[0]) {
+        GraphNode *node = &g->node[i];
+        if (node->op != OP_INPUT) continue;
+        if (n > (u32)node->ne[0]) {
             slog(WARN, "graph_compute: batch of %u exceeds graph capacity", n);
             return false;
         }
-        if (b->tokens) memcpy(nd->data, b->tokens, (size_t)n * sizeof(u32));
+        if (b->tokens) memcpy(node->data, b->tokens, (size_t)n * sizeof(u32));
     }
 
     ArchConfig *c = &s->cfg;
@@ -828,27 +828,27 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
 
     /* Walk the graph in build order (== topo order). */
     for (u32 i = 0; i < n_node; i++) {
-        GraphNode *nd = &g->node[i];
-        if (nd->op == OP_INPUT) continue;
+        GraphNode *node = &g->node[i];
+        if (node->op == OP_INPUT) continue;
 
         u32 od = dims[i];
         u32 r   = sink[i] ? 1u : n;             /* sink: last batch row only */
         u32 base = sink[i] ? n - 1 : 0;         /* batch row of local row 0  */
         if (od == 0 || r == 0) goto fail;
-        if ((size_t)r * od * sizeof(float) > nd->data_cap) goto fail;
-        float *dst = (float *)nd->data;
+        if ((size_t)r * od * sizeof(float) > node->data_cap) goto fail;
+        float *dst = (float *)node->data;
 
-        int    st_cls = op_stat_class(nd->op);
+        int    st_cls = op_stat_class(node->op);
         double st_t0  = graph_now();
         OpCtx ctx = {
-            .g = g, .s = s, .cfg = c, .nd = nd, .dst = dst,
+            .g = g, .s = s, .cfg = c, .nd = node, .dst = dst,
             .od = od, .r = r, .base = base, .pos = pos, .n = n,
             .scr = scr, .scale = scale, .q_dim = q_dim, .kv_dim = kv_dim,
         };
-        OpFn fn = (nd->op < sizeof(op_table) / sizeof(op_table[0]))
-                      ? op_table[nd->op] : NULL;
+        OpFn fn = (node->op < sizeof(op_table) / sizeof(op_table[0]))
+                      ? op_table[node->op] : NULL;
         if (!fn) {
-            slog(WARN, "graph_compute: unhandled op %d", (int)nd->op);
+            slog(WARN, "graph_compute: unhandled op %d", (int)node->op);
             goto fail;
         }
         if (!fn(&ctx)) goto fail;
