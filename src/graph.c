@@ -9,7 +9,9 @@
 #include "slog.h"
 
 #ifdef GPU_BUILD
+#include <cuda_runtime.h>
 #include "backend/gpu/gpu.h"
+#include "backend/gpu/gpu_op.h"
 #endif
 #ifdef METAL_BUILD
 #include "backend/metal/metal.h"
@@ -226,6 +228,9 @@ u32 graph_embed(Graph *g, u32 src, TensorInfo *weight, u32 n_tokens) {
  * Graph creation
  * ---------------------------------------------------------------- */
 
+static void *arena_alloc(BackendType backend, size_t bytes);
+static void arena_free(BackendType backend, void *arena);
+
 Graph *graph_new(void) {
     return scalloc(1, sizeof(Graph));
 }
@@ -255,9 +260,10 @@ void graph_free(Graph *g) {
     memset(op_stat_secs, 0, sizeof(op_stat_secs));
     memset(op_stat_calls, 0, sizeof(op_stat_calls));
 
-    /* Every node->data aliases a slot inside the plan's arena. */
+    /* Every node->data aliases a slot inside the plan's arena; its
+     * placement (host vs VRAM) follows the plan's backend. */
     if (g->plan) {
-        sfree(g->plan->arena);
+        arena_free(g->plan->backend, g->plan->arena);
         sfree(g->plan);
         g->plan = NULL;
     }
@@ -337,6 +343,42 @@ static u32 node_out_dim(const GraphNode *node, const u32 *dims, const ArchConfig
     }
 }
 
+/* Arena placement follows the plan's backend: a CUDA plan lives in
+ * VRAM so activations never leave the device; CPU (and Metal, until
+ * its graph ops land) uses host memory. */
+static void *arena_alloc(BackendType backend, size_t bytes) {
+    switch (backend) {
+#ifdef GPU_BUILD
+        case BACKEND_CUDA: {
+            void *d = NULL;
+            if (cudaMalloc(&d, bytes) != cudaSuccess) return NULL;
+            return d;
+        }
+#endif
+        case BACKEND_CPU:
+        case BACKEND_METAL:
+        default:
+            return smalloc(bytes);
+    }
+}
+
+static void arena_free(BackendType backend, void *arena) {
+    (void)backend;
+    if (!arena) return;
+    switch (backend) {
+#ifdef GPU_BUILD
+        case BACKEND_CUDA:
+            cudaFree(arena);
+            break;
+#endif
+        case BACKEND_CPU:
+        case BACKEND_METAL:
+        default:
+            sfree(arena);
+            break;
+    }
+}
+
 static bool arena_plan(Graph *g, Session *s) {
     u32 n_node = g->n_node;
     ArchConfig *c = &s->cfg;
@@ -411,11 +453,18 @@ static bool arena_plan(Graph *g, Session *s) {
     }
 
     if (bump == 0) return true;
-    GraphPlan *p = scalloc(1, sizeof(GraphPlan));
-    if (!p) return false;
-    p->backend    = BACKEND_CPU;
-    p->arena      = smalloc((size_t)bump);
-    if (!p->arena) { sfree(p); return false; }
+    /* Reuse the plan shell created by backend_plan (backend already
+     * pinned); create one only when the caller skipped that step. */
+    GraphPlan *p = g->plan;
+    bool fresh = false;
+    if (!p) {
+        p = scalloc(1, sizeof(GraphPlan));
+        if (!p) return false;
+        p->backend = BACKEND_CPU;
+        fresh = true;
+    }
+    p->arena      = arena_alloc(p->backend, (size_t)bump);
+    if (!p->arena) { if (fresh) sfree(p); return false; }
     p->arena_size = (size_t)bump;
     g->plan = p;
 
@@ -428,27 +477,36 @@ static bool arena_plan(Graph *g, Session *s) {
 }
 
 /* Auto-select the compute backend targeted by the graph's execution
- * plan.  A plan shell must exist (graph_plan creates it right after
- * the arena sweep); the chosen backend is recorded in plan->backend
- * so the executor and device op backends (gpu_op) can dispatch
- * without re-detection per node. */
+ * plan; the selection must run BEFORE the arena sweep, because the
+ * backend decides where the plan's arena is allocated (VRAM vs host).
+ * A caller may pin the backend explicitly by pre-seeding the plan. */
 bool backend_plan(Graph *g) {
-    if (!g || !g->plan) return false;
-    BackendType backend = BACKEND_CPU;
+    if (!g) return false;
+    if (!g->plan) {
+        g->plan = scalloc(1, sizeof(GraphPlan));
+        if (!g->plan) return false;
+        g->plan->backend = BACKEND_CPU;
+    }
+    /* Long-lived graphs keep their pinned backend; fresh plans take
+     * the detected one. */
+    if (!g->plan->arena) {
+        BackendType backend = g->plan->backend;
 #ifdef METAL_BUILD
-    if (metal_available()) backend = BACKEND_METAL;
+        if (metal_available() && backend == BACKEND_CPU) backend = BACKEND_METAL;
 #endif
 #ifdef GPU_BUILD
-    if (gpu_available()) backend = BACKEND_CUDA;
+        if (gpu_available() && backend == BACKEND_CPU) backend = BACKEND_CUDA;
 #endif
-    g->plan->backend = backend;
+        g->plan->backend = backend;
+    }
     return true;
 }
 
 bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
     if (g->plan) return true;          /* already planned */
-    return backend_plan(g) && arena_plan(g, s);
+    if (!backend_plan(g)) return false;   /* backend first: arena placement */
+    return arena_plan(g, s);
 }
 
 
@@ -827,7 +885,17 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
             slog(WARN, "graph_compute: batch of %u exceeds graph capacity", n);
             return false;
         }
-        if (b->tokens) memcpy(node->data, b->tokens, (size_t)n * sizeof(u32));
+        if (b->tokens) {
+#ifdef GPU_BUILD
+            if (g->plan->backend == BACKEND_CUDA) {
+                /* The only H2D of a GPU-path batch: token ids into the
+                 * VRAM arena; every op reads them on-device. */
+                CHECK(cudaMemcpy(node->data, b->tokens, (size_t)n * sizeof(u32),
+                                 cudaMemcpyHostToDevice));
+            } else
+#endif
+                memcpy(node->data, b->tokens, (size_t)n * sizeof(u32));
+        }
     }
 
     ArchConfig *c = &s->cfg;
@@ -873,23 +941,44 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
             .od = od, .r = r, .base = base, .pos = pos, .n = n,
             .scr = scr, .scale = scale, .q_dim = q_dim, .kv_dim = kv_dim,
         };
-        OpFn fn = (node->op < sizeof(op_table) / sizeof(op_table[0])) ? op_table[node->op] : NULL;
-        if (!fn) {
-            slog(WARN, "graph_compute: unhandled op %d", (int)node->op);
-            goto fail;
+
+        /* Device backends own data in VRAM: the CUDA plan fully
+         * replaces the CPU op path (op_src()/cuda kernels), while the
+         * CPU path runs the local op_table. */
+        bool ok;
+#ifdef GPU_BUILD
+        if (g->plan->backend == BACKEND_CUDA)
+            ok = gpu_graph_op(&ctx);
+        else
+#endif
+        {
+            OpFn fn = (node->op < sizeof(op_table) / sizeof(op_table[0]))
+                          ? op_table[node->op] : NULL;
+            if (!fn) {
+                slog(WARN, "graph_compute: unhandled op %d", (int)node->op);
+                goto fail;
+            }
+            ok = fn(&ctx);
         }
-        if (!fn(&ctx)) goto fail;
+        if (!ok) goto fail;
         
         /* Graph stats. */
         op_stat_secs[st_cls] += graph_now() - st_t0;
         op_stat_calls[st_cls]++;
     }
 
-    /* Sink output (last row of the LM head) → session logits. */
+    /* Sink output (last row of the LM head) → session logits.
+     * A CUDA arena hands the slot back through one D2H. */
     for (u32 i = 0; i < n_node; i++) {
         if (!sink[i] || g->node[i].op == OP_INPUT) continue;
         u32 n = dims[i] < c->n_vocab ? dims[i] : c->n_vocab;
-        memcpy(s->logits, g->node[i].data, (size_t)n * sizeof(float));
+#ifdef GPU_BUILD
+        if (g->plan->backend == BACKEND_CUDA) {
+            CHECK(cudaMemcpy(s->logits, g->node[i].data, (size_t)n * sizeof(float),
+                             cudaMemcpyDeviceToHost));
+        } else
+#endif
+            memcpy(s->logits, g->node[i].data, (size_t)n * sizeof(float));
         break;
     }
 

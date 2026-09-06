@@ -21,10 +21,10 @@ ifdef GPU
 	CUDA_HOME ?= $(abspath $(NVCC)/../..)
 	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
 	NVCCFLAGS = -O3 -arch=native --std=c++17
-	CFLAGS += -D GPU_BUILD
+	CFLAGS += -D GPU_BUILD -I$(CUDA_HOME)/include
 	LDFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
 	GPU_TESTS += test_gpu
-	GPU_LINK  += gpu.o
+	GPU_LINK  += gpu.o gpu_op.o
 endif
 
 # Metal backend test (optional, macOS only).  Build with: METAL=1 make
@@ -97,6 +97,10 @@ test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.
 
 gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h
 	$(NVCC) $(NVCCFLAGS) -c $(SRC_DIR)/backend/gpu/gpu.cu -o $@
+
+gpu_op.o: $(SRC_DIR)/backend/gpu/gpu_op.cu $(SRC_DIR)/backend/gpu/gpu_op.h \
+          $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h
+	$(NVCC) $(NVCCFLAGS) -c $(SRC_DIR)/backend/gpu/gpu_op.cu -o $@
 
 test_gpu: c/test_gpu.c gpu.o quants.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm

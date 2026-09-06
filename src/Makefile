@@ -32,7 +32,7 @@ ifdef GPU
 	CUDA_HOME ?= $(abspath $(NVCC)/../..)
 	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
 	NVCCFLAGS = -O3 -arch=native --std=c++17
-	CFLAGS += -D GPU_BUILD
+	CFLAGS += -D GPU_BUILD -I$(CUDA_HOME)/include
 	GPU_OBJS = backend/gpu/gpu.o backend/gpu/gpu_op.o
 	LDADDCFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
 else
