@@ -45,5 +45,8 @@ bool backend_plan(Graph *g);
  * reuses the slots.  graph_compute() calls this lazily on first run. */
 bool graph_plan(Graph *g, Session *s);
 bool graph_compute(Graph *g, const GraphBatch *b, Session *s);
+/* Session-level entry point (ArchOps.graph_execute): builds the graph on
+ * first use, appends the batch at s->n_tokens and runs it. */
+bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits);
 
 #endif

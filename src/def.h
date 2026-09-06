@@ -92,7 +92,6 @@ typedef struct {
     float frequency_penalty;
     float presence_penalty;
     bool inspect;
-    bool graph;
 } ServerOptions;
 
 typedef struct {
@@ -307,11 +306,16 @@ typedef struct Graph Graph;
 typedef struct {
     bool  (*init)          (Session *s);
     void  (*free)          (Session *s);
-    bool  (*prefill)       (Session *s, u32 *tokens, u32 n_tokens, float *logits);
-    bool  (*generate)      (Session *s, u32 token, float *logits);
     void  (*reset)         (Session *s);
     int   (*decode)        (const u8 *raw, int raw_len, char *out, int max_len);
+    /* Builds the static graph at ctx_size capacity (see graph_build). */
     Graph* (*graph_build)  (Session *s, u32 n_tokens);
+    /* Runs one batch: appends n_tokens ids at the session's current
+     * position, executes the graph (building it on first use) and
+     * publishes the last row's logits.  Serves both prompt prefill
+     * (n_tokens > 1) and single-token decode (n_tokens == 1). */
+    bool  (*graph_execute) (Session *s, const u32 *tokens, u32 n_tokens,
+                            float *logits);
 } ArchOps;
 
 struct Session {

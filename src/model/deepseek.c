@@ -2,6 +2,7 @@
 #include "../utils.h"
 #include "../core.h"
 #include "../mm.h"
+#include "../graph.h"
 #include "../slog.h"
 
 static bool deepseek_init(Session *s) {
@@ -41,23 +42,6 @@ static bool deepseek_init(Session *s) {
     return true;
 }
 
-static bool deepseek_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
-    UNUSED(s);
-    UNUSED(tokens);
-    UNUSED(n_tokens);
-    UNUSED(logits);
-    slog(WARN, "deepseek_prefill is not yet implemented");
-    return false;
-}
-
-static bool deepseek_generate(Session *s, u32 token, float *logits) {
-    UNUSED(s);
-    UNUSED(token);
-    UNUSED(logits);
-    slog(WARN, "deepseek_generate is not yet implemented");
-    return false;
-}
-
 static void deepseek_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++) {
@@ -90,9 +74,8 @@ static void deepseek_free(Session *s) {
 }
 
 const ArchOps deepseek_ops = {
-    .init    = deepseek_init,
-    .free    = deepseek_free,
-    .prefill = deepseek_prefill,
-    .generate = deepseek_generate,
-    .reset   = deepseek_reset,
+    .init          = deepseek_init,
+    .free          = deepseek_free,
+    .reset         = deepseek_reset,
+    .graph_execute = graph_execute,
 };

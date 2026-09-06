@@ -1,6 +1,7 @@
 #include "model.h"
 #include "../core.h"
 #include "../mm.h"
+#include "../graph.h"
 #include "../slog.h"
 
 static bool llama_init(Session *s) {
@@ -25,24 +26,6 @@ static bool llama_init(Session *s) {
 
     return true;
 }
-
-static bool llama_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
-    (void)s;
-    (void)tokens;
-    (void)n_tokens;
-    (void)logits;
-    slog(WARN, "llama_prefill is not yet implemented");
-    return false;
-}
-
-static bool llama_generate(Session *s, u32 token, float *logits) {
-    (void)s;
-    (void)token;
-    (void)logits;
-    slog(WARN, "llama_generate is not yet implemented");
-    return false;
-}
-
 
 static void llama_reset(Session *s) {
     KvCache *kc = &s->cache;
@@ -71,9 +54,8 @@ static void llama_free(Session *s) {
 /* ---- Ops table ------------------------------------------------ */
 
 const ArchOps llama_ops = {
-    .init    = llama_init,
-    .free    = llama_free,
-    .prefill = llama_prefill,
-    .generate = llama_generate,
-    .reset   = llama_reset,
+    .init          = llama_init,
+    .free          = llama_free,
+    .reset         = llama_reset,
+    .graph_execute = graph_execute,
 };

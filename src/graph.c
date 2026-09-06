@@ -989,3 +989,54 @@ fail:
     sfree(scr);
     return false;
 }
+
+/* One forward step through the graph: it is built on first use (at ctx_size
+ * capacity, so any later batch fits), the batch is appended to the session
+ * ring buffer at s->n_tokens and executed, and the last row's logits are
+ * published.  Replaces the old prefill / generate arch hooks — callers pass
+ * the prompt ids for prefill and a single id for decode. */
+bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
+    if (!s || !tokens || n_tokens == 0) {
+        slog(WARN, "graph_execute: missing session / tokens");
+        return false;
+    }
+
+    if (!s->graph) {
+        if (!s->ops.graph_build) {
+            slog(WARN, "graph_execute: no graph builder for this architecture");
+            return false;
+        }
+        s->graph = s->ops.graph_build(s, s->ctx_size);
+        if (!s->graph) {
+            slog(WARN, "graph_execute: graph build failed");
+            return false;
+        }
+    }
+
+    u32 pos = s->n_tokens;
+    if ((u64)pos + n_tokens > s->ctx_size) {
+        slog(WARN, "graph_execute: batch of %u at pos %u exceeds ctx_size=%u",
+             n_tokens, pos, s->ctx_size);
+        return false;
+    }
+    if (!s->tokens) {
+        slog(WARN, "graph_execute: session has no token buffer");
+        return false;
+    }
+
+    memcpy(s->tokens + pos, tokens, (size_t)n_tokens * sizeof(u32));
+    GraphBatch batch = {
+        .tokens = s->tokens + pos,
+        .pos    = pos,
+        .n      = n_tokens
+    };
+    if (!graph_compute(s->graph, &batch, s)) return false;
+    s->n_tokens = pos + n_tokens;
+
+    /* graph_compute() leaves the logits in s->logits; mirror them out when
+     * the caller asked for a different buffer. */
+    if (logits && logits != s->logits)
+        memcpy(logits, s->logits, (size_t)s->cfg.n_vocab * sizeof(float));
+
+    return true;
+}

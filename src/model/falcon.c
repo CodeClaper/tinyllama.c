@@ -1,6 +1,7 @@
 #include "model.h"
 #include "../core.h"
 #include "../mm.h"
+#include "../graph.h"
 #include "../slog.h"
 #include "../utils.h"
 
@@ -24,23 +25,6 @@ static bool falcon_init(Session *s) {
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
     return true;
-}
-
-static bool falcon_prefill(Session *s, u32 *tokens, u32 n_tokens, float *logits) {
-    UNUSED(s);
-    UNUSED(tokens);
-    UNUSED(n_tokens);
-    UNUSED(logits);
-    slog(WARN, "falcon_prefill is not yet implemented");
-    return false;
-}
-
-static bool falcon_generate(Session *s, u32 token, float *logits) {
-    UNUSED(s);
-    UNUSED(token);
-    UNUSED(logits);
-    slog(WARN, "falcon_generate is not yet implemented");
-    return false;
 }
 
 static void falcon_reset(Session *s) {
@@ -68,9 +52,8 @@ static void falcon_free(Session *s) {
 }
 
 const ArchOps falcon_ops = {
-    .init    = falcon_init,
-    .free    = falcon_free,
-    .prefill = falcon_prefill,
-    .generate = falcon_generate,
-    .reset   = falcon_reset,
+    .init          = falcon_init,
+    .free          = falcon_free,
+    .reset         = falcon_reset,
+    .graph_execute = graph_execute,
 };

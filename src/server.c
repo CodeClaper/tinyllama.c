@@ -166,27 +166,12 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     /* 4. Reset session & prefill. */
     s->ops.reset(s);
-    bool ok = false;
-    if (s->graph) {
-        /* Incremental batch prefill: run the prompt as one batch at
-         * position 0; the executor extends the session KV cache. */
-        u32 pos0 = s->n_tokens;
-        u32 room = s->ctx_size - pos0;
-        if (n_prompt > (int)room) n_prompt = (int)room;
-        if (n_prompt > 0) {
-            memcpy(s->tokens + pos0, prompt_tokens,
-                   (size_t)n_prompt * sizeof(u32));
-            GraphBatch batch = {
-                .tokens = s->tokens + pos0,
-                .pos    = pos0,
-                .n      = (u32)n_prompt
-            };
-            ok = graph_compute(s->graph, &batch, s);
-            s->n_tokens = pos0 + (u32)n_prompt;
-        }
-    } else {
-        ok = s->ops.prefill(s, prompt_tokens, n_prompt, s->logits);
-    }
+    /* The batch is appended at the current position; the executor
+     * extends the session KV cache. */
+    u32 room = s->ctx_size - s->n_tokens;
+    if (n_prompt > (int)room) n_prompt = (int)room;
+    bool ok = n_prompt > 0 &&
+              s->ops.graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
                      "{\"error\":\"Forward pass failed\"}");
@@ -220,22 +205,10 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
             if (added > 0) resp_used += added;
         }
         n_gen++;
-        if (s->graph) {
-            /* Incremental decode: one new row at the current position;
-             * attention reads the cached history. */
-            u32 pos0 = s->n_tokens;
-            if (pos0 >= s->ctx_size) break;
-            s->tokens[pos0] = next_token;
-            GraphBatch batch = {
-                .tokens = &s->tokens[pos0],
-                .pos    = pos0,
-                .n      = 1
-            };
-            if (!graph_compute(s->graph, &batch, s)) break;
-            s->n_tokens = pos0 + 1;
-        } else if (!s->ops.generate(s, next_token, s->logits)) {
-            break;
-        }
+        /* Incremental decode: one new row at the current position;
+         * attention reads the cached history. */
+        if (s->n_tokens >= s->ctx_size) break;
+        if (!s->ops.graph_execute(s, &next_token, 1, s->logits)) break;
         next_token = sample_token(s->logits, s->cfg.n_vocab,
                                     s->temperature, s->top_k, s->top_p, s->min_p,
                                     s->repeat_penalty, s->repeat_last_n,
@@ -321,9 +294,6 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -fp | --frequency-penalty <float>   Frequency penalty, default 0.0 (0.0=disabled)\n");
     fprintf(file, "  -pp | --presence-penalty  <float>   Presence penalty, default 0.0 (0.0=disabled)\n");
     fprintf(file, "  -i  | --inspect           <none>    Inspect the engine/model\n");
-    fprintf(file, "  -g  | --graph                      Use the experimental graph executor\n");
-    fprintf(file, "                                     (one static graph, incremental KV decode\n");
-    fprintf(file, "                                     via the session cache)\n");
     exit(exit_code);
 }
 
@@ -369,7 +339,6 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) so.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) so.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i")  || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
-        else if (!strcmp(arg, "-g")  || !strcmp(arg, "--graph")) so.graph = true;
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
             usage(stderr, 2);
@@ -464,19 +433,6 @@ int main(int argc, char *argv[]) {
     session->repeat_last_n     = so.repeat_last_n;
     session->frequency_penalty = so.frequency_penalty;
     session->presence_penalty  = so.presence_penalty;
-
-    if (so.graph) {
-        if (!session->ops.graph_build)
-            slog(ERROR, "Graph executor is not supported for architecture '%s'",
-                 engine->model->arch_name);
-        session->graph = session->ops.graph_build(session, (u32)so.ctx_size);
-        if (!session->graph) {
-            session_free(session);
-            engine_close(engine);
-            slog(ERROR, "Failed to build graph");
-        }
-        slog(INFO, "Graph executor enabled.");
-    }
 
     /* 4. Set up server & signal handling. */
     Server server;

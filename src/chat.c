@@ -28,7 +28,6 @@ typedef struct {
     float presence_penalty;
     int nthread;
     const char *system;
-    int graph;
 } ChatOptions;
 
 /* Usage. */
@@ -37,9 +36,6 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Example: chat -m model.gguf -s \"You are a helpful assistant.\"\n");
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
-    fprintf(file, "  -g  | --graph                      Use the experimental graph executor\n");
-    fprintf(file, "                                     (one static graph, incremental KV decode\n");
-    fprintf(file, "                                     via the session cache)\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
@@ -119,7 +115,6 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) co.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) co.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) co.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-g")  || !strcmp(arg, "--graph")) co.graph = 1;
         else if (!strcmp(arg, "-s")  || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
@@ -227,15 +222,6 @@ int main(int argc, char *argv[]) {
     session->repeat_last_n    = co.repeat_last_n;
     session->frequency_penalty = co.frequency_penalty;
     session->presence_penalty  = co.presence_penalty;
-    if (co.graph) {
-        if (!session->ops.graph_build)
-            slog(ERROR, "Graph executor is not supported for architecture '%s'",
-                 engine->model->arch_name);
-        session->graph = session->ops.graph_build(session, (u32)co.ctx_size);
-        if (!session->graph) fatal("Failed to build graph");
-        else printf("Build graph success.\n");
-    }
-
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
     bool first_turn = true;
@@ -285,30 +271,17 @@ int main(int argc, char *argv[]) {
         if (n_prompt >= max_pt)
             fprintf(stderr, "Warning: prompt truncated to %d tokens.\n", max_pt);
 
-        /* Forward pass. */
-        bool ok;
-        if (session->graph) {
-            /* Incremental batch prefill: append the turn at the current
-             * position and run it as one batch; the executor extends the
-             * session KV cache, so history is never recomputed. */
-            u32 pos0 = session->n_tokens;
-            u32 room = session->ctx_size - pos0;
-            if (n_prompt > (int)room) {
-                fprintf(stderr, "Warning: prompt truncated to %u tokens (context full).\n", room);
-                n_prompt = (int)room;
-                if (n_prompt <= 0) fatal("Context full — use /clear to reset");
-            }
-            memcpy(session->tokens + pos0, prompt_tokens, (size_t)n_prompt * sizeof(u32));
-            GraphBatch batch = {
-                .tokens = session->tokens + pos0,
-                .pos    = pos0,
-                .n      = (u32)n_prompt
-            };
-            ok = graph_compute(session->graph, &batch, session);
-            session->n_tokens = pos0 + (u32)n_prompt;
-        } else {
-            ok = session->ops.prefill(session, prompt_tokens, n_prompt, session->logits);
+        /* Forward pass: the batch is appended at the current position and
+         * the executor extends the session KV cache, so history is never
+         * recomputed. */
+        u32 room = session->ctx_size - session->n_tokens;
+        if (n_prompt > (int)room) {
+            fprintf(stderr, "Warning: prompt truncated to %u tokens (context full).\n", room);
+            n_prompt = (int)room;
+            if (n_prompt <= 0) fatal("Context full — use /clear to reset");
         }
+        bool ok = session->ops.graph_execute(session, prompt_tokens,
+                                             (u32)n_prompt, session->logits);
         if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
@@ -333,26 +306,15 @@ int main(int argc, char *argv[]) {
                 fflush(stdout);
             }
             n_gen++;
-            if (session->graph) {
-                /* Incremental decode: one new row at the current
-                 * position; attention reads the cached history. */
-                u32 pos0 = session->n_tokens;
-                if (pos0 >= session->ctx_size) {
-                    fprintf(stderr, "\n[context full — /clear to continue]\n");
-                    break;
-                }
-                session->tokens[pos0] = next_token;
-                GraphBatch batch = {
-                    .tokens = &session->tokens[pos0],
-                    .pos    = pos0,
-                    .n      = 1
-                };
-                if (!graph_compute(session->graph, &batch, session))
-                    break;
-                session->n_tokens = pos0 + 1;
-            } else if (!session->ops.generate(session, next_token, session->logits)) {
+            /* Incremental decode: one new row at the current position;
+             * attention reads the cached history. */
+            if (session->n_tokens >= session->ctx_size) {
+                fprintf(stderr, "\n[context full — /clear to continue]\n");
                 break;
             }
+            if (!session->ops.graph_execute(session, &next_token, 1,
+                                            session->logits))
+                break;
             if (co.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,
                                            co.temperature, co.top_k, co.top_p, co.min_p,
