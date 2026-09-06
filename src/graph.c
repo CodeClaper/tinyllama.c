@@ -447,6 +447,11 @@ static float *op_src(const OpCtx *c, int k) {
     return (float *)c->g->node[(u32)c->node->src[k]].data;
 }
 
+/* Op-specific parameter `k` of the node being executed. */
+static u32 op_param(const OpCtx *c, int k) {
+    return c->node->params[k];
+}
+
 static bool op_embed(OpCtx *c) {
     TensorInfo *te = c->node->weights[0];
     bool te_trans  = (te->dim[0] == (i64)c->cfg->n_vocab);
@@ -531,11 +536,12 @@ static bool op_silu(OpCtx *c)    { return op_unary(c, silu); }
 static bool op_softmax(OpCtx *c) { return op_unary(c, softmax_n); }
 
 static bool op_rope_neox(OpCtx *c) {
+    u32 bits = op_param(c, 0);
     float theta;
-    memcpy(&theta, &c->node->params[0], sizeof(theta));
-    u32 heads = c->node->params[1];
-    u32 hdim  = c->node->params[2];
-    u32 rdim  = c->node->params[3];
+    memcpy(&theta, &bits, sizeof(theta));
+    u32 heads = op_param(c, 1);
+    u32 hdim  = op_param(c, 2);
+    u32 rdim  = op_param(c, 3);
     float *src = op_src(c, 0);
 
     for (u32 p = 0; p < c->r; p++) {
@@ -553,8 +559,8 @@ static bool op_rms_norm_heads(OpCtx *c) {
      * in_stride and written at out_stride.  Q-norm over a fused
      * [q, gate] projection uses in_stride == 2*head_dim, which also
      * drops the (unnormed) gate half. */
-    u32 nh = c->node->params[0], hd = c->node->params[1];
-    u32 is = c->node->params[2],  os = c->node->params[3];
+    u32 nh = op_param(c, 0), hd = op_param(c, 1);
+    u32 is = op_param(c, 2), os = op_param(c, 3);
     float *src = op_src(c, 0);
     float *nw  = smalloc((u64)hd * sizeof(float));
     if (!nw) return false;
@@ -576,7 +582,7 @@ static bool op_rms_norm_heads(OpCtx *c) {
 static bool op_sigmoid_gate(OpCtx *c) {
     /* out = a * sigmoid(gate), gate taken from the second half of each
      * 2*head_dim block of the fused source. */
-    u32 nh = c->node->params[0], hd = c->node->params[1];
+    u32 nh = op_param(c, 0), hd = op_param(c, 1);
     float *a  = op_src(c, 0);
     float *gt = op_src(c, 1);
 
@@ -595,7 +601,7 @@ static bool op_sigmoid_gate(OpCtx *c) {
 static bool op_ssm_conv(OpCtx *c) {
     /* Depthwise causal conv1d over the fused QKV projection, advancing
      * the per-layer ring buffer one row at a time. */
-    u32 st = c->node->params[0], ck = c->node->params[1];
+    u32 st = op_param(c, 0), ck = op_param(c, 1);
     if (st >= c->g->n_state) return false;
     float *state = (float *)c->g->state[st];
     float *src   = op_src(c, 0);
@@ -615,8 +621,8 @@ static bool op_ssm_conv(OpCtx *c) {
 static bool op_ssm_delta(OpCtx *c) {
     /* Gated DeltaNet recurrence.  Sequential over rows by construction:
      * each row advances the recurrent state. */
-    u32 st = c->node->params[0], n_v = c->node->params[1];
-    u32 n_k = c->node->params[2], hd = c->node->params[3];
+    u32 st = op_param(c, 0), n_v = op_param(c, 1);
+    u32 n_k = op_param(c, 2), hd = op_param(c, 3);
     if (st >= c->g->n_state) return false;
     u32 key_dim = n_k * hd;
     u64 val_dim = (u64)n_v * hd;
@@ -690,7 +696,7 @@ static bool op_attn(OpCtx *c) {
         slog(WARN, "graph_compute: OP_ATTN requires the std KV cache");
         return false;
     }
-    u32 layer = c->node->params[0];
+    u32 layer = op_param(c, 0);
     AttnKvCache *akc = &c->s->cache.std[layer];
     if (!akc->k || !akc->v) return false;
 
