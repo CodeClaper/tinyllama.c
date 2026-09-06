@@ -33,7 +33,7 @@ ifdef GPU
 	CUDA_LIB ?= $(if $(wildcard $(CUDA_HOME)/lib64),$(CUDA_HOME)/lib64,$(CUDA_HOME)/lib)
 	NVCCFLAGS = -O3 -arch=native --std=c++17
 	CFLAGS += -D GPU_BUILD
-	GPU_OBJS = backend/gpu/gpu.o
+	GPU_OBJS = backend/gpu/gpu.o backend/gpu/gpu_op.o
 	LDADDCFLAGS += -L$(CUDA_LIB) -lcudart -lstdc++
 else
 	GPU_OBJS =
@@ -140,6 +140,9 @@ backend/cpu/cpu.o: backend/cpu/cpu.c backend/cpu/cpu_arm.c backend/cpu/cpu_x86.c
 
 backend/gpu/gpu.o: backend/gpu/gpu.cu backend/gpu/gpu.h def.h
 	$(NVCC) $(NVCCFLAGS) -c backend/gpu/gpu.cu -o $@
+
+backend/gpu/gpu_op.o: backend/gpu/gpu_op.cu backend/gpu/gpu_op.h backend/gpu/gpu.h def.h
+	$(NVCC) $(NVCCFLAGS) -c backend/gpu/gpu_op.cu -o $@
 
 # metal_msl.h embeds the MSL kernel source as a C string so the
 # host binary can compile the library at runtime (newLibraryWithSource);

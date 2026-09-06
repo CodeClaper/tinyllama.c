@@ -73,6 +73,34 @@ int gpu_matmat(TensorInfo *ti, const float *X, float *Y, u64 batch, u64 rows, u6
 /* Free all cached device weight buffers.  Call once at teardown. */
 void gpu_shutdown(void);
 
+/* ---- Device-resident primitives for the graph op backend ----
+ *
+ * gpu_op.cu runs the graph operators with the arena, the KV cache,
+ * the SSM state buffers and the token ids all resident in VRAM:
+ * activations flow device-to-device and no per-op H2D/D2H takes
+ * place.  Weights are the only host-originated data and are served
+ * from the persistent device cache above through these entry points:
+ *
+ *   gpu_weight_dev        device pointer of a tensor's raw bytes
+ *                         (uploaded once on first use)
+ *   gpu_dequant_dev       dequant nb elements starting at i0 into
+ *                         d_out (device -> device)
+ *   gpu_dequant_gather_dev  embedding-style lookup: for each of the
+ *                         n_ids device-side ids, dequant `count`
+ *                         elements, out[p*count+j] = w[id[p]*base_mul
+ *                         + j*stride]
+ *   gpu_matmul_dev        Y[b] = W @ X[b] with X/Y already in VRAM
+ *
+ * All return nonzero / -1 / NULL on failure (no usable device,
+ * unknown quant type, cache exhaustion); CUDA errors stay fatal via
+ * CHECK(). */
+u8  *gpu_weight_dev(TensorInfo *ti);
+int  gpu_dequant_dev(u32 type, const u8 *d_w, u64 i0, u64 nb, float *d_out);
+int  gpu_dequant_gather_dev(u32 type, const u8 *d_w, const u32 *d_ids, u32 n_ids,
+                            u32 count, u64 base_mul, u64 stride, float *d_out);
+int  gpu_matmul_dev(TensorInfo *ti, const float *d_x, float *d_y,
+                    u64 batch, u64 rows, u64 cols, bool trans);
+
 #ifdef __cplusplus
 }
 #endif

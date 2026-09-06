@@ -724,6 +724,23 @@ __global__ void dequant_range_kernel(u32 type, const u8 * __restrict__ data,
     }
 }
 
+/* Embedding-style gather dequant: one output element per thread,
+ * out[idx] = dequant(w, ids[p]*base_mul + j*stride) with p = idx/count,
+ * j = idx%count.  ids live in device memory (OP_INPUT leaves), so token
+ * lookups never round-trip through the host. */
+__global__ void dequant_gather_kernel(u32 type, const u8 * __restrict__ w,
+                                      const u32 * __restrict__ ids, u32 n_ids,
+                                      u32 count, u64 base_mul, u64 stride,
+                                      float * __restrict__ out) {
+    u64 idx     = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 gstride = (u64)gridDim.x * blockDim.x;
+    for (; idx < (u64)n_ids * count; idx += gstride) {
+        u32 p = (u32)(idx / count);
+        u32 j = (u32)(idx % count);
+        out[idx] = dequant_one(type, w, (u64)ids[p] * base_mul + (u64)j * stride);
+    }
+}
+
 /* Fused dequant + dot: sum_{j=0}^{n-1} w[i0+j] * x[j], one partial sum per
  * block, host-side final reduction. */
 __global__ void dequant_dot_kernel(u32 type, const u8 * __restrict__ data,
@@ -1171,6 +1188,50 @@ int gpu_matmat(TensorInfo *ti, const float *X, float *Y,
     CHECK(cudaMemcpy(Y, d_y, batch * rows * sizeof(float), cudaMemcpyDeviceToHost));
     cudaFree(d_x);
     cudaFree(d_y);
+    return 0;
+}
+
+/* ================================================================
+ * Device-resident primitives (graph-op backend, see gpu.h)
+ * ================================================================ */
+
+u8 *gpu_weight_dev(TensorInfo *ti) {
+    if (!ti || !ti->data || !gpu_available()) return NULL;
+    return gpu_cache_get(ti);   /* NULL when the cache is full */
+}
+
+int gpu_dequant_dev(u32 type, const u8 *d_w, u64 i0, u64 nb, float *d_out) {
+    if (!d_w || !d_out || nb == 0) return -1;
+    if (!gpu_available()) return -1;
+    gpu_load_tables();
+    u64 be, bb;
+    if (gpu_geom(type, &be, &bb) != 0) return -1;
+    u64 start_i   = (i0 / be) * be;
+    const u8 *src = d_w + (start_i / be) * bb;
+    dequant_range_kernel<<<gpu_block_count(nb), GPU_THREADS>>>(type, src, start_i, i0, nb, d_out);
+    CHECK(cudaGetLastError());
+    return 0;
+}
+
+int gpu_dequant_gather_dev(u32 type, const u8 *d_w, const u32 *d_ids, u32 n_ids,
+                           u32 count, u64 base_mul, u64 stride, float *d_out) {
+    if (!d_w || !d_ids || !d_out || n_ids == 0 || count == 0) return -1;
+    if (!gpu_available()) return -1;
+    gpu_load_tables();
+    dequant_gather_kernel<<<gpu_block_count((u64)n_ids * count), GPU_THREADS>>>(
+        type, d_w, d_ids, n_ids, count, base_mul, stride, d_out);
+    CHECK(cudaGetLastError());
+    return 0;
+}
+
+int gpu_matmul_dev(TensorInfo *ti, const float *d_x, float *d_y,
+                   u64 batch, u64 rows, u64 cols, bool trans) {
+    if (!ti || !ti->data || !d_x || !d_y || batch == 0 || rows == 0 || cols == 0) return -1;
+    if (rows * cols > ti->n_element) return -1;
+
+    u8 *d_w;
+    if (gpu_matmul_prep(ti, &d_w) != 0) return -1;
+    gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, batch, trans);
     return 0;
 }
 
