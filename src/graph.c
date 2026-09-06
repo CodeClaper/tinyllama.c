@@ -830,9 +830,8 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     for (u32 i = 0; i < n_node; i++) {
         GraphNode *node = &g->node[i];
         if (node->op == OP_INPUT) continue;
-
-        u32 od = dims[i];
-        u32 r   = sink[i] ? 1u : n;             /* sink: last batch row only */
+        u32 od   = dims[i];
+        u32 r    = sink[i] ? 1u : n;            /* sink: last batch row only */
         u32 base = sink[i] ? n - 1 : 0;         /* batch row of local row 0  */
         if (od == 0 || r == 0) goto fail;
         if ((size_t)r * od * sizeof(float) > node->data_cap) goto fail;
@@ -845,15 +844,15 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
             .od = od, .r = r, .base = base, .pos = pos, .n = n,
             .scr = scr, .scale = scale, .q_dim = q_dim, .kv_dim = kv_dim,
         };
-        OpFn fn = (node->op < sizeof(op_table) / sizeof(op_table[0]))
-                      ? op_table[node->op] : NULL;
+        OpFn fn = (node->op < sizeof(op_table) / sizeof(op_table[0])) ? op_table[node->op] : NULL;
         if (!fn) {
             slog(WARN, "graph_compute: unhandled op %d", (int)node->op);
             goto fail;
         }
         if (!fn(&ctx)) goto fail;
-
-        op_stat_secs[st_cls]  += graph_now() - st_t0;
+        
+        /* Graph stats. */
+        op_stat_secs[st_cls] += graph_now() - st_t0;
         op_stat_calls[st_cls]++;
     }
 

@@ -298,8 +298,7 @@ int main(int argc, char *argv[]) {
                 n_prompt = (int)room;
                 if (n_prompt <= 0) fatal("Context full — use /clear to reset");
             }
-            memcpy(session->tokens + pos0, prompt_tokens,
-                   (size_t)n_prompt * sizeof(u32));
+            memcpy(session->tokens + pos0, prompt_tokens, (size_t)n_prompt * sizeof(u32));
             GraphBatch batch = {
                 .tokens = session->tokens + pos0,
                 .pos    = pos0,
