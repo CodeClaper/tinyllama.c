@@ -181,7 +181,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                 .pos    = pos0,
                 .n      = (u32)n_prompt
             };
-            ok = graph_compute(s->graph, NULL, &batch, s);
+            ok = graph_compute(s->graph, &batch, s);
             s->n_tokens = pos0 + (u32)n_prompt;
         }
     } else {
@@ -231,7 +231,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                 .pos    = pos0,
                 .n      = 1
             };
-            if (!graph_compute(s->graph, NULL, &batch, s)) break;
+            if (!graph_compute(s->graph, &batch, s)) break;
             s->n_tokens = pos0 + 1;
         } else if (!s->ops.generate(s, next_token, s->logits)) {
             break;

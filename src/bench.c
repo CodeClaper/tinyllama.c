@@ -217,7 +217,7 @@ int main(int argc, char *argv[]) {
                 .pos    = pos0,
                 .n      = (u32)n_prompt
             };
-            ok = graph_compute(session->graph, NULL, &batch, session);
+            ok = graph_compute(session->graph, &batch, session);
             session->n_tokens = pos0 + (u32)n_prompt;
         } else {
             ok = session->ops.prefill(session, prompt_tokens, (u32)n_prompt, session->logits);
@@ -269,7 +269,7 @@ int main(int argc, char *argv[]) {
                     .pos    = pos0,
                     .n      = 1
                 };
-                if (!graph_compute(session->graph, NULL, &batch, session))
+                if (!graph_compute(session->graph, &batch, session))
                     break;
                 session->n_tokens = pos0 + 1;
             } else if (!session->ops.generate(session, next_token, session->logits)) {

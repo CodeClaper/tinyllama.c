@@ -32,11 +32,11 @@ u32 graph_ssm_delta(Graph *g, u32 fused, u32 alpha, u32 beta,
 /* Borrows a caller-owned buffer; graph_free() does not free it. */
 u32 graph_state(Graph *g, void *ptr);
 u32 graph_attn(Graph *g, u32 q, u32 k, u32 v, u32 layer);
-GraphPlan graph_plan(Graph *g);
 /* Runs one batch at b->pos: OP_ATTN writes K/V into the session cache, then
  * attends causally.  The sink node runs on the last row only and its output
  * is copied to s->logits.  The graph is built once at ctx_size capacity and
  * reused for any n <= capacity. */
-bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s);
+void graph_plan(Graph *g);
+bool graph_compute(Graph *g, const GraphBatch *b, Session *s);
 
 #endif

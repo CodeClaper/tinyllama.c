@@ -255,10 +255,8 @@ void graph_free(Graph *g) {
     sfree(g);
 }
 
-GraphPlan graph_plan(Graph *g) {
+void graph_plan(Graph *g) {
     (void)g;
-    GraphPlan p;
-    return p;
 }
 
 
@@ -419,8 +417,7 @@ static bool arena_plan(Graph *g, Session *s) {
     return true;
 }
 
-bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
-    (void)plan;
+bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     if (!g || !s || !b || g->n_node == 0) {
         slog(WARN, "graph_compute: missing graph / session / batch");
         return false;
