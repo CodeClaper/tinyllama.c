@@ -99,9 +99,9 @@ u32 graph_input(Graph *g, u32 n_tokens) {
     u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL, 0);
     if (n == GRAPH_NODE_NONE) return GRAPH_NODE_NONE;
 
-    GraphNode *nd = &g->node[n];
-    nd->ne[0] = n_tokens;       /* capacity: [n_tokens]     */
-    nd->nb[0] = sizeof(u32);    /* element stride           */
+    GraphNode *node = &g->node[n];
+    node->ne[0] = n_tokens;       /* capacity: [n_tokens]     */
+    node->nb[0] = sizeof(u32);    /* element stride           */
     return n;
 }
 
@@ -291,8 +291,8 @@ void graph_plan(Graph *g) {
 static size_t align16(size_t x) { return (x + 15) & ~(size_t)15; }
 
 /* Capacity rows a node can ever be asked to produce. */
-static u32 node_cap_rows(const GraphNode *nd, bool sink, u32 ctx_size) {
-    if (nd->op == OP_INPUT) return (u32)nd->ne[0];
+static u32 node_cap_rows(const GraphNode *node, bool sink, u32 ctx_size) {
+    if (node->op == OP_INPUT) return (u32)node->ne[0];
     return sink ? 1u : ctx_size;
 }
 
@@ -300,32 +300,32 @@ static u32 node_cap_rows(const GraphNode *nd, bool sink, u32 ctx_size) {
  * already-computed widths of every source node — guaranteed when nodes are
  * visited in build order, which is also execution order.  Shared by the
  * arena planner and the executor so the two can never disagree. */
-static u32 node_out_dim(const GraphNode *nd, const u32 *dims, const ArchConfig *c) {
-    switch (nd->op) {
+static u32 node_out_dim(const GraphNode *node, const u32 *dims, const ArchConfig *c) {
+    switch (node->op) {
         case OP_INPUT:
             return 0;
         case OP_MATMUL_T:
         case OP_MATMUL:
         case OP_MATMULARRY: {
-            TensorInfo *w = nd->weights[0];
-            return (u32)(nd->op == OP_MATMUL_T ? w->dim[1] : w->dim[0]);
+            TensorInfo *w = node->weights[0];
+            return (u32)(node->op == OP_MATMUL_T ? w->dim[1] : w->dim[0]);
         }
         case OP_EMBED: {
-            TensorInfo *w = nd->weights[0];
+            TensorInfo *w = node->weights[0];
             return (u32)(w->dim[0] == (i64)c->n_vocab ? w->dim[1] : w->dim[0]);
         }
         case OP_RMS_NORM:
-            return (u32)nd->weights[0]->n_element;
+            return (u32)node->weights[0]->n_element;
         case OP_RMS_NORM_HEADS:
-            return nd->params[0] * nd->params[3];   /* n_heads * out_stride  */
+            return node->params[0] * node->params[3];   /* n_heads * out_stride  */
         case OP_SIGMOID_GATE:
-            return nd->params[0] * nd->params[1];   /* n_heads * head_dim    */
+            return node->params[0] * node->params[1];   /* n_heads * head_dim    */
         case OP_SSM_DELTA:
-            return nd->params[1] * nd->params[3];   /* n_v_heads * head_dim  */
+            return node->params[1] * node->params[3];   /* n_v_heads * head_dim  */
         case OP_ATTN:
             return c->n_head * c->head_dim;
         default:
-            return nd->src[0] >= 0 ? dims[(u32)nd->src[0]] : 0;
+            return node->src[0] >= 0 ? dims[(u32)node->src[0]] : 0;
     }
 }
 
@@ -408,9 +408,9 @@ static bool arena_plan(Graph *g, Session *s) {
     g->arena_size = (size_t)bump;
 
     for (u32 i = 0; i < n_node; i++) {
-        GraphNode *nd = &g->node[i];
-        nd->data      = (u8 *)g->arena + node_off[i];
-        nd->data_cap  = need[i];
+        GraphNode *node = &g->node[i];
+        node->data      = (u8 *)g->arena + node_off[i];
+        node->data_cap  = need[i];
     }
     return true;
 }
@@ -429,8 +429,8 @@ typedef struct {
     Graph      *g;
     Session    *s;
     ArchConfig *cfg;
-    GraphNode  *nd;    /* node being executed                        */
-    float      *dst;   /* nd->data: output slot                      */
+    GraphNode  *node;  /* node being executed                        */
+    float      *dst;   /* node->data: output slot                    */
     u32         od;    /* output row width (floats)                  */
     u32         r;     /* rows to produce (sinks: 1)                 */
     u32         base;  /* batch row of local row 0                   */
@@ -444,13 +444,13 @@ typedef struct {
 
 /* Row-major source tensor of edge `k`. */
 static float *op_src(const OpCtx *c, int k) {
-    return (float *)c->g->node[(u32)c->nd->src[k]].data;
+    return (float *)c->g->node[(u32)c->node->src[k]].data;
 }
 
 static bool op_embed(OpCtx *c) {
-    TensorInfo *te = c->nd->weights[0];
+    TensorInfo *te = c->node->weights[0];
     bool te_trans  = (te->dim[0] == (i64)c->cfg->n_vocab);
-    u32 *tok = (u32 *)c->g->node[(u32)c->nd->src[0]].data;
+    u32 *tok = (u32 *)c->g->node[(u32)c->node->src[0]].data;
 
     /* Always the full batch: the embedding of every input row is needed. */
     for (u32 p = 0; p < c->n; p++) {
@@ -466,7 +466,7 @@ static bool op_embed(OpCtx *c) {
 }
 
 static bool op_rms_norm(OpCtx *c) {
-    TensorInfo *tw = c->nd->weights[0];
+    TensorInfo *tw = c->node->weights[0];
     float *src = op_src(c, 0);
     for (u32 p = 0; p < c->r; p++)
         rms_norm(c->dst + (u64)p * c->od, src + ((u64)c->base + p) * c->od,
@@ -475,8 +475,8 @@ static bool op_rms_norm(OpCtx *c) {
 }
 
 static bool op_matmul(OpCtx *c) {
-    TensorInfo *w = c->nd->weights[0];
-    bool tr       = (c->nd->op == OP_MATMUL_T);
+    TensorInfo *w = c->node->weights[0];
+    bool tr       = (c->node->op == OP_MATMUL_T);
     u32 in        = (u32)(tr ? w->dim[0] : w->dim[1]);
     float *x      = op_src(c, 0) + (u64)c->base * in;
 
@@ -486,7 +486,7 @@ static bool op_matmul(OpCtx *c) {
 }
 
 static bool op_bias(OpCtx *c) {
-    TensorInfo *tb = c->nd->weights[0];
+    TensorInfo *tb = c->node->weights[0];
     float *src = op_src(c, 0);
     u32 nb = tb->n_element < (u64)c->od ? (u32)tb->n_element : c->od;
     for (u32 p = 0; p < c->r; p++) {
@@ -498,7 +498,7 @@ static bool op_bias(OpCtx *c) {
 }
 
 static bool op_binary(OpCtx *c) {
-    bool add = (c->nd->op == OP_ADD);
+    bool add = (c->node->op == OP_ADD);
     float *a = op_src(c, 0);
     float *b = op_src(c, 1);
     for (u32 p = 0; p < c->r; p++) {
@@ -532,10 +532,10 @@ static bool op_softmax(OpCtx *c) { return op_unary(c, softmax_n); }
 
 static bool op_rope_neox(OpCtx *c) {
     float theta;
-    memcpy(&theta, &c->nd->params[0], sizeof(theta));
-    u32 heads = c->nd->params[1];
-    u32 hdim  = c->nd->params[2];
-    u32 rdim  = c->nd->params[3];
+    memcpy(&theta, &c->node->params[0], sizeof(theta));
+    u32 heads = c->node->params[1];
+    u32 hdim  = c->node->params[2];
+    u32 rdim  = c->node->params[3];
     float *src = op_src(c, 0);
 
     for (u32 p = 0; p < c->r; p++) {
@@ -553,12 +553,12 @@ static bool op_rms_norm_heads(OpCtx *c) {
      * in_stride and written at out_stride.  Q-norm over a fused
      * [q, gate] projection uses in_stride == 2*head_dim, which also
      * drops the (unnormed) gate half. */
-    u32 nh = c->nd->params[0], hd = c->nd->params[1];
-    u32 is = c->nd->params[2],  os = c->nd->params[3];
+    u32 nh = c->node->params[0], hd = c->node->params[1];
+    u32 is = c->node->params[2],  os = c->node->params[3];
     float *src = op_src(c, 0);
     float *nw  = smalloc((u64)hd * sizeof(float));
     if (!nw) return false;
-    tensor_get_f32_batch(c->nd->weights[0], 0, hd, nw);
+    tensor_get_f32_batch(c->node->weights[0], 0, hd, nw);
 
     for (u32 p = 0; p < c->r; p++) {
         const float *sp = src + ((u64)c->base + p) * (u64)nh * is;
@@ -576,7 +576,7 @@ static bool op_rms_norm_heads(OpCtx *c) {
 static bool op_sigmoid_gate(OpCtx *c) {
     /* out = a * sigmoid(gate), gate taken from the second half of each
      * 2*head_dim block of the fused source. */
-    u32 nh = c->nd->params[0], hd = c->nd->params[1];
+    u32 nh = c->node->params[0], hd = c->node->params[1];
     float *a  = op_src(c, 0);
     float *gt = op_src(c, 1);
 
@@ -595,13 +595,13 @@ static bool op_sigmoid_gate(OpCtx *c) {
 static bool op_ssm_conv(OpCtx *c) {
     /* Depthwise causal conv1d over the fused QKV projection, advancing
      * the per-layer ring buffer one row at a time. */
-    u32 st = c->nd->params[0], ck = c->nd->params[1];
+    u32 st = c->node->params[0], ck = c->node->params[1];
     if (st >= c->g->n_state) return false;
     float *state = (float *)c->g->state[st];
     float *src   = op_src(c, 0);
     float *cw    = smalloc((u64)ck * c->od * sizeof(float));
     if (!cw) return false;
-    tensor_get_f32_batch(c->nd->weights[0], 0, (u64)ck * c->od, cw);
+    tensor_get_f32_batch(c->node->weights[0], 0, (u64)ck * c->od, cw);
 
     for (u32 p = 0; p < c->r; p++) {
         float *dp = c->dst + (u64)p * c->od;
@@ -615,8 +615,8 @@ static bool op_ssm_conv(OpCtx *c) {
 static bool op_ssm_delta(OpCtx *c) {
     /* Gated DeltaNet recurrence.  Sequential over rows by construction:
      * each row advances the recurrent state. */
-    u32 st = c->nd->params[0], n_v = c->nd->params[1];
-    u32 n_k = c->nd->params[2], hd = c->nd->params[3];
+    u32 st = c->node->params[0], n_v = c->node->params[1];
+    u32 n_k = c->node->params[2], hd = c->node->params[3];
     if (st >= c->g->n_state) return false;
     u32 key_dim = n_k * hd;
     u64 val_dim = (u64)n_v * hd;
@@ -641,9 +641,9 @@ static bool op_ssm_delta(OpCtx *c) {
         sfree(nw); sfree(mem); sfree(qkv);
         return false;
     }
-    tensor_get_f32_batch(c->nd->weights[0], 0, n_v, a_log);
-    tensor_get_f32_batch(c->nd->weights[1], 0, n_v, dt_bi);
-    if (c->nd->weights[2]) tensor_get_f32_batch(c->nd->weights[2], 0, hd, nw);
+    tensor_get_f32_batch(c->node->weights[0], 0, n_v, a_log);
+    tensor_get_f32_batch(c->node->weights[1], 0, n_v, dt_bi);
+    if (c->node->weights[2]) tensor_get_f32_batch(c->node->weights[2], 0, hd, nw);
 
     for (u32 p = 0; p < c->r; p++) {
         u64 fstride = 2 * (u64)key_dim + val_dim;
@@ -673,7 +673,7 @@ static bool op_ssm_delta(OpCtx *c) {
         gated_delta_step(q_d, k_d, v_d, state, gv, bv, mem, dp, n_v, n_k, hd);
 
         /* Per-value-head RMS norm on the delta output. */
-        if (c->nd->weights[2])
+        if (c->node->weights[2])
             for (u32 grp = 0; grp < n_v; grp++)
                 rms_norm_inplace(dp + (u64)grp * hd, nw, hd, DEFAULT_EPS);
     }
@@ -690,7 +690,7 @@ static bool op_attn(OpCtx *c) {
         slog(WARN, "graph_compute: OP_ATTN requires the std KV cache");
         return false;
     }
-    u32 layer = c->nd->params[0];
+    u32 layer = c->node->params[0];
     AttnKvCache *akc = &c->s->cache.std[layer];
     if (!akc->k || !akc->v) return false;
 
@@ -840,7 +840,7 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         int    st_cls = op_stat_class(node->op);
         double st_t0  = graph_now();
         OpCtx ctx = {
-            .g = g, .s = s, .cfg = c, .nd = node, .dst = dst,
+            .g = g, .s = s, .cfg = c, .node = node, .dst = dst,
             .od = od, .r = r, .base = base, .pos = pos, .n = n,
             .scr = scr, .scale = scale, .q_dim = q_dim, .kv_dim = kv_dim,
         };
