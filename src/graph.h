@@ -36,7 +36,14 @@ u32 graph_attn(Graph *g, u32 q, u32 k, u32 v, u32 layer);
  * attends causally.  The sink node runs on the last row only and its output
  * is copied to s->logits.  The graph is built once at ctx_size capacity and
  * reused for any n <= capacity. */
-void graph_plan(Graph *g);
+/* Auto-selects the compute backend (recorded into plan->backend); a
+ * plan shell must exist.  graph_plan() calls this after the arena
+ * sweep, so callers normally do not need it directly. */
+bool backend_plan(Graph *g);
+/* Generates the execution plan (arena slot layout) once: node->data
+ * pointers are baked into the graph and any n <= cfg-sized batch
+ * reuses the slots.  graph_compute() calls this lazily on first run. */
+bool graph_plan(Graph *g, Session *s);
 bool graph_compute(Graph *g, const GraphBatch *b, Session *s);
 
 #endif

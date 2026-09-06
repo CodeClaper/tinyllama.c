@@ -396,24 +396,31 @@ typedef struct {
     size_t      data_cap;                   /* bytes available at data */
 } GraphNode;
 
-/* Static DAG.  Nodes are appended in build order; because every edge
- * points strictly backward, build order is also a valid topo order. */
-typedef struct Graph {
-    GraphNode *node;
-    u32        n_node;
-    u32        cap;
+
+typedef struct GraphPlan {
+    BackendType backend;
     /* Static peak-size execution arena (graph.c).  Every node->data
      * aliases a slot inside it; slot offsets are assigned once by a
      * lifetime analysis on the first execution. */
-    void      *arena;
-    size_t     arena_size;
+    void        *arena;
+    size_t      arena_size;
+} GraphPlan;
+
+
+/* Static DAG.  Nodes are appended in build order; because every edge
+ * points strictly backward, build order is also a valid topo order. */
+typedef struct Graph {
+    GraphNode   *node;
+    u32         n_node;
+    u32         cap;
+    GraphPlan   *plan;
     /* Buffers borrowed from the arch workspace by stateful ops (e.g.
      * the Gated DeltaNet conv ring + recurrent state).  Indexed by the
      * handle graph_state() returns, which ops bake into params[].
      * Borrowed only — graph_free() never frees the targets. */
-    void     **state;
-    u32        n_state;
-    u32        state_cap;
+    void        **state;
+    u32         n_state;
+    u32         state_cap;
 } Graph;
 
 /* Execution batch: `n` token ids starting at absolute position `pos`
