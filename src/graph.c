@@ -66,7 +66,13 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
  * src[]   = source node indices, weights[] = per-source weight tensors,
  * params[] = op-specific parameters, n_params = how many u32s of it are
  * valid (ops that need none pass NULL / 0).  The node's full params block
- * is always zeroed, so unspecified entries read back as 0. */
+ * is always zeroed, so unspecified entries read back as 0.
+ *
+ * Every builder below hands node_add() a brace literal with exactly
+ * GRAPH_NODE_MAX_SRC entries — reading past it would be out of bounds,
+ * so the macro and the literals must move together. */
+_Static_assert(GRAPH_NODE_MAX_SRC == 4,
+               "graph builders pass src/weights literals with 4 entries");
 static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *weights,
                     const u32 *params, u32 n_params) {
     if (!g) return GRAPH_NODE_NONE;
@@ -74,7 +80,7 @@ static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *wei
     if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
     GraphNode *n = &g->node[g->n_node];
     n->op = op;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < GRAPH_NODE_MAX_SRC; i++) {
         n->src[i]     = src ? src[i] : -1;
         n->weights[i] = weights ? weights[i] : NULL;
     }
@@ -300,53 +306,53 @@ static bool arena_plan(Graph *g, Session *s) {
     u32 sink[n_node], dims[n_node];
     for (u32 i = 0; i < n_node; i++) sink[i] = 1;
     for (u32 j = 0; j < n_node; j++)
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
             if (g->node[j].src[k] >= 0) sink[(u32)g->node[j].src[k]] = 0;
     for (u32 i = 0; i < n_node; i++) {
-        GraphNode *nd = &g->node[i];
-        switch (nd->op) {
+        GraphNode *node = &g->node[i];
+        switch (node->op) {
             case OP_INPUT:
                 dims[i] = 0;
                 break;
             case OP_MATMUL_T:
             case OP_MATMUL:
             case OP_MATMULARRY: {
-                TensorInfo *w = nd->weights[0];
-                dims[i] = (u32)(nd->op == OP_MATMUL_T ? w->dim[1] : w->dim[0]);
+                TensorInfo *w = node->weights[0];
+                dims[i] = (u32)(node->op == OP_MATMUL_T ? w->dim[1] : w->dim[0]);
                 break;
             }
             case OP_EMBED: {
-                TensorInfo *w = nd->weights[0];
+                TensorInfo *w = node->weights[0];
                 dims[i] = (u32)(w->dim[0] == (i64)c->n_vocab ? w->dim[1] : w->dim[0]);
                 break;
             }
             case OP_RMS_NORM:
-                dims[i] = (u32)nd->weights[0]->n_element;
+                dims[i] = (u32)node->weights[0]->n_element;
                 break;
             case OP_RMS_NORM_HEADS:
-                dims[i] = nd->params[0] * nd->params[3];   /* n_heads * out_stride */
+                dims[i] = node->params[0] * node->params[3];   /* n_heads * out_stride */
                 break;
             case OP_SIGMOID_GATE:
-                dims[i] = nd->params[0] * nd->params[1];   /* n_heads * head_dim  */
+                dims[i] = node->params[0] * node->params[1];   /* n_heads * head_dim  */
                 break;
             case OP_SSM_DELTA:
-                dims[i] = nd->params[1] * nd->params[3];   /* n_v_heads * head_dim */
+                dims[i] = node->params[1] * node->params[3];   /* n_v_heads * head_dim */
                 break;
             case OP_ATTN:
                 dims[i] = c->n_head * c->head_dim;
                 break;
             default:
-                dims[i] = (u32)nd->src[0] >= 0 ? dims[(u32)nd->src[0]] : 0;
+                dims[i] = (u32)node->src[0] >= 0 ? dims[(u32)node->src[0]] : 0;
         }
     }
 
     /* Byte needs at full capacity (INPUT slots hold u32 token ids). */
     size_t need[n_node];
     for (u32 i = 0; i < n_node; i++) {
-        const GraphNode *nd = &g->node[i];
-        u32 rows = node_cap_rows(nd, sink[i] != 0, s->ctx_size);
-        need[i] = align16((nd->op == OP_INPUT)
-                              ? (size_t)nd->ne[0] * sizeof(u32)
+        const GraphNode *node = &g->node[i];
+        u32 rows = node_cap_rows(node, sink[i] != 0, s->ctx_size);
+        need[i] = align16((node->op == OP_INPUT)
+                              ? (size_t)node->ne[0] * sizeof(u32)
                               : (size_t)rows * dims[i] * sizeof(float));
     }
 
@@ -354,7 +360,7 @@ static bool arena_plan(Graph *g, Session *s) {
     u32 release[n_node];
     for (u32 i = 0; i < n_node; i++) release[i] = i;
     for (u32 j = 0; j < n_node; j++)
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
             if (g->node[j].src[k] >= 0) {
                 u32 src = (u32)g->node[j].src[k];
                 if (j > release[src]) release[src] = j;
@@ -401,14 +407,14 @@ static bool arena_plan(Graph *g, Session *s) {
     }
 
     if (bump == 0) return true;
-    g->arena      = smalloc((size_t)bump);
+    g->arena = smalloc((size_t)bump);
     if (!g->arena) return false;
     g->arena_size = (size_t)bump;
 
     for (u32 i = 0; i < n_node; i++) {
         GraphNode *nd = &g->node[i];
-        nd->data     = (u8 *)g->arena + node_off[i];
-        nd->data_cap = need[i];
+        nd->data      = (u8 *)g->arena + node_off[i];
+        nd->data_cap  = need[i];
     }
     return true;
 }
@@ -454,7 +460,7 @@ bool graph_compute(Graph *g, GraphPlan *plan, const GraphBatch *b, Session *s) {
     u32 sink[n_node];
     for (u32 i = 0; i < n_node; i++) sink[i] = 1;
     for (u32 j = 0; j < n_node; j++)
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
             if (g->node[j].src[k] >= 0) sink[(u32)g->node[j].src[k]] = 0;
 
     /* Elements per row of each node's output (float count). */

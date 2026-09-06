@@ -343,6 +343,15 @@ struct Session {
 
 #define GRAPH_NODE_NONE ((u32)-1)  /* invalid node handle (builder return) */
 
+/* Fan-in / attached-weight capacity of a node.  src[] and weights[] are
+ * filled and scanned in lockstep by node_add()/arena_plan()/graph_compute(),
+ * so one bound governs both.  The widest ops today need 3 entries
+ * (OP_ATTN: q,k,v — OP_SSM_DELTA: fused,alpha,beta + a,dt_bias,norm),
+ * so 4 keeps a slot of headroom.  NOTE: the builders in graph.c pass
+ * brace literals with exactly GRAPH_NODE_MAX_SRC entries; changing this
+ * trips the _Static_assert() there. */
+#define GRAPH_NODE_MAX_SRC 4
+
 typedef enum {
     OP_INPUT,      /* leaf: caller-seeded value, produced externally */
     OP_ADD,        /* out = a + b                 (element-wise)     */
@@ -366,8 +375,8 @@ typedef enum {
 
 typedef struct {
     GraphOp     op;
-    int         src[4];                     /* source node indices; -1 = unused */
-    TensorInfo *weights[4];
+    int         src[GRAPH_NODE_MAX_SRC];     /* source node indices; -1 = unused */
+    TensorInfo *weights[GRAPH_NODE_MAX_SRC];
     u32         params[64 / sizeof(u32)];
     i64         ne[MAX_DIMS];               /* number of elements */
     i64         nb[MAX_DIMS];               /* stride in bytes:
