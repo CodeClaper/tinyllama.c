@@ -36,4 +36,10 @@ float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n, const i8 *x_i8, float x_sc
  */
 void mul_mat_mat(float *C, const float *A, const float *B, u64 M, u64 K, u64 N);
 
+/*
+ * Plain f32 matrix-vector multiply: y = A @ x.
+ * A is [M x K] row-major, x is [K]; the result y is [M].
+ */
+void mul_mat_vec(float *y, const float *A, const float *x, u64 M, u64 K);
+
 #endif

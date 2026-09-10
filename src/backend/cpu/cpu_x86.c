@@ -1560,3 +1560,74 @@ void mul_mat_mat(float *C, const float *A, const float *B,
     mat_mat_sse(C, A, B, M, K, N);
 #endif
 }
+
+/* ================================================================
+ * Dense f32 matrix-vector multiply  y = A @ x
+ *   A [M x K] row-major, x [K], y [M].
+ *
+ * Each output row is a dot product of a contiguous A row against x;
+ * the k-loop is vectorised (2 FMAs per 8 elements on AVX2, plain
+ * mul+add on the SSE4.1 fallback).
+ * ================================================================ */
+
+#if defined(__AVX2__) && defined(__FMA__)
+
+static inline float avx_hsum_f32x8(__m256 v) {
+    __m256 t = _mm256_hadd_ps(v, v);
+    t = _mm256_hadd_ps(t, t);
+    __m128 hi = _mm256_extractf128_ps(t, 1);
+    __m128 lo = _mm256_castps256_ps128(t);
+    return _mm_cvtss_f32(_mm_add_ps(lo, hi));
+}
+
+static void mat_vec_avx2(float *y, const float *A, const float *x, u64 M, u64 K) {
+    for (u64 i = 0; i < M; i++) {
+        const float *a = A + i * K;
+        __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
+        u64 k = 0;
+        for (; k + 16 <= K; k += 16) {
+            s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + k + 0),
+                                 _mm256_loadu_ps(x + k + 0), s0);
+            s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + k + 8),
+                                 _mm256_loadu_ps(x + k + 8), s1);
+        }
+        float sum = avx_hsum_f32x8(_mm256_add_ps(s0, s1));
+        for (; k < K; k++) sum += a[k] * x[k];
+        y[i] = sum;
+    }
+}
+
+#else  /* SSE4.1 fallback */
+
+static void mat_vec_sse(float *y, const float *A, const float *x, u64 M, u64 K) {
+    for (u64 i = 0; i < M; i++) {
+        const float *a = A + i * K;
+        __m128 s0 = _mm_setzero_ps(), s1 = _mm_setzero_ps();
+        __m128 s2 = _mm_setzero_ps(), s3 = _mm_setzero_ps();
+        u64 k = 0;
+        for (; k + 16 <= K; k += 16) {
+            s0 = _mm_add_ps(s0, _mm_mul_ps(_mm_loadu_ps(a + k +  0),
+                                           _mm_loadu_ps(x + k +  0)));
+            s1 = _mm_add_ps(s1, _mm_mul_ps(_mm_loadu_ps(a + k +  4),
+                                           _mm_loadu_ps(x + k +  4)));
+            s2 = _mm_add_ps(s2, _mm_mul_ps(_mm_loadu_ps(a + k +  8),
+                                           _mm_loadu_ps(x + k +  8)));
+            s3 = _mm_add_ps(s3, _mm_mul_ps(_mm_loadu_ps(a + k + 12),
+                                           _mm_loadu_ps(x + k + 12)));
+        }
+        float sum = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(s0, s1), _mm_add_ps(s2, s3)));
+        for (; k < K; k++) sum += a[k] * x[k];
+        y[i] = sum;
+    }
+}
+
+#endif
+
+void mul_mat_vec(float *y, const float *A, const float *x, u64 M, u64 K) {
+    if (!y || !A || !x || M == 0 || K == 0) return;
+#if defined(__AVX2__) && defined(__FMA__)
+    mat_vec_avx2(y, A, x, M, K);
+#else
+    mat_vec_sse(y, A, x, M, K);
+#endif
+}

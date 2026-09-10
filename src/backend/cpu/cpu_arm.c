@@ -1797,3 +1797,31 @@ void mul_mat_mat(float *C, const float *A, const float *B,
         }
     }
 }
+
+/* ================================================================
+ * Dense f32 matrix-vector multiply  y = A @ x
+ *   A [M x K] row-major, x [K], y [M].
+ *
+ * Each output row is a dot product of a contiguous A row against x;
+ * the k-loop is vectorised with vmlaq_f32 (fused MAC on AArch64).
+ * ================================================================ */
+
+void mul_mat_vec(float *y, const float *A, const float *x, u64 M, u64 K) {
+    if (!y || !A || !x || M == 0 || K == 0) return;
+
+    for (u64 i = 0; i < M; i++) {
+        const float *a = A + i * K;
+        float32x4_t s0 = vdupq_n_f32(0.0f), s1 = vdupq_n_f32(0.0f);
+        float32x4_t s2 = vdupq_n_f32(0.0f), s3 = vdupq_n_f32(0.0f);
+        u64 k = 0;
+        for (; k + 16 <= K; k += 16) {
+            s0 = vmlaq_f32(s0, vld1q_f32(a + k +  0), vld1q_f32(x + k +  0));
+            s1 = vmlaq_f32(s1, vld1q_f32(a + k +  4), vld1q_f32(x + k +  4));
+            s2 = vmlaq_f32(s2, vld1q_f32(a + k +  8), vld1q_f32(x + k +  8));
+            s3 = vmlaq_f32(s3, vld1q_f32(a + k + 12), vld1q_f32(x + k + 12));
+        }
+        float sum = neon_hsum_f32x4(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+        for (; k < K; k++) sum += a[k] * x[k];
+        y[i] = sum;
+    }
+}
