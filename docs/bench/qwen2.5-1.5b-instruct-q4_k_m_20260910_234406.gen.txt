@@ -1,0 +1,5 @@
+Sir Isaac Newton (1642-1726) was an English mathematician and physicist who lived during the same period as Galileo, Kepler and Hooke. He's considered to be one of the most influential scientists in history.
+
+He is best known for his law of gravity, which explains how objects fall from a height due to gravitational attraction between them. This led him to formulate Newton's laws of motion, which describe the force of an object as being proportional to its mass and acceleration. These laws have been used by engineers and physicists ever since.
+
+Newton was also involved in the development of calculus, which allowed mathematicians
