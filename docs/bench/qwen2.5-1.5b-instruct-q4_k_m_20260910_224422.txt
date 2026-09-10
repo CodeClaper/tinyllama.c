@@ -1,0 +1,50 @@
+[2026-09-10 22:44:22.674400][23097][INFO]:	Loading model: /home/zc/Work/model/qwen2.5-1.5b-instruct-q4_k_m.gguf
+[2026-09-10 22:44:22.688758][23097][INFO]:	Loaded model (qwen2)
+[2026-09-10 22:44:22.688927][23097][INFO]:	ArchConfig: arch=qwen2 n_embd=1536 n_head=12 n_kv_head=2 head_dim=128 kv_head_dim=128 rope_dim=128 n_layer=28 n_vocab=151936
+[2026-09-10 22:44:22.732799][23097][INFO]:	Qwen2 init: n_embd=1536 n_head=12 n_kv_head=2 head_dim=128 kv_head_dim=128 n_layer=28 n_vocab=151936 ctx_size=4096
+[2026-09-10 22:44:22.732815][23097][INFO]:	Qwen2 init: rope_theta=1000000.000000
+[2026-09-10 22:44:22.732817][23097][INFO]:	Session created: ctx_size=4096 n_layer=28 n_embd=1536 n_head=12 head_dim=128
+[2026-09-10 22:44:22.732818][23097][INFO]:	Tokenizing input...
+[2026-09-10 22:44:22.732839][23097][INFO]:	Prompt tokens: 14
+[2026-09-10 22:44:22.732858][23097][INFO]:	Running benchmark: 1 iterations, 128 tokens each
+................................................................................................................................[1/1] TTFT: 396.3 ms | Prefill: 396.3 ms | Generate: 11026.0 ms (128 tokens, 11.6 tok/s)    
+graph timing: total 11.333s over 69015 node execs
+  embed        0.041s    0.4%  (129 calls)
+  rms_norm     0.008s    0.1%  (7353 calls)
+  matmul      11.124s   98.2%  (25413 calls)
+  attn         0.088s    0.8%  (3612 calls)
+  rope         0.022s    0.2%  (7224 calls)
+  silu         0.030s    0.3%  (3612 calls)
+  bias         0.006s    0.1%  (10836 calls)
+  add/mul      0.014s    0.1%  (10836 calls)
+graph arena: 524.0 MB
+
+
+===== TinyLLaMA Benchmark =====
+Model:              /home/zc/Work/model/qwen2.5-1.5b-instruct-q4_k_m.gguf
+Architecture:       qwen2
+Device:             CPU
+Context Size:       4096
+Threads:            12
+Prompt Tokens:      14
+Target Tokens:      128
+Repeats:            1
+Temperature:        0.80
+Top-k:              40
+Top-p:              0.90
+Min-p:              0.05
+Repeat Penalty:     1.10
+Repeat Last N:      64
+Frequency Penalty:  0.00
+Presence Penalty:   0.00
+────────────────────────────────────────────────────────────────────────────────────────────────
+[1/1] TTFT:    396.3 ms | Prefill:    396.3 ms (   35.3 tok/s) | Generate:  11026.0 ms (128 tok,    11.6 tok/s)
+────────────────────────────────────────────────────────────────────────────────────────────────
+Avg TTFT:          396.3 ms
+Avg Prefill:       396.3 ms (   35.3 tok/s)
+Avg Generate:    11026.0 ms (   11.6 tok/s)
+Min/Max TTFT:     396.3 / 396.3 ms
+Min/Max Generate: 11026.0 / 11026.0 ms
+Peak Memory:    1723 MB
+════════════════════════════════════════════════════════════════════════════════════════════════
+[2026-09-10 22:44:34.155403][23097][INFO]:	Output written to /home/zc/Work/c/tinyllama.c/docs/bench/qwen2.5-1.5b-instruct-q4_k_m_20260910_224422.gen.txt

@@ -1,0 +1,9 @@
+Sir Isaac Newton (1642-1726) was an English mathematician and physicist who lived in the 17th century. He is widely regarded as one of the most influential scientists in history, particularly for his work on classical mechanics and optics.
+
+Key contributions include:
+
+1. Three laws of motion: First law (inertia), Second law (force equals mass times acceleration), Third law (action-reaction).
+
+2. Law of universal gravitation: Explained how objects attract each other due to gravity.
+
+3. Calculus: Developed tools that became fundamental for solving complex mathematical problems, especially in physics and engineering
