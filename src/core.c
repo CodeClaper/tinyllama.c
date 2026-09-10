@@ -307,54 +307,68 @@ bool mat_vec_mul(float *y, TensorInfo *tw, const float *x, u64 rows, u64 cols, b
     return true;
 }
 
-/* ---- Parallel mat-mat row workers -----------------------------------
- * Each invocation computes one output row: dequantise the weight row
- * into a per-thread buffer, then compute a dot product against every
- * batch element's input row.  The w_row_buf array has nthreads slices
- * of cols floats; thread tid writes to w_row_buf[tid * cols]. */
+/* ---- Parallel mat-mat chunk workers -----------------------------------
+ * The product Y[b][r] = W[r] · X[b]  is the matrix multiply Y = X @ W^T.
+ * X is transposed once into X^T [cols × batch]; each work item then owns
+ * a chunk of output rows r0..r1, dequantises those weight rows into a
+ * contiguous buffer and runs the SIMD mul_mat_mat() micro-kernel against
+ * X^T.  Per-thread scratch keeps the buffers race-free. */
+#define MATMAT_CHUNK 16
 typedef struct {
     float       *Y;         /* output matrix [batch × rows]           */
     TensorInfo  *tw;        /* weight tensor                          */
-    const float *X;         /* input matrix [batch × cols]            */
+    const float *X_T;       /* transposed input [cols × batch]        */
     u64          batch;
     u64          rows;
-    u64          cols;      /* dot-product length                     */
+    u64          cols;
     u64          tc;        /* tensor column-stride (transposed only) */
     bool         trans;
-    float       *w_row_buf; /* nthreads * cols float buffer           */
+    float       *row_buf;   /* nthreads × chunk × cols  dequant scratch */
+    float       *tmp_buf;   /* nthreads × chunk × batch result scratch  */
 } MatMatCtx;
 
-static void matmat_worker(void *arg, int tid, int i) {
-    MatMatCtx *c = (MatMatCtx *)arg;
-    float *w_row = c->w_row_buf + (u64)tid * c->cols;
-
-    if (c->trans) {
-        for (u64 ci = 0; ci < c->cols; ci++)
-            w_row[ci] = tensor_get_f32(c->tw, ci * c->tc + (u64)i);
+/* Compute output rows [r0, r1) into Y through a single mul_mat_mat call. */
+static void matmat_chunk(float *Y, TensorInfo *tw, const float *X_T,
+                         u64 batch, u64 rows, u64 cols, u64 tc, bool trans,
+                         u64 r0, u64 r1, float *w_row, float *tmp) {
+    u64 nchunk = r1 - r0;
+    if (trans) {
+        for (u64 r = 0; r < nchunk; r++)
+            for (u64 ci = 0; ci < cols; ci++)
+                w_row[r * cols + ci] = tensor_get_f32(tw, ci * tc + (r0 + r));
     } else {
-        tensor_get_f32_batch(c->tw, (u64)i * c->cols, c->cols, w_row);
+        for (u64 r = 0; r < nchunk; r++)
+            tensor_get_f32_batch(tw, (r0 + r) * cols, cols, w_row + r * cols);
     }
 
-    for (u64 b = 0; b < c->batch; b++) {
-        const float *x_row = c->X + b * c->cols;
-        float sum = 0.0f;
-        for (u64 ci = 0; ci < c->cols; ci++)
-            sum += w_row[ci] * x_row[ci];
-        c->Y[b * c->rows + (u64)i] = sum;
-    }
+    mul_mat_mat(tmp, w_row, X_T, nchunk, cols, batch);
+
+    for (u64 r = 0; r < nchunk; r++)
+        for (u64 b = 0; b < batch; b++)
+            Y[b * rows + (r0 + r)] = tmp[r * batch + b];
+}
+
+static void matmat_worker(void *arg, int tid, int idx) {
+    MatMatCtx *c = (MatMatCtx *)arg;
+    u64 r0 = (u64)idx * MATMAT_CHUNK;
+    u64 r1 = r0 + MATMAT_CHUNK;
+    if (r1 > c->rows) r1 = c->rows;
+    matmat_chunk(c->Y, c->tw, c->X_T, c->batch, c->rows, c->cols, c->tc,
+                 c->trans, r0, r1,
+                 c->row_buf + (u64)tid * MATMAT_CHUNK * c->cols,
+                 c->tmp_buf + (u64)tid * MATMAT_CHUNK * c->batch);
 }
 
 /* Batch matrix-matrix multiply:  Y[b] = W @ X[b]  for b ∈ [0, batch).
  *
- * Strategy: for each output row r, dequantise the entire weight
- * row into a contiguous buffer, then compute a dot product against
- * every batch element's input row.  The inner dot-product loop
- * runs over two contiguous arrays (trivially auto-vectorisable by
- * the compiler), and each weight is dequantised only once.
+ * Reformulated as Y = X @ W^T: X is transposed once up front and the
+ * row loop is chunked so every chunk runs the SIMD mul_mat_mat kernel
+ * (4-row micro-block on NEON, 4×8 on AVX2/FMA) with X^T streamed once
+ * per chunk, replacing the per-row scalar dot-products.
  *
- * When pool is non-NULL and has more than one thread, the outer row
- * loop is dispatched across the worker pool (one row per work item);
- * each thread gets its own w_row slice to avoid data races. */
+ * When pool is non-NULL and has more than one thread, the chunks are
+ * dispatched across the worker pool; each thread gets its own scratch
+ * slices to avoid data races. */
 bool mat_mat_mul(float *Y, TensorInfo *tw, const float *X,
                  u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool) {
     if (!tw || tw->ndim < 2) {
@@ -395,56 +409,55 @@ bool mat_mat_mul(float *Y, TensorInfo *tw, const float *X,
     }
 #endif
 
-    /* Parallel path: dispatch rows across the thread pool. */
-    if (pool && pool->nthreads > 1 && rows > 1) {
+    if (rows == 0 || batch == 0 || cols == 0) return true;
+
+    u64 n_chunks = (rows + MATMAT_CHUNK - 1) / MATMAT_CHUNK;
+
+    /* Transpose the input once: [batch × cols] → [cols × batch]. */
+    float *X_T = smalloc((size_t)cols * batch * sizeof(float));
+    if (!X_T) {
+        slog(WARN, "mat_mat_mul: smalloc failed for X^T [%lu × %lu]",
+             (unsigned long)cols, (unsigned long)batch);
+        return false;
+    }
+    for (u64 c = 0; c < cols; c++)
+        for (u64 b = 0; b < batch; b++)
+            X_T[c * batch + b] = X[b * cols + c];
+
+    /* Parallel path: dispatch chunks across the thread pool. */
+    if (pool && pool->nthreads > 1 && n_chunks > 1) {
         int nt = pool->nthreads;
-        float *w_row_buf = smalloc((u64)nt * cols * sizeof(float));
-        if (!w_row_buf) {
-            slog(WARN, "mat_mat_mul: smalloc failed for parallel row buffers");
+        float *row_buf = smalloc((u64)nt * MATMAT_CHUNK * cols * sizeof(float));
+        float *tmp_buf = smalloc((u64)nt * MATMAT_CHUNK * batch * sizeof(float));
+        if (!row_buf || !tmp_buf) {
+            slog(WARN, "mat_mat_mul: smalloc failed for parallel chunk buffers");
+            sfree(X_T); sfree(row_buf); sfree(tmp_buf);
             return false;
         }
-        MatMatCtx ctx = { Y, tw, X, batch, rows, cols, tc, trans, w_row_buf };
-        pthreads_parallel_for(pool, 0, (int)rows, matmat_worker, &ctx);
-        sfree(w_row_buf);
+        MatMatCtx ctx = { Y, tw, X_T, batch, rows, cols, tc, trans, row_buf, tmp_buf };
+        pthreads_parallel_for(pool, 0, (int)n_chunks, matmat_worker, &ctx);
+        sfree(row_buf); sfree(tmp_buf);
+        sfree(X_T);
         return true;
     }
 
-    /* Serial path: single reusable row buffer. */
-    float *w_row = smalloc(cols * sizeof(float));
-    if (!w_row) {
-        slog(WARN, "mat_mat_mul: smalloc failed for row buffer (%lu cols)",
-             (unsigned long)cols);
+    /* Serial path: single reusable chunk buffers. */
+    float *row_buf = smalloc((size_t)MATMAT_CHUNK * cols * sizeof(float));
+    float *tmp_buf = smalloc((size_t)MATMAT_CHUNK * batch * sizeof(float));
+    if (!row_buf || !tmp_buf) {
+        slog(WARN, "mat_mat_mul: smalloc failed for chunk buffers");
+        sfree(X_T); sfree(row_buf); sfree(tmp_buf);
         return false;
     }
-
-    if (trans) {
-        for (u64 r = 0; r < rows; r++) {
-            for (u64 c = 0; c < cols; c++)
-                w_row[c] = tensor_get_f32(tw, c * tc + r);
-
-            for (u64 b = 0; b < batch; b++) {
-                const float *x_row = X + b * cols;
-                float sum = 0.0f;
-                for (u64 c = 0; c < cols; c++)
-                    sum += w_row[c] * x_row[c];
-                Y[b * rows + r] = sum;
-            }
-        }
-    } else {
-        for (u64 r = 0; r < rows; r++) {
-            tensor_get_f32_batch(tw, r * cols, cols, w_row);
-
-            for (u64 b = 0; b < batch; b++) {
-                const float *x_row = X + b * cols;
-                float sum = 0.0f;
-                for (u64 c = 0; c < cols; c++)
-                    sum += w_row[c] * x_row[c];
-                Y[b * rows + r] = sum;
-            }
-        }
+    for (u64 ch = 0; ch < n_chunks; ch++) {
+        u64 r0 = ch * MATMAT_CHUNK;
+        u64 r1 = r0 + MATMAT_CHUNK;
+        if (r1 > rows) r1 = rows;
+        matmat_chunk(Y, tw, X_T, batch, rows, cols, tc, trans, r0, r1,
+                     row_buf, tmp_buf);
     }
-
-    sfree(w_row);
+    sfree(row_buf); sfree(tmp_buf);
+    sfree(X_T);
     return true;
 }
 
