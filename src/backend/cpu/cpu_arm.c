@@ -781,15 +781,15 @@ void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
 
     /* ---- Non-block / simple conversion types: direct NEON path ---- */
     switch (type) {
-    case GGUF_TYPE_F32:  batch_f32(data + i0 * 4, out, nb); return;
-    case GGUF_TYPE_F16:  batch_f16(data + i0 * 2, out, nb); return;
-    case GGUF_TYPE_BF16: batch_bf16(data + i0 * 2, out, nb); return;
-    case GGUF_TYPE_F64:  batch_f64(data + i0 * 8, out, nb); return;
-    case GGUF_TYPE_I8:   batch_i8(data + i0, out, nb); return;
-    case GGUF_TYPE_I16:  batch_i16(data + i0 * 2, out, nb); return;
-    case GGUF_TYPE_I32:  batch_i32(data + i0 * 4, out, nb); return;
-    case GGUF_TYPE_I64:  batch_i64(data + i0 * 8, out, nb); return;
-    default: break;
+        case GGUF_TYPE_F32:  batch_f32(data + i0 * 4, out, nb); return;
+        case GGUF_TYPE_F16:  batch_f16(data + i0 * 2, out, nb); return;
+        case GGUF_TYPE_BF16: batch_bf16(data + i0 * 2, out, nb); return;
+        case GGUF_TYPE_F64:  batch_f64(data + i0 * 8, out, nb); return;
+        case GGUF_TYPE_I8:   batch_i8(data + i0, out, nb); return;
+        case GGUF_TYPE_I16:  batch_i16(data + i0 * 2, out, nb); return;
+        case GGUF_TYPE_I32:  batch_i32(data + i0 * 4, out, nb); return;
+        case GGUF_TYPE_I64:  batch_i64(data + i0 * 8, out, nb); return;
+        default: break;
     }
 
     /* ---- Block-quantised types ---- */
