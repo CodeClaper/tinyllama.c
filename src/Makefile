@@ -57,12 +57,12 @@ endif
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o graph.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-       backend/cpu/cpu.o $(GPU_OBJS) $(METAL_OBJS)
+       backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o graph.o \
               tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-              backend/cpu/cpu.o $(GPU_OBJS) $(METAL_OBJS)
+              backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
 
 all: server chat bench
 
@@ -137,6 +137,9 @@ model/falcon.o: model/falcon.c model/model.h def.h
 
 backend/cpu/cpu.o: backend/cpu/cpu.c backend/cpu/cpu_arm.c backend/cpu/cpu_x86.c backend/cpu/cpu.h def.h quants.h
 	$(CC) $(CFLAGS) -c backend/cpu/cpu.c -o $@
+
+backend/cpu/cpu_op.o: backend/cpu/cpu_op.c backend/cpu/cpu_op.h def.h core.h mm.h slog.h
+	$(CC) $(CFLAGS) -c backend/cpu/cpu_op.c -o $@
 
 backend/gpu/gpu.o: backend/gpu/gpu.cu backend/gpu/gpu.h def.h
 	$(NVCC) $(NVCCFLAGS) -c backend/gpu/gpu.cu -o $@

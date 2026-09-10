@@ -83,6 +83,9 @@ quants.o: $(SRC_DIR)/quants.c $(SRC_DIR)/quants.h $(SRC_DIR)/def.h
 cpu.o: $(SRC_DIR)/backend/cpu/cpu.c $(SRC_DIR)/backend/cpu/cpu.h $(SRC_DIR)/backend/cpu/cpu_arm.c $(SRC_DIR)/backend/cpu/cpu_x86.c $(SRC_DIR)/def.h $(SRC_DIR)/quants.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/backend/cpu/cpu.c -o $@
 
+cpu_op.o: $(SRC_DIR)/backend/cpu/cpu_op.c $(SRC_DIR)/backend/cpu/cpu_op.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h $(SRC_DIR)/mm.h $(SRC_DIR)/slog.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/backend/cpu/cpu_op.c -o $@
+
 llama.o: $(SRC_DIR)/model/llama.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/llama.c -o $@
 
@@ -92,7 +95,7 @@ deepseek.o: $(SRC_DIR)/model/deepseek.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.
 falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/falcon.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o cpu.o pthreads.o mm.o asctx.o slog.o utils.o graph.o $(GPU_LINK)
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o $(GPU_LINK)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h
