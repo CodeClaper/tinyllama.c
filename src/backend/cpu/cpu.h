@@ -30,4 +30,10 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x);
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n);
 float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n, const i8 *x_i8, float x_scale);
 
+/*
+ * Plain f32 matrix-matrix multiply: C = A @ B.
+ * A is [M x K], B is [K x N], C is [M x N], all row-major.
+ */
+void mul_mat_mat(float *C, const float *A, const float *B, u64 M, u64 K, u64 N);
+
 #endif

@@ -5,7 +5,7 @@
  * The dispatcher gguf_dequant_batch() processes full blocks with
  * these kernels and handles edge elements via the scalar gguf_dequant().
  */
-#include <smmintrin.h>
+#include <immintrin.h>
 #include <string.h>
 #include <math.h>
 
@@ -1422,4 +1422,141 @@ float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
                          const i8 *x_i8, float x_scale) {
     (void)ti; (void)i; (void)n; (void)x_i8; (void)x_scale;
     return 0.0f;
+}
+
+/* ================================================================
+ * Dense f32 matrix-matrix multiply  C = A @ B
+ *   A [M x K], B [K x N], C [M x N]   (all row-major)
+ *
+ * Micro-kernel: 4 output rows × vector-width columns.  For every k
+ * the B row is loaded once and broadcast A scalars drive the
+ * multiply-adds into the accumulators, so B is streamed while C
+ * stays in registers.  Left-over rows use a 1-row kernel to keep
+ * even small M vectorised.
+ * ================================================================ */
+
+#if defined(__AVX2__) && defined(__FMA__)
+
+static void mat_mat_avx2(float *C, const float *A, const float *B,
+                         u64 M, u64 K, u64 N) {
+    u64 i = 0;
+    for (; i + 4 <= M; i += 4) {
+        const float *a0 = A + (i + 0) * K, *a1 = A + (i + 1) * K;
+        const float *a2 = A + (i + 2) * K, *a3 = A + (i + 3) * K;
+        float *c0 = C + (i + 0) * N, *c1 = C + (i + 1) * N;
+        float *c2 = C + (i + 2) * N, *c3 = C + (i + 3) * N;
+
+        u64 j = 0;
+        for (; j + 8 <= N; j += 8) {
+            __m256 v0 = _mm256_setzero_ps(), v1 = _mm256_setzero_ps();
+            __m256 v2 = _mm256_setzero_ps(), v3 = _mm256_setzero_ps();
+            for (u64 k = 0; k < K; k++) {
+                __m256 b = _mm256_loadu_ps(B + k * N + j);
+                v0 = _mm256_fmadd_ps(_mm256_set1_ps(a0[k]), b, v0);
+                v1 = _mm256_fmadd_ps(_mm256_set1_ps(a1[k]), b, v1);
+                v2 = _mm256_fmadd_ps(_mm256_set1_ps(a2[k]), b, v2);
+                v3 = _mm256_fmadd_ps(_mm256_set1_ps(a3[k]), b, v3);
+            }
+            _mm256_storeu_ps(c0 + j, v0);
+            _mm256_storeu_ps(c1 + j, v1);
+            _mm256_storeu_ps(c2 + j, v2);
+            _mm256_storeu_ps(c3 + j, v3);
+        }
+        for (; j < N; j++) {
+            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+            for (u64 k = 0; k < K; k++) {
+                float b = B[k * N + j];
+                s0 += a0[k] * b; s1 += a1[k] * b;
+                s2 += a2[k] * b; s3 += a3[k] * b;
+            }
+            c0[j] = s0; c1[j] = s1; c2[j] = s2; c3[j] = s3;
+        }
+    }
+
+    for (; i < M; i++) {
+        const float *a = A + i * K;
+        float *c = C + i * N;
+        u64 j = 0;
+        for (; j + 8 <= N; j += 8) {
+            __m256 v = _mm256_setzero_ps();
+            for (u64 k = 0; k < K; k++)
+                v = _mm256_fmadd_ps(_mm256_set1_ps(a[k]),
+                                    _mm256_loadu_ps(B + k * N + j), v);
+            _mm256_storeu_ps(c + j, v);
+        }
+        for (; j < N; j++) {
+            float s = 0.0f;
+            for (u64 k = 0; k < K; k++) s += a[k] * B[k * N + j];
+            c[j] = s;
+        }
+    }
+}
+
+#else  /* SSE4.1 fallback (also used when AVX2/FMA are unavailable) */
+
+static void mat_mat_sse(float *C, const float *A, const float *B,
+                        u64 M, u64 K, u64 N) {
+    u64 i = 0;
+    for (; i + 4 <= M; i += 4) {
+        const float *a0 = A + (i + 0) * K, *a1 = A + (i + 1) * K;
+        const float *a2 = A + (i + 2) * K, *a3 = A + (i + 3) * K;
+        float *c0 = C + (i + 0) * N, *c1 = C + (i + 1) * N;
+        float *c2 = C + (i + 2) * N, *c3 = C + (i + 3) * N;
+
+        u64 j = 0;
+        for (; j + 4 <= N; j += 4) {
+            __m128 v0 = _mm_setzero_ps(), v1 = _mm_setzero_ps();
+            __m128 v2 = _mm_setzero_ps(), v3 = _mm_setzero_ps();
+            for (u64 k = 0; k < K; k++) {
+                __m128 b = _mm_loadu_ps(B + k * N + j);
+                v0 = _mm_add_ps(v0, _mm_mul_ps(_mm_set1_ps(a0[k]), b));
+                v1 = _mm_add_ps(v1, _mm_mul_ps(_mm_set1_ps(a1[k]), b));
+                v2 = _mm_add_ps(v2, _mm_mul_ps(_mm_set1_ps(a2[k]), b));
+                v3 = _mm_add_ps(v3, _mm_mul_ps(_mm_set1_ps(a3[k]), b));
+            }
+            _mm_storeu_ps(c0 + j, v0);
+            _mm_storeu_ps(c1 + j, v1);
+            _mm_storeu_ps(c2 + j, v2);
+            _mm_storeu_ps(c3 + j, v3);
+        }
+        for (; j < N; j++) {
+            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+            for (u64 k = 0; k < K; k++) {
+                float b = B[k * N + j];
+                s0 += a0[k] * b; s1 += a1[k] * b;
+                s2 += a2[k] * b; s3 += a3[k] * b;
+            }
+            c0[j] = s0; c1[j] = s1; c2[j] = s2; c3[j] = s3;
+        }
+    }
+
+    for (; i < M; i++) {
+        const float *a = A + i * K;
+        float *c = C + i * N;
+        u64 j = 0;
+        for (; j + 4 <= N; j += 4) {
+            __m128 v = _mm_setzero_ps();
+            for (u64 k = 0; k < K; k++)
+                v = _mm_add_ps(v, _mm_mul_ps(_mm_set1_ps(a[k]),
+                                             _mm_loadu_ps(B + k * N + j)));
+            _mm_storeu_ps(c + j, v);
+        }
+        for (; j < N; j++) {
+            float s = 0.0f;
+            for (u64 k = 0; k < K; k++) s += a[k] * B[k * N + j];
+            c[j] = s;
+        }
+    }
+}
+
+#endif
+
+void mul_mat_mat(float *C, const float *A, const float *B,
+                 u64 M, u64 K, u64 N) {
+    if (!C || !A || !B || M == 0 || K == 0 || N == 0) return;
+#if defined(__AVX2__) && defined(__FMA__)
+    mat_mat_avx2(C, A, B, M, K, N);
+#else
+    mat_mat_sse(C, A, B, M, K, N);
+#endif
 }

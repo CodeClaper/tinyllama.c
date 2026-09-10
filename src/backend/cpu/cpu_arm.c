@@ -1731,3 +1731,69 @@ float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
 }
 
 #endif /* __ARM_FEATURE_DOTPROD */
+
+/* ================================================================
+ * Dense f32 matrix-matrix multiply  C = A @ B
+ *   A [M x K], B [K x N], C [M x N]   (all row-major)
+ *
+ * NEON micro-kernel: 4 output rows × 4 columns.  For every k the B
+ * row is loaded once and `vmlaq_n_f32` broadcasts each A scalar into
+ * a fused multiply-add, so B is streamed while C stays in registers.
+ * Left-over rows use a 1-row kernel to keep even small M vectorised.
+ * ================================================================ */
+
+void mul_mat_mat(float *C, const float *A, const float *B,
+                 u64 M, u64 K, u64 N) {
+    if (!C || !A || !B || M == 0 || K == 0 || N == 0) return;
+
+    u64 i = 0;
+    for (; i + 4 <= M; i += 4) {
+        const float *a0 = A + (i + 0) * K, *a1 = A + (i + 1) * K;
+        const float *a2 = A + (i + 2) * K, *a3 = A + (i + 3) * K;
+        float *c0 = C + (i + 0) * N, *c1 = C + (i + 1) * N;
+        float *c2 = C + (i + 2) * N, *c3 = C + (i + 3) * N;
+
+        u64 j = 0;
+        for (; j + 4 <= N; j += 4) {
+            float32x4_t v0 = vdupq_n_f32(0.0f), v1 = vdupq_n_f32(0.0f);
+            float32x4_t v2 = vdupq_n_f32(0.0f), v3 = vdupq_n_f32(0.0f);
+            for (u64 k = 0; k < K; k++) {
+                float32x4_t b = vld1q_f32(B + k * N + j);
+                v0 = vmlaq_n_f32(v0, b, a0[k]);
+                v1 = vmlaq_n_f32(v1, b, a1[k]);
+                v2 = vmlaq_n_f32(v2, b, a2[k]);
+                v3 = vmlaq_n_f32(v3, b, a3[k]);
+            }
+            vst1q_f32(c0 + j, v0);
+            vst1q_f32(c1 + j, v1);
+            vst1q_f32(c2 + j, v2);
+            vst1q_f32(c3 + j, v3);
+        }
+        for (; j < N; j++) {
+            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+            for (u64 k = 0; k < K; k++) {
+                float b = B[k * N + j];
+                s0 += a0[k] * b; s1 += a1[k] * b;
+                s2 += a2[k] * b; s3 += a3[k] * b;
+            }
+            c0[j] = s0; c1[j] = s1; c2[j] = s2; c3[j] = s3;
+        }
+    }
+
+    for (; i < M; i++) {
+        const float *a = A + i * K;
+        float *c = C + i * N;
+        u64 j = 0;
+        for (; j + 4 <= N; j += 4) {
+            float32x4_t v = vdupq_n_f32(0.0f);
+            for (u64 k = 0; k < K; k++)
+                v = vmlaq_n_f32(v, vld1q_f32(B + k * N + j), a[k]);
+            vst1q_f32(c + j, v);
+        }
+        for (; j < N; j++) {
+            float s = 0.0f;
+            for (u64 k = 0; k < K; k++) s += a[k] * B[k * N + j];
+            c[j] = s;
+        }
+    }
+}
