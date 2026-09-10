@@ -16,6 +16,7 @@
 #include "../../core.h"
 #include "../../mm.h"
 #include "../../slog.h"
+#include "cpu.h"
 #include "cpu_op.h"
 
 /* Row-major source tensor of edge `k`. */
@@ -308,13 +309,12 @@ static bool op_attn(OpCtx *c) {
             float *qh = qd + (u64)qi * c->q_dim + (u64)h * hd;
             u32 n_keys = c->pos + qi + 1;   /* causal */
 
-            float *kt = kh_base;
-            for (u32 t = 0; t < n_keys; t++, kt += khd) {
-                float acc = 0.0f;
-                for (u32 d = 0; d < khd; d++)
-                    acc += qh[d] * kt[d];
-                c->scr[t] = acc * c->scale;
-            }
+            /* Scores = K-block [n_keys × khd] (contiguous per head) @ qh.
+             * SIMD matrix-vector dot, then apply the 1/sqrt(kv_head_dim)
+             * scale once to the whole score vector. */
+            mul_mat_vec(c->scr, kh_base, qh, n_keys, khd);
+            for (u32 t = 0; t < n_keys; t++)
+                c->scr[t] *= c->scale;
             softmax(c->scr, n_keys);
 
             float *oh = c->dst + (u64)qi * c->q_dim + (u64)h * hd;
