@@ -1807,7 +1807,7 @@ static void model_summary(Model *m) {
         fprintf(stdout, "\t\t= (%s)", gguf_types[t->type].name);
         fprintf(stdout, "[");
         for (u32 j = 0; j < t->ndim; j++) {
-            fprintf(stdout, "%ld", t->dim[j]);
+            fprintf(stdout, "%llu", (unsigned long long)t->dim[j]);
             if (j < t->ndim - 1) fprintf(stdout, ",");
         }
         fprintf(stdout, "]\n");

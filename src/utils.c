@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <bits/types/struct_timeval.h>
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -45,7 +44,7 @@ int parse_int(char *s) {
 float parse_float(char *s) {
     char *end = NULL;
     float v = strtof(s, &end);
-    if (!s[0] || *end || isinff(v) || v > FLT_MAX) {
+    if (!s[0] || *end || isinf(v) || v > FLT_MAX) {
         slog(ERROR, "Bad float string value: %s.", s);
     }
     return (float) v;

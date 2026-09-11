@@ -1,5 +1,3 @@
-#include <asm-generic/errno-base.h>
-#include <asm-generic/socket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>

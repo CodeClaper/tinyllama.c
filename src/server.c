@@ -9,7 +9,9 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#ifdef __linux__
 #include <sys/eventfd.h>
+#endif
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -37,20 +39,35 @@ typedef struct  {
 
 static volatile sig_atomic_t g_signal_count = 0;
 static int g_event_fd = -1;
+#ifdef __linux__
+/* Linux uses an eventfd to wake the select loop from the signal handler. */
+#else
+/* Other platforms (macOS) use a self-pipe instead of eventfd. */
+static int g_signal_wfd = -1;
+#endif
 
 static void signal_handler(int sig) {
     UNUSED(sig);
     if (g_signal_count > 0) _exit(130);
     g_signal_count = 1;
+#ifdef __linux__
     u64 val = 1;
-    (void)write(g_event_fd, &val, sizeof(val));
+    if (g_event_fd >= 0) (void)write(g_event_fd, &val, sizeof(val));
+#else
+    u8 val = 1;
+    if (g_signal_wfd >= 0) (void)write(g_signal_wfd, &val, sizeof(val));
+#endif
 }
 
-/* Callback for signal eventfd — wake up and stop the event loop. */
+/* Callback for the signal eventfd/self-pipe — wake up and stop the event loop. */
 static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
     UNUSED(privdata);
+#ifdef __linux__
     u64 val;
+#else
+    u8 val;
+#endif
     (void)read(fd, &val, sizeof(val));
     el->stop = true;
 }
@@ -394,6 +411,9 @@ static void server_resource_close(Server *server) {
     el_free(server->el);
     if (server->serverfd >= 0) close(server->serverfd);
     if (g_event_fd >= 0) close(g_event_fd);
+#ifndef __linux__
+    if (g_signal_wfd >= 0) close(g_signal_wfd);
+#endif
 }
 
 int main(int argc, char *argv[]) {
@@ -444,7 +464,19 @@ int main(int argc, char *argv[]) {
         slog(ERROR, "Failed to setup server event loop.");
     }
 
+#ifdef __linux__
     g_event_fd = eventfd(0, EFD_NONBLOCK);
+#else
+    int sigpipe[2];
+    if (pipe(sigpipe) == 0) {
+        g_event_fd = sigpipe[0];
+        g_signal_wfd = sigpipe[1];
+        fcntl(g_event_fd, F_SETFL, fcntl(g_event_fd, F_GETFL, 0) | O_NONBLOCK);
+        fcntl(g_signal_wfd, F_SETFL, fcntl(g_signal_wfd, F_GETFL, 0) | O_NONBLOCK);
+    } else {
+        g_event_fd = -1;
+    }
+#endif
     if (g_event_fd >= 0) {
         create_file_event(server.el, g_event_fd, ELOOP_READABLE, signal_callback, NULL);
     }
