@@ -5,7 +5,7 @@
  * itself bit-exact against the scalar reference in quants.c: each
  * thread dequantizes one element directly from the raw GGUF bytes that
  * were uploaded to device memory, using identical integer math (the
- * manual f16/bf16 bit manipulation, not MSL `half` conversions), so
+ * manual f16/bf16 bit manipulation, not MSL `hh` conversions), so
  * GPU output is bit-for-bit comparable to gguf_dequant().
  *
  * The IQ importance grids / value tables live on the host in
@@ -302,10 +302,10 @@ static inline float dequant_Q6_K(device const uint8_t *data, uint64_t i, device 
     float d = f16_to_f32(ld_u16(blk + 208));
     int32_t sc = (int8_t)blk[192 + (o >> 4)];
 
-    uint32_t hl      = o & 127;          /* position within 128-element half   */
+    uint32_t hl      = o & 127;          /* position within 128-element hh   */
     uint32_t which   = hl >> 5;          /* 0..3: which 32-element sub-group   */
     uint32_t l       = hl & 31;          /* 0..31: position inside sub-group   */
-    uint32_t half_idx = o >> 7;          /* 0 or 1: which 128-element half     */
+    uint32_t half_idx = o >> 7;          /* 0 or 1: which 128-element hh     */
 
     uint32_t ql_off  = (half_idx << 6) + ((which & 1) << 5) + l;
     uint32_t lo      = (which >= 2) ? ((blk[ql_off] >> 4) & 0xF)
@@ -678,3 +678,434 @@ kernel void matmul_t_##T(device const uint8_t *w [[buffer(0)]],                 
 }
 METAL_TYPE_LIST(DEFINE_MATMUL_T)
 #undef DEFINE_MATMUL_T
+
+/* ================================================================
+ * Graph-op kernels (device-resident path)
+ *
+ * The host passes per-op scalars as a flat little-endian uint32 array
+ * in buffer `a` (64-bit values occupy two consecutive words).  All
+ * grids are 1-D: the host flattens multi-dimensional grids and the
+ * kernels decompose the threadgroup index accordingly.  Every
+ * reduction uses OP_TPTG threads (the host always dispatches 256).
+ * ================================================================ */
+
+#define OP_TPTG 256
+
+static inline uint64_t op_u64(device const uint32_t *a, uint i) {
+    return (uint64_t)a[i] | ((uint64_t)a[i + 1] << 32);
+}
+static inline float op_f32(device const uint32_t *a, uint i) {
+    union { uint32_t u; float f; } v = { a[i] };
+    return v.f;
+}
+static inline float op_neg_inf(void) {
+    return u32_as_f32(0xff800000u);
+}
+
+static inline float tg_sum(threadgroup float *sh, float v, uint tid) {
+    sh[tid] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = OP_TPTG >> 1; s > 0; s >>= 1) {
+        if (tid < s) sh[tid] += sh[tid + s];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float r = sh[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return r;
+}
+static inline float tg_max(threadgroup float *sh, float v, uint tid) {
+    sh[tid] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = OP_TPTG >> 1; s > 0; s >>= 1) {
+        if (tid < s) sh[tid] = fmax(sh[tid], sh[tid + s]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float r = sh[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return r;
+}
+
+/* OP_RMS_NORM: args [od, base, wn, eps(f32)]; grid = r. */
+kernel void op_rms_norm(device const float *src [[buffer(0)]],
+                        device float *dst [[buffer(1)]],
+                        device const float *w [[buffer(2)]],
+                        device const uint32_t *a [[buffer(3)]],
+                        uint tid [[thread_position_in_threadgroup]],
+                        uint tg [[threadgroup_position_in_grid]],
+                        uint tptg [[threads_per_threadgroup]]) {
+    threadgroup float sh[OP_TPTG];
+    uint od = a[0], base = a[1], wn = a[2];
+    float eps = op_f32(a, 3);
+    device const float *x = src + ((uint64_t)base + tg) * od;
+    device float *d = dst + (uint64_t)tg * od;
+    float ss = 0.0f;
+    for (uint i = tid; i < od; i += tptg) ss += x[i] * x[i];
+    ss = tg_sum(sh, ss, tid);
+    float scale = 1.0f / sqrt(ss / (float)od + eps);
+    for (uint i = tid; i < od; i += tptg) {
+        float wi = (i < wn) ? w[i] : 0.0f;
+        d[i] = x[i] * scale * wi;
+    }
+}
+
+/* OP_RMS_NORM_HEADS: args [nh, hd, is, os, od, base, eps(f32)];
+ * grid = r * nh with tg = p*nh + h. */
+kernel void op_rms_norm_heads(device const float *src [[buffer(0)]],
+                              device float *dst [[buffer(1)]],
+                              device const float *nw [[buffer(2)]],
+                              device const uint32_t *a [[buffer(3)]],
+                              uint tid [[thread_position_in_threadgroup]],
+                              uint tg [[threadgroup_position_in_grid]],
+                              uint tptg [[threads_per_threadgroup]]) {
+    threadgroup float sh[OP_TPTG];
+    uint nh = a[0], hd = a[1], is = a[2], os = a[3], od = a[4], base = a[5];
+    float eps = op_f32(a, 6);
+    uint h = tg % nh, p = tg / nh;
+    device const float *sp = src + (((uint64_t)base + p) * nh + h) * is;
+    device float *dp = dst + (uint64_t)p * od + (uint64_t)h * os;
+    float ss = 0.0f;
+    for (uint d = tid; d < hd; d += tptg) ss += sp[d] * sp[d];
+    ss = tg_sum(sh, ss, tid);
+    float scale = 1.0f / sqrt(ss / (float)hd + eps);
+    for (uint d = tid; d < hd; d += tptg) dp[d] = sp[d] * scale * nw[d];
+}
+
+/* OP_BIAS: args [nb, od, base, total(2)]; grid covers total. */
+kernel void op_bias(device const float *src [[buffer(0)]],
+                    device float *dst [[buffer(1)]],
+                    device const float *bw [[buffer(2)]],
+                    device const uint32_t *a [[buffer(3)]],
+                    uint gid [[thread_position_in_grid]],
+                    uint tptg [[threads_per_threadgroup]],
+                    uint ntg [[threadgroups_per_grid]]) {
+    uint nb = a[0], od = a[1], base = a[2];
+    uint64_t total = op_u64(a, 3);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        float b = (j < nb) ? bw[j] : 0.0f;
+        dst[idx] = src[((uint64_t)base + p) * od + j] + b;
+    }
+}
+
+/* OP_ADD / OP_MUL: args [od, base, total(2), add]; grid covers total. */
+kernel void op_binary(device const float *A [[buffer(0)]],
+                      device const float *B [[buffer(1)]],
+                      device float *dst [[buffer(2)]],
+                      device const uint32_t *a [[buffer(3)]],
+                      uint gid [[thread_position_in_grid]],
+                      uint tptg [[threads_per_threadgroup]],
+                      uint ntg [[threadgroups_per_grid]]) {
+    uint od = a[0], base = a[1], add = a[4];
+    uint64_t total = op_u64(a, 2);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        uint64_t off = ((uint64_t)base + p) * od + j;
+        dst[idx] = add ? (A[off] + B[off]) : (A[off] * B[off]);
+    }
+}
+
+/* OP_SILU: args [od, base, total(2)]; grid covers total. */
+kernel void op_silu(device const float *src [[buffer(0)]],
+                    device float *dst [[buffer(1)]],
+                    device const uint32_t *a [[buffer(2)]],
+                    uint gid [[thread_position_in_grid]],
+                    uint tptg [[threads_per_threadgroup]],
+                    uint ntg [[threadgroups_per_grid]]) {
+    uint od = a[0], base = a[1];
+    uint64_t total = op_u64(a, 2);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        float v = src[((uint64_t)base + p) * od + j];
+        dst[idx] = v / (1.0f + exp(-v));
+    }
+}
+
+/* OP_SOFTMAX: args [od, base]; one threadgroup per row. */
+kernel void op_softmax(device const float *src [[buffer(0)]],
+                       device float *dst [[buffer(1)]],
+                       device const uint32_t *a [[buffer(2)]],
+                       uint tid [[thread_position_in_threadgroup]],
+                       uint tg [[threadgroup_position_in_grid]],
+                       uint tptg [[threads_per_threadgroup]]) {
+    threadgroup float sh[OP_TPTG];
+    uint od = a[0], base = a[1];
+    device const float *x = src + ((uint64_t)base + tg) * od;
+    device float *d = dst + (uint64_t)tg * od;
+    float mx = op_neg_inf();
+    for (uint i = tid; i < od; i += tptg) mx = fmax(mx, x[i]);
+    mx = tg_max(sh, mx, tid);
+    float sum = 0.0f;
+    for (uint i = tid; i < od; i += tptg) {
+        float e = exp(x[i] - mx);
+        d[i] = e;
+        sum += e;
+    }
+    sum = tg_sum(sh, sum, tid);
+    for (uint i = tid; i < od; i += tptg) d[i] /= sum;
+}
+
+/* OP_ROPE_NEOX: args [theta(f32), nh, hdim, rdim, od, base, pos, total(2)];
+ * one thread per (row, head, i < hdim/2). */
+kernel void op_rope_neox(device const float *src [[buffer(0)]],
+                         device float *dst [[buffer(1)]],
+                         device const uint32_t *a [[buffer(2)]],
+                         uint gid [[thread_position_in_grid]],
+                         uint tptg [[threads_per_threadgroup]],
+                         uint ntg [[threadgroups_per_grid]]) {
+    float theta_base = op_f32(a, 0);
+    uint nh = a[1], hdim = a[2], rdim = a[3], od = a[4], base = a[5], pos = a[6];
+    uint64_t total = op_u64(a, 7);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    uint hh = hdim / 2, npair = rdim / 2;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / (nh * hh));
+        uint rem = (uint)(idx % (nh * hh));
+        uint h = rem / hh, i = rem % hh;
+        uint abspos = pos + base + p;
+        device const float *sp = src + ((uint64_t)base + p) * od + (uint64_t)h * hdim;
+        device float *dp = dst + (uint64_t)p * od + (uint64_t)h * hdim;
+        float a0 = sp[i], b0 = sp[i + hh];
+        if (i < npair) {
+            float t = 1.0f / pow(theta_base, (float)(2 * i) / (float)rdim);
+            float c = cos((float)abspos * t);
+            float s = sin((float)abspos * t);
+            dp[i] = a0 * c - b0 * s;
+            dp[i + hh] = a0 * s + b0 * c;
+        } else {
+            dp[i] = a0;
+            dp[i + hh] = b0;
+        }
+    }
+}
+
+/* OP_SIGMOID_GATE: args [hd, od, gate_stride, base, total(2)]; grid covers total. */
+kernel void op_sigmoid_gate(device const float *A [[buffer(0)]],
+                            device const float *G [[buffer(1)]],
+                            device float *dst [[buffer(2)]],
+                            device const uint32_t *a [[buffer(3)]],
+                            uint gid [[thread_position_in_grid]],
+                            uint tptg [[threads_per_threadgroup]],
+                            uint ntg [[threadgroups_per_grid]]) {
+    uint hd = a[0], od = a[1], gate_stride = a[2], base = a[3];
+    uint64_t total = op_u64(a, 4);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        uint h = j / hd, d = j % hd;
+        float av = A[((uint64_t)base + p) * od + j];
+        float gv = G[((uint64_t)base + p) * gate_stride + (uint64_t)h * 2 * hd + hd + d];
+        dst[idx] = av / (1.0f + exp(-gv));
+    }
+}
+
+/* OP_SSM_CONV: args [od, ck, r, base]; one threadgroup, rows sequential. */
+kernel void op_ssm_conv(device const float *src [[buffer(0)]],
+                        device float *dst [[buffer(1)]],
+                        device const float *cw [[buffer(2)]],
+                        device float *state [[buffer(3)]],
+                        device const uint32_t *a [[buffer(4)]],
+                        uint tid [[thread_position_in_threadgroup]],
+                        uint tptg [[threads_per_threadgroup]]) {
+    uint od = a[0], ck = a[1], r = a[2], base = a[3];
+    for (uint p = 0; p < r; p++) {
+        device const float *sp = src + ((uint64_t)base + p) * od;
+        device float *dp = dst + (uint64_t)p * od;
+        for (uint c = tid; c < od; c += tptg) {
+            float sum = 0.0f;
+            for (uint k = 0; k < ck; k++) {
+                float x = (k == ck - 1) ? sp[c] : state[(uint64_t)k * od + c];
+                sum += x * cw[(uint64_t)c * ck + k];
+            }
+            dp[c] = sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint s = 0; s + 1 < ck - 1; s++) {
+            for (uint c = tid; c < od; c += tptg)
+                state[(uint64_t)s * od + c] = state[(uint64_t)(s + 1) * od + c];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (ck > 1) {
+            uint tail = (ck - 2) * od;
+            for (uint c = tid; c < od; c += tptg) state[(uint64_t)tail + c] = sp[c];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+/* OP_SSM_DELTA: args [n_v, n_k, hd, key_dim, od, base, r, has_nw, eps(f32)];
+ * grid = n_v; rows looped inside (state advances sequentially per head).
+ * hd must be <= OP_TPTG. */
+kernel void op_ssm_delta(device const float *fused [[buffer(0)]],
+                         device const float *alpha [[buffer(1)]],
+                         device const float *beta [[buffer(2)]],
+                         device const float *a_log [[buffer(3)]],
+                         device const float *dt_bias [[buffer(4)]],
+                         device const float *nw [[buffer(5)]],
+                         device float *state [[buffer(6)]],
+                         device float *dst [[buffer(7)]],
+                         device const uint32_t *a [[buffer(8)]],
+                         uint tid [[thread_position_in_threadgroup]],
+                         uint grp [[threadgroup_position_in_grid]],
+                         uint tptg [[threads_per_threadgroup]]) {
+    threadgroup float qsh[OP_TPTG], ksh[OP_TPTG], red[OP_TPTG];
+    uint n_v = a[0], n_k = a[1], hd = a[2], key_dim = a[3], od = a[4];
+    uint base = a[5], r = a[6]; uint has_nw = a[7];
+    float eps = op_f32(a, 8);
+    uint kh = grp % n_k;
+    uint64_t d2 = (uint64_t)hd * hd;
+    uint64_t fstride = 2 * (uint64_t)key_dim + (uint64_t)n_v * hd;
+    for (uint p = 0; p < r; p++) {
+        device const float *fr = fused + ((uint64_t)base + p) * fstride;
+        device const float *ar = alpha + ((uint64_t)base + p) * n_v;
+        device const float *br = beta + ((uint64_t)base + p) * n_v;
+        device float *Sg = state + (uint64_t)grp * d2;
+        float z = ar[grp] + dt_bias[grp];
+        float g = exp(a_log[grp] * ((z > 20.0f) ? z : log(1.0f + exp(z))));
+        float b = 1.0f / (1.0f + exp(-br[grp]));
+        for (uint64_t i = tid; i < d2; i += tptg) Sg[i] *= g;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        device const float *Qg = fr + (uint64_t)kh * hd;
+        device const float *Kg = fr + key_dim + (uint64_t)kh * hd;
+        device const float *Vg = fr + 2 * (uint64_t)key_dim + (uint64_t)grp * hd;
+        float vq = 0.0f, vk = 0.0f, vv = 0.0f;
+        if (tid < hd) { vq = Qg[tid]; vk = Kg[tid]; vv = Vg[tid]; qsh[tid] = vq; ksh[tid] = vk; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float ss = tg_sum(red, (tid < hd) ? vq * vq : 0.0f, tid);
+        vq *= 1.0f / sqrt(ss + eps);
+        ss = tg_sum(red, (tid < hd) ? vk * vk : 0.0f, tid);
+        vk *= 1.0f / sqrt(ss + eps);
+        vq *= 1.0f / sqrt((float)hd);
+        if (tid < hd) { qsh[tid] = vq; ksh[tid] = vk; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float out = 0.0f;
+        if (tid < hd) {
+            float mem = 0.0f;
+            for (uint i = 0; i < hd; i++) mem += Sg[(uint64_t)i * hd + tid] * ksh[i];
+            float delta = (vv - mem) * b;
+            for (uint i = 0; i < hd; i++) {
+                device float *col = Sg + (uint64_t)i * hd + tid;
+                *col += ksh[i] * delta;
+                out += *col * qsh[i];
+            }
+        }
+        if (has_nw) {
+            ss = tg_sum(red, (tid < hd) ? out * out : 0.0f, tid);
+            if (tid < hd)
+                dst[(uint64_t)p * od + (uint64_t)grp * hd + tid] =
+                    out * (1.0f / sqrt(ss / (float)hd + eps)) * nw[tid];
+        } else if (tid < hd) {
+            dst[(uint64_t)p * od + (uint64_t)grp * hd + tid] = out;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+/* OP_ATTN phase 1 — write the batch K/V rows into the device cache.
+ * args [n_kv, khd, kv_dim, hs(2), pos, total(2)]; grid covers total. */
+kernel void op_kv_write(device float *ck [[buffer(0)]],
+                        device float *cv [[buffer(1)]],
+                        device const float *kd [[buffer(2)]],
+                        device const float *vd [[buffer(3)]],
+                        device const uint32_t *a [[buffer(4)]],
+                        uint gid [[thread_position_in_grid]],
+                        uint tptg [[threads_per_threadgroup]],
+                        uint ntg [[threadgroups_per_grid]]) {
+    uint n_kv = a[0], khd = a[1], kv_dim = a[2];
+    uint64_t hs = op_u64(a, 3);
+    uint pos = a[5];
+    uint64_t total = op_u64(a, 6);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint i = (uint)(idx / ((uint64_t)n_kv * khd));
+        uint rem = (uint)(idx % ((uint64_t)n_kv * khd));
+        uint h = rem / khd, d = rem % khd;
+        ck[(uint64_t)h * hs + (uint64_t)(pos + i) * khd + d] =
+            kd[(uint64_t)i * kv_dim + (uint64_t)h * khd + d];
+        cv[(uint64_t)h * hs + (uint64_t)(pos + i) * khd + d] =
+            vd[(uint64_t)i * kv_dim + (uint64_t)h * khd + d];
+    }
+}
+
+/* OP_ATTN phase 2 — one threadgroup per (query row, head).  Streaming
+ * softmax so the score tile stays in threadgroup memory.
+ * args [n_head, gqa, hd, khd, q_dim, hs(2), pos, scale(f32)];
+ * grid = r * n_head with tg = qi*n_head + h.  khd <= OP_TPTG. */
+kernel void op_attn(device const float *qd [[buffer(0)]],
+                    device const float *ck [[buffer(1)]],
+                    device const float *cv [[buffer(2)]],
+                    device float *dst [[buffer(3)]],
+                    device const uint32_t *a [[buffer(4)]],
+                    uint tid [[thread_position_in_threadgroup]],
+                    uint tg [[threadgroup_position_in_grid]],
+                    uint tptg [[threads_per_threadgroup]]) {
+    threadgroup float acc[OP_TPTG], pv[OP_TPTG], red[OP_TPTG];
+    threadgroup float msm[1], lsm[1];
+    uint n_head = a[0], gqa = a[1], hd = a[2], khd = a[3], q_dim = a[4];
+    uint64_t hs = op_u64(a, 5);
+    uint pos = a[7];
+    float scale = op_f32(a, 8);
+    uint h = tg % n_head, qi = tg / n_head;
+    device const float *qh = qd + (uint64_t)qi * q_dim + (uint64_t)h * hd;
+    device const float *Kb = ck + (uint64_t)(h / gqa) * hs;
+    device const float *Vb = cv + (uint64_t)(h / gqa) * hs;
+    uint n_keys = pos + qi + 1;
+
+    for (uint d = tid; d < khd; d += tptg) acc[d] = 0.0f;
+    if (tid == 0) { msm[0] = op_neg_inf(); lsm[0] = 0.0f; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint t0 = 0; t0 < n_keys; t0 += tptg) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float mval = msm[0];
+        uint tile = min(tptg, n_keys - t0);
+        float s = op_neg_inf();
+        if (tid < tile) {
+            device const float *kt = Kb + (uint64_t)(t0 + tid) * khd;
+            float dot = 0.0f;
+            for (uint d = 0; d < khd; d++) dot += qh[d] * kt[d];
+            s = dot * scale;
+        }
+        float tmax = tg_max(red, s, tid);
+        float new_m = fmax(mval, tmax);
+        pv[tid] = (tid < tile) ? exp(s - new_m) : 0.0f;
+        float factor = exp(mval - new_m);
+        float tsum = tg_sum(red, pv[tid], tid);
+        if (tid == 0) { lsm[0] = lsm[0] * factor + tsum; msm[0] = new_m; }
+        for (uint d = tid; d < khd; d += tptg) {
+            float acc2 = acc[d] * factor;
+            for (uint t2 = 0; t2 < tile; t2++)
+                acc2 += pv[t2] * Vb[(uint64_t)(t0 + t2) * khd + d];
+            acc[d] = acc2;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float l = lsm[0];
+    for (uint d = tid; d < khd; d += tptg)
+        dst[(uint64_t)qi * q_dim + (uint64_t)h * hd + d] = acc[d] / l;
+}
+
+/* OP_EMBED gather: args [type, n_ids, count, base_mul(2), stride(2)];
+ * grid covers n_ids * count. */
+kernel void op_dequant_gather(device const uint8_t *w [[buffer(0)]],
+                              device const uint32_t *ids [[buffer(1)]],
+                              device float *out [[buffer(2)]],
+                              device const float *tables [[buffer(3)]],
+                              device const uint32_t *a [[buffer(4)]],
+                              uint gid [[thread_position_in_grid]],
+                              uint tptg [[threads_per_threadgroup]],
+                              uint ntg [[threadgroups_per_grid]]) {
+    uint type = a[0], n_ids = a[1], count = a[2];
+    uint64_t base_mul = op_u64(a, 3);
+    uint64_t stride = op_u64(a, 5);
+    uint64_t gstride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < (uint64_t)n_ids * count; idx += gstride) {
+        uint p = (uint)(idx / count);
+        uint j = (uint)(idx % count);
+        out[idx] = dequant_one(type, w, (uint64_t)ids[p] * base_mul + (uint64_t)j * stride, tables);
+    }
+}

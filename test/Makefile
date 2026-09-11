@@ -39,7 +39,7 @@ ifdef METAL
 	CFLAGS += -D METAL_BUILD
 	LDFLAGS += -framework Metal -framework Foundation
 	METAL_TESTS += test_metal
-	METAL_LINK  += metal.o
+	METAL_LINK  += metal.o metal_op.o
 endif
 
 all: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
@@ -114,8 +114,11 @@ $(SRC_DIR)/backend/metal/metal_msl.h: $(SRC_DIR)/backend/metal/metal.metal
 	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $(SRC_DIR)/backend/metal/metal.metal >> $@
 	@printf ';\n#endif /* __METAL_MSL_H__ */\n' >> $@
 
-metal.o: $(SRC_DIR)/backend/metal/metal.m $(SRC_DIR)/backend/metal/metal.h $(SRC_DIR)/backend/metal/metal_msl.h $(SRC_DIR)/def.h
+metal.o: $(SRC_DIR)/backend/metal/metal.m $(SRC_DIR)/backend/metal/metal.h $(SRC_DIR)/backend/metal/metal_internal.h $(SRC_DIR)/backend/metal/metal_msl.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -fobjc-arc -I$(SRC_DIR) -c $(SRC_DIR)/backend/metal/metal.m -o $@
+
+metal_op.o: $(SRC_DIR)/backend/metal/metal_op.m $(SRC_DIR)/backend/metal/metal_op.h $(SRC_DIR)/backend/metal/metal.h $(SRC_DIR)/backend/metal/metal_internal.h $(SRC_DIR)/backend/metal/metal_msl.h $(SRC_DIR)/def.h
+	$(CC) $(CFLAGS) -fobjc-arc -I$(SRC_DIR) -c $(SRC_DIR)/backend/metal/metal_op.m -o $@
 
 test_metal: c/test_metal.c metal.o quants.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm

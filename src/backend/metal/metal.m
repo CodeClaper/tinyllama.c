@@ -27,6 +27,7 @@
 
 #include "../../def.h"
 #include "metal.h"
+#include "metal_internal.h"
 #include "metal_msl.h" /* metal_msl[] — embedded kernel source */
 
 /* Scalar reference dequant, used only by the CPU fallback paths. */
@@ -541,6 +542,103 @@ int metal_matmat(TensorInfo *ti, const float *X, float *Y,
     }
 }
 
+/* ================================================================
+ * Internal bridge for metal_op.m + graph arena
+ * ================================================================ */
+
+int metal_i_ready(void) {
+    int rc;
+    pthread_mutex_lock(&g_lock);
+    rc = metal_ensure_ready();
+    pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+id<MTLDevice> metal_i_dev(void) { return g_device; }
+id<MTLCommandQueue> metal_i_queue(void) { return g_queue; }
+
+id<MTLBuffer> metal_i_tables(void) {
+    pthread_mutex_lock(&g_lock);
+    if (metal_ensure_ready() != 0) { pthread_mutex_unlock(&g_lock); return nil; }
+    id<MTLBuffer> b = g_tables;
+    pthread_mutex_unlock(&g_lock);
+    return b;
+}
+
+id<MTLComputePipelineState> metal_i_pipe(NSString *name) {
+    pthread_mutex_lock(&g_lock);
+    if (metal_ensure_ready() != 0) { pthread_mutex_unlock(&g_lock); return nil; }
+    id<MTLComputePipelineState> p = metal_pipeline_for(name);
+    pthread_mutex_unlock(&g_lock);
+    return p;
+}
+
+id<MTLBuffer> metal_i_weight(TensorInfo *ti) {
+    if (!ti || !ti->data) return nil;
+    pthread_mutex_lock(&g_lock);
+    if (metal_ensure_ready() != 0) { pthread_mutex_unlock(&g_lock); return nil; }
+    id<MTLBuffer> b = metal_cache_get(ti);
+    pthread_mutex_unlock(&g_lock);
+    return b;
+}
+
+/* Arena registry — up to METAL_ARENA_MAX live graph arenas. */
+#define METAL_ARENA_MAX 16
+static void         *g_arena_base[METAL_ARENA_MAX];
+static NSUInteger    g_arena_len[METAL_ARENA_MAX];
+static id<MTLBuffer> g_arena_buf[METAL_ARENA_MAX];
+static int           g_arena_n;
+
+void metal_i_register(void *base, NSUInteger len, id<MTLBuffer> buf) {
+    if (g_arena_n >= METAL_ARENA_MAX) return;
+    g_arena_base[g_arena_n] = base;
+    g_arena_len[g_arena_n]  = len;
+    g_arena_buf[g_arena_n]  = buf;
+    g_arena_n++;
+}
+
+void metal_i_unregister(void *base) {
+    for (int i = 0; i < g_arena_n; i++) {
+        if (g_arena_base[i] != base) continue;
+        g_arena_buf[i]  = g_arena_buf[g_arena_n - 1];
+        g_arena_base[i] = g_arena_base[g_arena_n - 1];
+        g_arena_len[i]  = g_arena_len[g_arena_n - 1];
+        g_arena_n--;
+        return;
+    }
+}
+
+int metal_i_lookup(const void *ptr, id<MTLBuffer> __strong *buf, NSUInteger *off) {
+    const uint8_t *p = (const uint8_t *)ptr;
+    for (int i = 0; i < g_arena_n; i++) {
+        const uint8_t *b = (const uint8_t *)g_arena_base[i];
+        if (p < b || p >= b + g_arena_len[i]) continue;
+        if (buf) *buf = g_arena_buf[i];
+        if (off) *off = (NSUInteger)(p - b);
+        return 0;
+    }
+    return -1;
+}
+
+void *metal_arena_alloc(size_t bytes) {
+    if (bytes == 0) bytes = 1;
+    pthread_mutex_lock(&g_lock);
+    if (metal_ensure_ready() != 0) { pthread_mutex_unlock(&g_lock); return NULL; }
+    id<MTLBuffer> b = [g_device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!b) { pthread_mutex_unlock(&g_lock); return NULL; }
+    void *base = b.contents;
+    metal_i_register(base, (NSUInteger)bytes, b);
+    pthread_mutex_unlock(&g_lock);
+    return base;
+}
+
+void metal_arena_free(void *base) {
+    if (!base) return;
+    pthread_mutex_lock(&g_lock);
+    metal_i_unregister(base);
+    pthread_mutex_unlock(&g_lock);
+}
+
 void metal_shutdown(void) {
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_cache_n; i++) g_cache_dev[i] = nil;
@@ -553,6 +651,8 @@ void metal_shutdown(void) {
     g_scratch_x = nil; g_scratch_x_cap = 0;
     g_scratch_y = nil; g_scratch_y_cap = 0;
     g_scratch_p = nil; g_scratch_p_cap = 0;
+    for (int i = 0; i < METAL_ARENA_MAX; i++) g_arena_buf[i] = nil;
+    g_arena_n = 0;
     g_library = nil;
     g_queue = nil;
     g_device = nil;

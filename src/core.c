@@ -19,6 +19,7 @@
 #endif
 #ifdef METAL_BUILD
 #include "backend/metal/metal.h"
+#include "backend/metal/metal_op.h"
 #endif
 #include "pthreads.h"
 #include "mm.h"
@@ -1843,7 +1844,8 @@ void engine_close(Engine *en) {
     gpu_shutdown(); /* free cached device weight buffers */
 #endif
 #ifdef METAL_BUILD
-    metal_shutdown(); /* free cached device weight buffers */
+    metal_op_shutdown(); /* free graph-op caches (KV/state/weights) */
+    metal_shutdown();    /* free cached device weight buffers */
 #endif
     vocab_free(en->vocab);
     model_close(en->model);

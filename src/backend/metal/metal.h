@@ -61,6 +61,15 @@ int metal_matmat(TensorInfo *ti, const float *X, float *Y, u64 batch, u64 rows, 
 /* Free all cached device weight buffers.  Call once at teardown. */
 void metal_shutdown(void);
 
+/* ---- Device-resident graph arena (graph-op backend) ----
+ *
+ * The execution arena backing a BACKEND_METAL graph plan is one shared
+ * MTLBuffer: the returned pointer is CPU- and GPU-visible, so the
+ * executor's token/logit memcpys keep working while kernels read and
+ * write the same storage with no H2D/D2H. */
+void *metal_arena_alloc(size_t bytes);
+void  metal_arena_free(void *base);
+
 #ifdef __cplusplus
 }
 #endif

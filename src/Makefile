@@ -48,7 +48,7 @@ ifdef METAL
 		$(error GPU=1 and METAL=1 are mutually exclusive)
 	endif
 	CFLAGS += -D METAL_BUILD
-	METAL_OBJS = backend/metal/metal.o
+	METAL_OBJS = backend/metal/metal.o backend/metal/metal_op.o
 	LDADDCFLAGS += -framework Metal -framework Foundation
 else
 	METAL_OBJS =
@@ -156,8 +156,11 @@ backend/metal/metal_msl.h: backend/metal/metal.metal
 	@sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' backend/metal/metal.metal >> $@
 	@printf ';\n#endif /* __METAL_MSL_H__ */\n' >> $@
 
-backend/metal/metal.o: backend/metal/metal.m backend/metal/metal.h backend/metal/metal_msl.h def.h
+backend/metal/metal.o: backend/metal/metal.m backend/metal/metal.h backend/metal/metal_internal.h backend/metal/metal_msl.h def.h
 	$(CC) $(CFLAGS) -fobjc-arc -c backend/metal/metal.m -o $@
+
+backend/metal/metal_op.o: backend/metal/metal_op.m backend/metal/metal_op.h backend/metal/metal.h backend/metal/metal_internal.h backend/metal/metal_msl.h def.h
+	$(CC) $(CFLAGS) -fobjc-arc -c backend/metal/metal_op.m -o $@
 
 kvcache.o: kvcache.c kvcache.h def.h
 	$(CC) $(CFLAGS) -c kvcache.c -o $@

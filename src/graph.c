@@ -16,6 +16,7 @@
 #endif
 #ifdef METAL_BUILD
 #include "backend/metal/metal.h"
+#include "backend/metal/metal_op.h"
 #endif
 
 /* ---- Per-op-class timing (debug aid, dumped by graph_free) ------- */
@@ -356,8 +357,11 @@ static void *arena_alloc(BackendType backend, size_t bytes) {
             return d;
         }
 #endif
-        case BACKEND_CPU:
+#ifdef METAL_BUILD
         case BACKEND_METAL:
+            return metal_arena_alloc(bytes);
+#endif
+        case BACKEND_CPU:
         default:
             return smalloc(bytes);
     }
@@ -372,8 +376,12 @@ static void arena_free(BackendType backend, void *arena) {
             cudaFree(arena);
             break;
 #endif
-        case BACKEND_CPU:
+#ifdef METAL_BUILD
         case BACKEND_METAL:
+            metal_arena_free(arena);
+            break;
+#endif
+        case BACKEND_CPU:
         default:
             sfree(arena);
             break;
@@ -600,6 +608,11 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
          * replaces the CPU op path, while the CPU path runs the
          * operators in backend/cpu/cpu_op.c via cpu_graph_op(). */
         bool ok;
+#ifdef METAL_BUILD
+        if (g->plan->backend == BACKEND_METAL)
+            ok = metal_graph_op(&ctx);
+        else
+#endif
 #ifdef GPU_BUILD
         if (g->plan->backend == BACKEND_CUDA)
             ok = gpu_graph_op(&ctx);
@@ -612,6 +625,12 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         op_stat_secs[st_cls] += graph_now() - st_t0;
         op_stat_calls[st_cls]++;
     }
+
+    /* Metal batches every dispatch of this walk into one command buffer;
+     * commit and wait before the sink is read back. */
+#ifdef METAL_BUILD
+    if (g->plan->backend == BACKEND_METAL) metal_graph_flush();
+#endif
 
     /* Sink output (last row of the LM head) → session logits.
      * A CUDA arena hands the slot back through one D2H. */
@@ -632,6 +651,9 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     return true;
 
 fail:
+#ifdef METAL_BUILD
+    if (g->plan->backend == BACKEND_METAL) metal_graph_flush();
+#endif
     sfree(scr);
     return false;
 }
