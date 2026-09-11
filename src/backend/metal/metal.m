@@ -63,15 +63,39 @@ static id<MTLComputePipelineState> g_pipe_dequant;
 static id<MTLComputePipelineState> g_pipe_dot;
 static id<MTLComputePipelineState> g_pipes[31][2]; /* [type][trans] */
 
-/* Params structs — layout must match the structs in metal.metal. */
-typedef struct {
+/* Reusable scratch buffers for the per-call X / Y / params uploads.
+ * Allocating fresh MTLBuffers on every matmul dominated the fixed cost
+ * of the decode hot path; the entry points are serialized by g_lock, so
+ * one set of buffers can be shared.  Grown on demand. */
+static id<MTLBuffer> g_scratch_x;
+static id<MTLBuffer> g_scratch_y;
+static id<MTLBuffer> g_scratch_p;
+static NSUInteger    g_scratch_x_cap;
+static NSUInteger    g_scratch_y_cap;
+static NSUInteger    g_scratch_p_cap;
+
+static id<MTLBuffer> metal_scratch(id<MTLBuffer> __strong *buf, NSUInteger *cap,
+                                   NSUInteger need) {
+    if (*buf && *cap >= need) return *buf;
+    *buf = [g_device newBufferWithLength:need options:MTLResourceStorageModeShared];
+    if (!*buf) { *cap = 0; return nil; }
+    *cap = need;
+    return *buf;
+}
+
+/* Params structs — layout must match the structs in metal.metal.  MSL
+ * carries 64-bit fields as uint2 pairs, so the host u64 fields line up
+ * with uint2 on a little-endian ABI (explicit pad matches the MSL
+ * struct). */
+typedef struct MetalDequantParams {
     u32  type;
+    u32  _pad;
     u64  start_i; /* block-aligned start (buffer begins here) */
     u64  i0;      /* first requested element                   */
     u64  nb;      /* element count                             */
 } MetalDequantParams;
 
-typedef struct {
+typedef struct MetalMatmulParams {
     u64 rows;
     u64 cols;
     u64 batch;
@@ -235,11 +259,11 @@ static void metal_execute(id<MTLComputePipelineState> pipe, MTLSize grid, MTLSiz
         id<MTLCommandBuffer> cb = [g_queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:pipe];
-        [enc setBuffer:b0 atIndex:0];
-        [enc setBuffer:b1 atIndex:1];
-        [enc setBuffer:b2 atIndex:2];
-        [enc setBuffer:b3 atIndex:3];
-        if (b4) [enc setBuffer:b4 atIndex:4];
+        [enc setBuffer:b0 offset:0 atIndex:0];
+        [enc setBuffer:b1 offset:0 atIndex:1];
+        [enc setBuffer:b2 offset:0 atIndex:2];
+        [enc setBuffer:b3 offset:0 atIndex:3];
+        if (b4) [enc setBuffer:b4 offset:0 atIndex:4];
         [enc dispatchThreadgroups:grid threadsPerThreadgroup:tptg];
         [enc endEncoding];
         [cb commit];
@@ -313,7 +337,7 @@ static int metal_dequant_batch_inner(TensorInfo *ti,
         return 0;
     }
 
-    struct MetalDequantParams dp = { ti->type, start_i, i0, nb };
+    struct MetalDequantParams dp = { .type = ti->type, .start_i = start_i, .i0 = i0, .nb = nb };
     id<MTLBuffer> d_p = [g_device newBufferWithBytes:&dp length:sizeof(dp) options:MTLResourceStorageModeShared];
 
     if (!g_pipe_dequant) g_pipe_dequant = metal_pipeline_for(@"dequant_range");
@@ -372,7 +396,7 @@ static float metal_dot_batch_inner(TensorInfo *ti,
     if (!d_data || !d_x || !d_partial)
         return scalar_dot(ti, i, n, x);
 
-    struct MetalDequantParams dp = { ti->type, start_i, i, n };
+    struct MetalDequantParams dp = { .type = ti->type, .start_i = start_i, .i0 = i, .nb = n };
     id<MTLBuffer> d_p = [g_device newBufferWithBytes:&dp length:sizeof(dp) options:MTLResourceStorageModeShared];
 
     if (!g_pipe_dot) g_pipe_dot = metal_pipeline_for(@"dequant_dot");
@@ -470,20 +494,24 @@ static int metal_matmul_inner(TensorInfo *ti,
     id<MTLBuffer> d_w = metal_cache_get(ti);
     if (!d_w) return -1;
 
-    id<MTLBuffer> d_x = [g_device newBufferWithBytes:X length:(NSUInteger)(batch * cols * sizeof(float)) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> d_y = [g_device newBufferWithLength:(NSUInteger)(batch * rows * sizeof(float)) options:MTLResourceStorageModeShared];
-    if (!d_x || !d_y) return -1;
+    NSUInteger xbytes = (NSUInteger)(batch * cols * sizeof(float));
+    NSUInteger ybytes = (NSUInteger)(batch * rows * sizeof(float));
+    id<MTLBuffer> d_x = metal_scratch(&g_scratch_x, &g_scratch_x_cap, xbytes);
+    id<MTLBuffer> d_y = metal_scratch(&g_scratch_y, &g_scratch_y_cap, ybytes);
+    id<MTLBuffer> d_p = metal_scratch(&g_scratch_p, &g_scratch_p_cap, sizeof(struct MetalMatmulParams));
+    if (!d_x || !d_y || !d_p) return -1;
+    memcpy(d_x.contents, X, xbytes);
 
     struct MetalMatmulParams mp = { rows, cols, batch };
-    id<MTLBuffer> d_p = [g_device newBufferWithBytes:&mp length:sizeof(mp) options:MTLResourceStorageModeShared];
+    memcpy(d_p.contents, &mp, sizeof(mp));
 
     id<MTLComputePipelineState> pipe = metal_matmul_pipeline(ti->type, trans);
     MTLSize tptg = MTLSizeMake(METAL_THREADS, 1, 1);
-    MTLSize grid = trans ? MTLSizeMake((rows + 255) / 256, batch, 1)
-                         : MTLSizeMake((rows + 7) / 8, batch, 1);
+    MTLSize grid = trans ? MTLSizeMake(((rows + 255) / 256) * batch, 1, 1)
+                         : MTLSizeMake(((rows + 7) / 8) * batch, 1, 1);
     metal_execute(pipe, grid, tptg, d_w, d_x, d_y, g_tables, d_p);
 
-    memcpy(Y, d_y.contents, (size_t)(batch * rows * sizeof(float)));
+    memcpy(Y, d_y.contents, ybytes);
     return 0;
 }
 
@@ -522,6 +550,9 @@ void metal_shutdown(void) {
     for (int t = 0; t < 31; t++)
         for (int o = 0; o < 2; o++) g_pipes[t][o] = nil;
     g_tables = nil;
+    g_scratch_x = nil; g_scratch_x_cap = 0;
+    g_scratch_y = nil; g_scratch_y_cap = 0;
+    g_scratch_p = nil; g_scratch_p_cap = 0;
     g_library = nil;
     g_queue = nil;
     g_device = nil;

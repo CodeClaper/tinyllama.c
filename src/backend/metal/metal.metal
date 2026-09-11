@@ -72,18 +72,27 @@ using namespace metal;
  * metal.m (same field order and widths).
  * ================================================================ */
 
+/* NOTE: MSL forbids 64-bit integer fields in a buffer pointee type, so
+ * every 64-bit value is carried as a `uint2` (x = low word, y = high
+ * word).  The host structs in metal.m use the matching u64 layout, which
+ * is identical on a little-endian ABI. */
 struct DequantParams {
     uint32_t type;
-    uint64_t start_i;   /* block-aligned start (buffer begins here) */
-    uint64_t i0;        /* first requested element                   */
-    uint64_t nb;        /* element count                             */
+    uint32_t _pad;
+    uint2 start_i;   /* block-aligned start (buffer begins here) */
+    uint2 i0;        /* first requested element                   */
+    uint2 nb;        /* element count                             */
 };
 
 struct MatmulParams {
-    uint64_t rows;
-    uint64_t cols;
-    uint64_t batch;
+    uint2 rows;
+    uint2 cols;
+    uint2 batch;
 };
+
+static inline uint64_t u2_to_u64(uint2 v) {
+    return ((uint64_t)v.y << 32) | (uint64_t)v.x;
+}
 
 /* ================================================================
  * Device helpers
@@ -134,12 +143,50 @@ static inline float ld_f32(device const uint8_t *p) {
     union { uint32_t u; float f; } v = { ld_u32(p) };
     return v.f;
 }
-static inline double ld_f64(device const uint8_t *p) {
-    union { uint64_t u; double f; } v = { ld_u64(p) };
+/* Metal has no `double`, so f64 is converted to f32 with round-to-nearest
+ * -even integer math (matching a C `(float)double` cast). */
+static inline float u32_as_f32(uint32_t u) {
+    union { uint32_t u; float f; } v = { u };
     return v.f;
 }
+static inline float f64_to_f32(uint64_t bits) {
+    uint32_t sign = (uint32_t)(bits >> 63) << 31;
+    uint32_t exp  = (uint32_t)((bits >> 52) & 0x7FF);
+    uint64_t mant = bits & 0xFFFFFFFFFFFFFULL;
 
-static inline void q4k_scale_min(device const uint8_t *s, uint32_t sb, uint8_t *scale, uint8_t *min) {
+    if (exp == 0x7FF) {
+        if (mant == 0) return u32_as_f32(sign | 0x7F800000u); /* inf */
+        uint32_t payload = (uint32_t)(mant >> 29);
+        return u32_as_f32(sign | 0x7F800000u | payload | 0x400000u); /* nan */
+    }
+    if (exp == 0) return u32_as_f32(sign); /* double subnormal -> f32 0 */
+    int32_t e = (int32_t)exp - 1023;
+    if (e >= 128) return u32_as_f32(sign | 0x7F800000u); /* overflow -> inf */
+    if (e >= -126) {
+        uint32_t fexp = (uint32_t)(e + 127);
+        uint32_t m_hi = (uint32_t)(mant >> 29);
+        uint32_t rem  = (uint32_t)(mant & 0x1FFFFFFFULL);
+        if (rem > 0x10000000u || (rem == 0x10000000u && (m_hi & 1u))) {
+            if (++m_hi == 0x800000u) {
+                m_hi = 0;
+                if (++fexp >= 0xFFu) return u32_as_f32(sign | 0x7F800000u);
+            }
+        }
+        return u32_as_f32(sign | (fexp << 23) | (m_hi & 0x7FFFFFu));
+    }
+    /* e < -126: subnormal f32 or zero. */
+    int32_t rshift = -e - 97;
+    if (rshift >= 64) return u32_as_f32(sign);
+    uint64_t sig = (1ULL << 52) | mant;
+    uint32_t q = (uint32_t)(sig >> rshift);
+    uint64_t rem = sig & ((1ULL << rshift) - 1ULL);
+    uint64_t halfway = 1ULL << (rshift - 1);
+    if (rem > halfway || (rem == halfway && (q & 1u))) q++;
+    if (q >= 0x800000u) return u32_as_f32(sign | 0x00800000u);
+    return u32_as_f32(sign | q);
+}
+
+static inline void q4k_scale_min(device const uint8_t *s, uint32_t sb, thread uint8_t *scale, thread uint8_t *min) {
     uint8_t d  = s[sb & 3];
     uint8_t m  = s[4 + (sb & 3)];
     uint8_t md = s[8 + (sb & 3)];
@@ -166,7 +213,7 @@ static inline float dequant_BF16(device const uint8_t *data, uint64_t i, device 
     return bf16_to_f32(ld_u16(data + i * 2));
 }
 static inline float dequant_F64(device const uint8_t *data, uint64_t i, device const float *tables) {
-    return (float)(ld_f64(data + i * 8));
+    return f64_to_f32(ld_u64(data + i * 8));
 }
 static inline float dequant_I8(device const uint8_t *data, uint64_t i, device const float *tables) {
     return (float)(int8_t)data[i];
@@ -258,13 +305,13 @@ static inline float dequant_Q6_K(device const uint8_t *data, uint64_t i, device 
     uint32_t hl      = o & 127;          /* position within 128-element half   */
     uint32_t which   = hl >> 5;          /* 0..3: which 32-element sub-group   */
     uint32_t l       = hl & 31;          /* 0..31: position inside sub-group   */
-    uint32_t half    = o >> 7;           /* 0 or 1: which 128-element half     */
+    uint32_t half_idx = o >> 7;          /* 0 or 1: which 128-element half     */
 
-    uint32_t ql_off  = (half << 6) + ((which & 1) << 5) + l;
+    uint32_t ql_off  = (half_idx << 6) + ((which & 1) << 5) + l;
     uint32_t lo      = (which >= 2) ? ((blk[ql_off] >> 4) & 0xF)
                                     :  (blk[ql_off] & 0xF);
 
-    uint32_t qh_off  = 128 + (half << 5) + l;
+    uint32_t qh_off  = 128 + (half_idx << 5) + l;
     uint32_t hi      = (blk[qh_off] >> (which * 2)) & 0x3;
 
     int32_t q  = (int32_t)(lo | (hi << 4)) - 32;
@@ -497,10 +544,13 @@ kernel void dequant_range(device const uint8_t *data [[buffer(0)]],
                           uint tid [[thread_position_in_grid]],
                           uint tptg [[threads_per_threadgroup]],
                           uint ntg  [[threadgroups_per_grid]]) {
+    uint64_t start_i = u2_to_u64(p.start_i);
+    uint64_t i0      = u2_to_u64(p.i0);
+    uint64_t nb      = u2_to_u64(p.nb);
     uint64_t idx    = (uint64_t)tid;
     uint64_t stride = (uint64_t)ntg * tptg;
-    for (uint64_t j = idx; j < p.nb; j += stride) {
-        out[j] = dequant_one(p.type, data, (p.i0 + j) - p.start_i, tables);
+    for (uint64_t j = idx; j < nb; j += stride) {
+        out[j] = dequant_one(p.type, data, (i0 + j) - start_i, tables);
     }
 }
 
@@ -517,10 +567,13 @@ kernel void dequant_dot(device const uint8_t *data [[buffer(0)]],
                         uint tg  [[threadgroup_position_in_grid]],
                         uint ntg [[threadgroups_per_grid]]) {
     threadgroup float sh[256];
+    uint64_t start_i = u2_to_u64(p.start_i);
+    uint64_t i0      = u2_to_u64(p.i0);
+    uint64_t nb      = u2_to_u64(p.nb);
     uint64_t stride = (uint64_t)ntg * tptg;
     float sum = 0.0f;
-    for (uint64_t j = idx; j < p.nb; j += stride) {
-        sum += dequant_one(p.type, data, (p.i0 + j) - p.start_i, tables) * x[j];
+    for (uint64_t j = idx; j < nb; j += stride) {
+        sum += dequant_one(p.type, data, (i0 + j) - start_i, tables) * x[j];
     }
     sh[tid] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -559,10 +612,10 @@ kernel void dequant_dot(device const uint8_t *data [[buffer(0)]],
 /* Non-transposed: y[b*rows + r] = sum_c w[r*cols + c] * x[b*cols + c].
  * One SIMD group (warp) per output row; lanes stride c by 32 so each
  * iteration covers exactly one quant block (QK=32 types) — coalesced
- * loads.  simd_sum() replaces the CUDA shuffle-tree reduction; the
- * accumulation order may differ, which the tolerant matmul checks
- * allow for.  Grid = (ceil(rows/8), batch); r is SIMD-group-uniform so
- * the bounds check exits whole groups. */
+ * loads.  The per-row sum is reduced through threadgroup memory (an
+ * extra all-threads barrier keeps early-exit rows from deadlocking).
+ * Grid is 1-D: [(ceil(rows/8)) * batch]; the batch index is derived
+ * from the tile count. */
 #define DEFINE_MATMUL_NT(T)                                                            \
 kernel void matmul_nt_##T(device const uint8_t *w [[buffer(0)]],                       \
                           device const float *x [[buffer(1)]],                         \
@@ -570,17 +623,29 @@ kernel void matmul_nt_##T(device const uint8_t *w [[buffer(0)]],                
                           device const float *tables [[buffer(3)]],                    \
                           constant struct MatmulParams &p [[buffer(4)]],               \
                           uint tid [[thread_position_in_threadgroup]],                 \
-                          uint2 tg [[threadgroup_position_in_grid]]) {                 \
+                          uint tg [[threadgroup_position_in_grid]]) {                  \
+    threadgroup float sh[256];                                                         \
+    uint64_t rows  = u2_to_u64(p.rows);                                                \
+    uint64_t cols  = u2_to_u64(p.cols);                                                \
+    uint64_t tiles = (rows + 7) / 8;                                                   \
+    uint64_t b     = (uint64_t)tg / tiles;                                             \
+    uint64_t tile  = (uint64_t)tg % tiles;                                             \
     uint simd = tid >> 5;                                                              \
     uint lane = tid & 31;                                                              \
-    uint64_t r = (uint64_t)tg.x * 8 + simd;                                            \
-    if (r >= p.rows) return;                                                           \
-    device const float *xr = x + (uint64_t)tg.y * p.cols;                              \
+    uint64_t r = tile * 8 + simd;                                                      \
     float sum = 0.0f;                                                                  \
-    for (uint64_t c = lane; c < p.cols; c += 32)                                       \
-        sum += dequant_##T(w, r * p.cols + c, tables) * xr[c];                         \
-    float total = simd_sum(sum);                                                       \
-    if (lane == 0) y[(uint64_t)tg.y * p.rows + r] = total;                             \
+    if (r < rows) {                                                                    \
+        device const float *xr = x + b * cols;                                         \
+        for (uint64_t c = lane; c < cols; c += 32)                                     \
+            sum += dequant_##T(w, r * cols + c, tables) * xr[c];                       \
+    }                                                                                  \
+    sh[tid] = sum;                                                                     \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                                   \
+    if (lane == 0 && r < rows) {                                                       \
+        float s = 0.0f;                                                                \
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];                          \
+        y[b * rows + r] = s;                                                           \
+    }                                                                                  \
 }
 METAL_TYPE_LIST(DEFINE_MATMUL_NT)
 #undef DEFINE_MATMUL_NT
@@ -589,7 +654,7 @@ METAL_TYPE_LIST(DEFINE_MATMUL_NT)
  * One thread per output element; 256 threads cover 256 outputs, so
  * per c the 32 lanes of a SIMD group read the same quant block (QK=32
  * types: block headers broadcast, elements gathered within the
- * block). */
+ * block).  Grid is 1-D: [(ceil(rows/256)) * batch]. */
 #define DEFINE_MATMUL_T(T)                                                             \
 kernel void matmul_t_##T(device const uint8_t *w [[buffer(0)]],                        \
                          device const float *x [[buffer(1)]],                          \
@@ -598,14 +663,18 @@ kernel void matmul_t_##T(device const uint8_t *w [[buffer(0)]],                 
                          constant struct MatmulParams &p [[buffer(4)]],                \
                          uint tid [[thread_position_in_threadgroup]],                  \
                          uint tptg [[threads_per_threadgroup]],                        \
-                         uint2 tg [[threadgroup_position_in_grid]]) {                  \
-    uint64_t idx = (uint64_t)tg.x * tptg + tid;                                        \
-    if (idx >= p.rows) return;                                                         \
-    device const float *xr = x + (uint64_t)tg.y * p.cols;                              \
+                         uint tg [[threadgroup_position_in_grid]]) {                   \
+    uint64_t rows  = u2_to_u64(p.rows);                                                \
+    uint64_t cols  = u2_to_u64(p.cols);                                                \
+    uint64_t tiles = (rows + tptg - 1) / tptg;                                         \
+    uint64_t b     = (uint64_t)tg / tiles;                                             \
+    uint64_t idx   = ((uint64_t)tg % tiles) * tptg + tid;                              \
+    if (idx >= rows) return;                                                           \
+    device const float *xr = x + b * cols;                                             \
     float sum = 0.0f;                                                                  \
-    for (uint64_t c = 0; c < p.cols; c++)                                              \
-        sum += dequant_##T(w, c * p.rows + idx, tables) * xr[c];                       \
-    y[(uint64_t)tg.y * p.rows + idx] = sum;                                            \
+    for (uint64_t c = 0; c < cols; c++)                                                \
+        sum += dequant_##T(w, c * rows + idx, tables) * xr[c];                         \
+    y[b * rows + idx] = sum;                                                           \
 }
 METAL_TYPE_LIST(DEFINE_MATMUL_T)
 #undef DEFINE_MATMUL_T

@@ -114,6 +114,20 @@ static u64 make_tensor(u32 type, u64 be, u64 bb,
     for (u64 i = 0; i < bytes; i++)
         (*buf)[i] = (u8)(rng_next() & 0x3F);
 
+    /* Q8_1 and Q8_K keep their scale as a raw f32 (not f16).  Apple GPUs
+     * flush denormal floats to zero in arithmetic, so a denormal random
+     * scale would make the GPU result zero while the CPU keeps the
+     * (subnormal) product — a hardware FTZ difference, not a decode
+     * bug.  Real model scales are always normal, so keep this field
+     * normal to exercise the decode faithfully. */
+    if (type == GGUF_TYPE_Q8_1 || type == GGUF_TYPE_Q8_K) {
+        u64 stride = (type == GGUF_TYPE_Q8_1) ? 40 : 292;
+        for (u64 off = 0; off + sizeof(float) <= bytes; off += stride) {
+            float d = (float)(rng_next() % 100000 + 1) * 1e-6f;
+            memcpy(*buf + off, &d, sizeof(d));
+        }
+    }
+
     memset(ti, 0, sizeof(*ti));
     ti->key.len    = 0;
     ti->ndim       = 2;
@@ -219,12 +233,14 @@ static int run_type(u32 type, u64 be, u64 bb) {
             printf("  [%s %llux%llu] dequant: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
+        fails += bad;
 
         bad = check_matmul(&ti, rows, cols, false, 1);
         if (bad)
             printf("  [%s %llux%llu] matvec: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
+        fails += bad;
 
         /* trans: tensor reinterpreted as [cols x rows] */
         bad = check_matmul(&ti, cols, rows, true, 1);
@@ -232,14 +248,15 @@ static int run_type(u32 type, u64 be, u64 bb) {
             printf("  [%s %llux%llu] matvec trans: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
+        fails += bad;
 
         bad = check_matmul(&ti, rows, cols, false, 3);
         if (bad)
             printf("  [%s %llux%llu] matmat: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
-
         fails += bad;
+
         free(buf);
     }
     return fails;
