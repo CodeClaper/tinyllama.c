@@ -680,6 +680,483 @@ METAL_TYPE_LIST(DEFINE_MATMUL_T)
 #undef DEFINE_MATMUL_T
 
 /* ================================================================
+ * Block-level vectorized Q4_K dot product (non-transposed)
+ *
+ * The generic kernels above decode one element per iteration, so a
+ * 256-element block's header (d, dmin) and its 6-bit scale/min pair are
+ * recomputed for every element — about 8x redundant work on K-quants,
+ * which is where decode-bound models spend their time.
+ *
+ * Here one SIMD group still owns one output row, but for every fully
+ * contained block each lane owns 8 CONSECUTIVE elements:
+ *   - d / dmin and one scale/min pair are decoded once for those 8
+ *     elements (o0 = lane*8 keeps them inside a single 32-group, so a
+ *     single q4k_scale_min() suffices);
+ *   - the 8 nibbles live in 8 contiguous bytes -> two ld_u32;
+ *   - x is read as two float4.
+ * value = d*sc*q - dmin*mn is affine in q, so the 8-element dot folds
+ * into s*sum(q*x) - m*sum(x) with two FMAs instead of 8 decodes.
+ *
+ * Blocks only partially covered by the row (its head and tail) keep the
+ * scalar decoder, so the kernel is exact for any row length/offset.
+ * The host only selects it when x is 16-byte aligned and the row length
+ * is a multiple of 4 (float4 loads).
+ * ================================================================ */
+kernel void matmul_nt_Q4K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0   = r * cols;          /* first element of the row  */
+        uint64_t i1   = i0 + cols;         /* one past the last         */
+        uint64_t bs   = (i0 + 255) >> 8;   /* first fully covered block */
+        uint64_t be   = i1 >> 8;           /* one past the last one     */
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+
+        /* Head: [i0, hend) — scalar decoder. */
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q4_K(w, i0 + c, tables) * xr[c];
+
+        /* Fully covered blocks — vectorized. */
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 144;
+            float d    = f16_to_f32(ld_u16(blk));
+            float dmin = f16_to_f32(ld_u16(blk + 2));
+            uint32_t o0 = lane * 8;
+            uint8_t sc, mn;
+            q4k_scale_min(blk + 4, o0 >> 5, &sc, &mn);
+            float s = d * (float)sc;
+            float m = dmin * (float)mn;
+
+            /* 8 nibbles in 8 contiguous bytes of qs.  With o0 = lane*8:
+             * g = o0>>6 = lane>>3 and bc = o0&31 = (lane&3)*8, and both
+             * stay constant over the 8 elements (8 divides 32 and 64). */
+            uint32_t qoff = 16 + (lane >> 3) * 32 + ((lane & 3) * 8);
+            uint32_t w0   = ld_u32(blk + qoff);
+            uint32_t w1   = ld_u32(blk + qoff + 4);
+            uint32_t hi   = (o0 >> 5) & 1;              /* low/high nibble */
+            uint32_t msk  = hi ? 0xF0F0F0F0u : 0x0F0F0F0Fu;
+            uint32_t a0   = (w0 & msk) >> (hi ? 4 : 0);
+            uint32_t a1   = (w1 & msk) >> (hi ? 4 : 0);
+
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0];
+            float4 v1 = xv[1];
+
+            float sq = (float)(a0 & 0xFF)        * v0.x +
+                       (float)((a0 >> 8) & 0xFF)  * v0.y +
+                       (float)((a0 >> 16) & 0xFF) * v0.z +
+                       (float)((a0 >> 24) & 0xFF) * v0.w +
+                       (float)(a1 & 0xFF)        * v1.x +
+                       (float)((a1 >> 8) & 0xFF)  * v1.y +
+                       (float)((a1 >> 16) & 0xFF) * v1.z +
+                       (float)((a1 >> 24) & 0xFF) * v1.w;
+            float sx = (v0.x + v0.y) + (v0.z + v0.w) +
+                       (v1.x + v1.y) + (v1.z + v1.w);
+            sum += s * sq - m * sx;
+        }
+
+        /* Tail: [max(be*256, i0), i1) — scalar decoder. */
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q4_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* ================================================================
+ * Block-level vectorized K-quant dot products (non-transposed)
+ *
+ * Same shape as matmul_nt_Q4K_F above: one SIMD group per output row,
+ * per 256-element block each lane owns 8 CONSECUTIVE elements, so the
+ * per-block header and the per-sub-block scale are decoded once for
+ * those 8 elements instead of 8 times.  For every K-quant the value is
+ * affine in the raw code q (value = a*q + b with a, b constant across
+ * the 8 elements), so the 8-element dot folds into
+ *      a * sum(q*x) + b * sum(x)
+ * with two FMAs.  Row head/tail blocks keep the scalar decoder, so the
+ * result is exact for any row length and offset.
+ *
+ * Host selects these only when x is 16-byte aligned and the row length
+ * is a multiple of 4 (float4 loads) and at least one full block fits.
+ * ================================================================ */
+
+/* Q5_K (176 = 2 d + 2 dmin + 12 scales + 32 qh + 128 qs).
+ * Identical to Q4_K plus a 1-bit high plane: qh byte (o&31), bit (o>>5).
+ * For o0 = lane*8 the 8 qh bytes are contiguous at 16 + (lane&3)*8. */
+kernel void matmul_nt_Q5K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0 = r * cols, i1 = i0 + cols;
+        uint64_t bs = (i0 + 255) >> 8, be = i1 >> 8;
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q5_K(w, i0 + c, tables) * xr[c];
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 176;
+            float d    = f16_to_f32(ld_u16(blk));
+            float dmin = f16_to_f32(ld_u16(blk + 2));
+            uint32_t o0 = lane * 8;
+            uint8_t sc, mn;
+            q4k_scale_min(blk + 4, o0 >> 5, &sc, &mn);
+            float s = d * (float)sc, m = dmin * (float)mn;
+            uint32_t qoff = 48 + (lane >> 3) * 32 + ((lane & 3) * 8);
+            uint32_t hoff = 16 + ((lane & 3) * 8);
+            uint32_t w0 = ld_u32(blk + qoff), w1 = ld_u32(blk + qoff + 4);
+            uint32_t h0 = ld_u32(blk + hoff), h1 = ld_u32(blk + hoff + 4);
+            uint32_t nb = (o0 >> 5) & 1;
+            uint32_t msk = nb ? 0xF0F0F0F0u : 0x0F0F0F0Fu;
+            uint32_t a0 = (w0 & msk) >> (nb ? 4 : 0);
+            uint32_t a1 = (w1 & msk) >> (nb ? 4 : 0);
+            uint32_t hb = 1u << (o0 >> 5);          /* high-bit position   */
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0], v1 = xv[1];
+            float q0 = (float)((a0 & 0xFF)        | (((h0       ) & hb) ? 16 : 0));
+            float q1 = (float)(((a0 >> 8) & 0xFF)  | (((h0 >> 8 ) & hb) ? 16 : 0));
+            float q2 = (float)(((a0 >> 16) & 0xFF) | (((h0 >> 16) & hb) ? 16 : 0));
+            float q3 = (float)(((a0 >> 24) & 0xFF) | (((h0 >> 24) & hb) ? 16 : 0));
+            float q4 = (float)((a1 & 0xFF)        | (((h1       ) & hb) ? 16 : 0));
+            float q5 = (float)(((a1 >> 8) & 0xFF)  | (((h1 >> 8 ) & hb) ? 16 : 0));
+            float q6 = (float)(((a1 >> 16) & 0xFF) | (((h1 >> 16) & hb) ? 16 : 0));
+            float q7 = (float)(((a1 >> 24) & 0xFF) | (((h1 >> 24) & hb) ? 16 : 0));
+            float sq = q0 * v0.x + q1 * v0.y + q2 * v0.z + q3 * v0.w +
+                       q4 * v1.x + q5 * v1.y + q6 * v1.z + q7 * v1.w;
+            float sx = (v0.x + v0.y) + (v0.z + v0.w) + (v1.x + v1.y) + (v1.z + v1.w);
+            sum += s * sq - m * sx;
+        }
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q5_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* Q6_K (210 = 128 ql + 64 qh + 16 scales + 2 d).
+ * For o0 = lane*8: sc = int8 at 192+(o0>>4), half = o0>>7, which = (o0&127)>>5
+ * and l = o0&31 are all constant over the 8 elements, so ql bytes are
+ * 8-contiguous at (half<<6)+((which&1)<<5)+l and qh at 128+(half<<5)+l.
+ * value = d*sc*(q - 32) with q = lo|(hi<<4). */
+kernel void matmul_nt_Q6K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0 = r * cols, i1 = i0 + cols;
+        uint64_t bs = (i0 + 255) >> 8, be = i1 >> 8;
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q6_K(w, i0 + c, tables) * xr[c];
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 210;
+            float d  = f16_to_f32(ld_u16(blk + 208));
+            uint32_t o0 = lane * 8;
+            int32_t sci = (int8_t)blk[192 + (o0 >> 4)];
+            float s = d * (float)sci;
+            uint32_t hl    = o0 & 127;
+            uint32_t which = hl >> 5;
+            uint32_t l     = hl & 31;
+            uint32_t halfsel = o0 >> 7;
+            uint32_t lof   = (halfsel << 6) + ((which & 1) << 5) + l;
+            uint32_t hif   = 128 + (halfsel << 5) + l;
+            uint32_t l0 = ld_u32(blk + lof), l1 = ld_u32(blk + lof + 4);
+            uint32_t h0 = ld_u32(blk + hif), h1 = ld_u32(blk + hif + 4);
+            uint32_t lm = (which >= 2) ? 0xF0F0F0F0u : 0x0F0F0F0Fu;
+            uint32_t ls = (which >= 2) ? 4 : 0;
+            uint32_t a0 = (l0 & lm) >> ls, a1 = (l1 & lm) >> ls;
+            uint32_t hs = which * 2, hm = 0x3u << hs;
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0], v1 = xv[1];
+            float q0 = (float)((int32_t)(((a0 & 0xFF)        | (((h0       ) & hm) >> hs) << 4)) - 32);
+            float q1 = (float)((int32_t)((((a0 >> 8) & 0xFF)  | (((h0 >> 8 ) & hm) >> hs) << 4)) - 32);
+            float q2 = (float)((int32_t)((((a0 >> 16) & 0xFF) | (((h0 >> 16) & hm) >> hs) << 4)) - 32);
+            float q3 = (float)((int32_t)((((a0 >> 24) & 0xFF) | (((h0 >> 24) & hm) >> hs) << 4)) - 32);
+            float q4 = (float)((int32_t)(((a1 & 0xFF)        | (((h1       ) & hm) >> hs) << 4)) - 32);
+            float q5 = (float)((int32_t)((((a1 >> 8) & 0xFF)  | (((h1 >> 8 ) & hm) >> hs) << 4)) - 32);
+            float q6 = (float)((int32_t)((((a1 >> 16) & 0xFF) | (((h1 >> 16) & hm) >> hs) << 4)) - 32);
+            float q7 = (float)((int32_t)((((a1 >> 24) & 0xFF) | (((h1 >> 24) & hm) >> hs) << 4)) - 32);
+            float sq = q0 * v0.x + q1 * v0.y + q2 * v0.z + q3 * v0.w +
+                       q4 * v1.x + q5 * v1.y + q6 * v1.z + q7 * v1.w;
+            sum += s * sq;
+        }
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q6_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* Q8_K (292 = 4 d + 32 bsums + 256 qs).  Per 16-element group a f16
+ * bsum; for o0 = lane*8 the group index o0>>4 is constant over the 8
+ * elements and the 8 int8 codes are contiguous at 36+o0. */
+kernel void matmul_nt_Q8K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0 = r * cols, i1 = i0 + cols;
+        uint64_t bs = (i0 + 255) >> 8, be = i1 >> 8;
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q8_K(w, i0 + c, tables) * xr[c];
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 292;
+            float d = ld_f32(blk);
+            uint32_t o0 = lane * 8;
+            float s = d * f16_to_f32(ld_u16(blk + 4 + 2 * (o0 >> 4)));
+            uint32_t a0 = ld_u32(blk + 36 + o0), a1 = ld_u32(blk + 40 + o0);
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0], v1 = xv[1];
+            float sq = (float)(int8_t)(a0 & 0xFF)        * v0.x +
+                       (float)(int8_t)((a0 >> 8) & 0xFF)  * v0.y +
+                       (float)(int8_t)((a0 >> 16) & 0xFF) * v0.z +
+                       (float)(int8_t)((a0 >> 24) & 0xFF) * v0.w +
+                       (float)(int8_t)(a1 & 0xFF)        * v1.x +
+                       (float)(int8_t)((a1 >> 8) & 0xFF)  * v1.y +
+                       (float)(int8_t)((a1 >> 16) & 0xFF) * v1.z +
+                       (float)(int8_t)((a1 >> 24) & 0xFF) * v1.w;
+            sum += s * sq;
+        }
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q8_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* Q3_K (110 = 32 hmask + 64 qs + 8 sc_low + 4 sc_high + 2 d).
+ * For o0 = lane*8: s = o0>>4, g = o0>>7, pr = (o0>>5)&3 are constant,
+ * bc = o0&31, so qs bytes are 8-contiguous at 32+g*32+bc and the hmask
+ * bytes at o0&31.  value = d*sc*(q-4) with q = lo|(hi<<2), sc = raw-32. */
+kernel void matmul_nt_Q3K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0 = r * cols, i1 = i0 + cols;
+        uint64_t bs = (i0 + 255) >> 8, be = i1 >> 8;
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q3_K(w, i0 + c, tables) * xr[c];
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 110;
+            float d = f16_to_f32(ld_u16(blk + 108));
+            uint32_t o0 = lane * 8;
+            uint32_t s  = o0 >> 4;
+            uint32_t sc_low  = (blk[96 + (s & 7)]  >> (s >= 8 ? 4 : 0)) & 0xF;
+            uint32_t sc_high = (blk[104 + (s & 3)] >> ((s >> 2) * 2)) & 0x3;
+            int32_t sci = (int32_t)(sc_low | (sc_high << 4)) - 32;
+            float s3 = d * (float)sci;
+            uint32_t g  = o0 >> 7, pr = (o0 >> 5) & 3, bc = o0 & 31;
+            uint32_t qf = 32 + g * 32 + bc, hf = bc;
+            uint32_t q0 = ld_u32(blk + qf), q1 = ld_u32(blk + qf + 4);
+            uint32_t h0 = ld_u32(blk + hf), h1 = ld_u32(blk + hf + 4);
+            uint32_t lm = 0x03030303u << (pr * 2);
+            uint32_t ls = pr * 2;
+            uint32_t a0 = (q0 & lm) >> ls, a1 = (q1 & lm) >> ls;
+            uint32_t hb = 1u << (o0 >> 5);
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0], v1 = xv[1];
+            float c0 = (float)((int32_t)(((a0 & 0xFF)        | (((h0       ) & hb) ? 4 : 0)) - 4));
+            float c1 = (float)((int32_t)((((a0 >> 8) & 0xFF)  | (((h0 >> 8 ) & hb) ? 4 : 0)) - 4));
+            float c2 = (float)((int32_t)((((a0 >> 16) & 0xFF) | (((h0 >> 16) & hb) ? 4 : 0)) - 4));
+            float c3 = (float)((int32_t)((((a0 >> 24) & 0xFF) | (((h0 >> 24) & hb) ? 4 : 0)) - 4));
+            float c4 = (float)((int32_t)(((a1 & 0xFF)        | (((h1       ) & hb) ? 4 : 0)) - 4));
+            float c5 = (float)((int32_t)((((a1 >> 8) & 0xFF)  | (((h1 >> 8 ) & hb) ? 4 : 0)) - 4));
+            float c6 = (float)((int32_t)((((a1 >> 16) & 0xFF) | (((h1 >> 16) & hb) ? 4 : 0)) - 4));
+            float c7 = (float)((int32_t)((((a1 >> 24) & 0xFF) | (((h1 >> 24) & hb) ? 4 : 0)) - 4));
+            float sq = c0 * v0.x + c1 * v0.y + c2 * v0.z + c3 * v0.w +
+                       c4 * v1.x + c5 * v1.y + c6 * v1.z + c7 * v1.w;
+            sum += s3 * sq;
+        }
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q3_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* Q2_K (84 = 64 qs + 8 scales + 8 pad + 2 d + 2 mn per this decoder).
+ * For o0 = lane*8: sb = o0>>4 constant -> one 4-bit scale; the 8 two-bit
+ * codes live in 2 contiguous bytes at o0>>2 and the 8 high bits in ONE
+ * byte at o0>>3 (= lane) at bit positions t = 0..7. */
+kernel void matmul_nt_Q2K_F(device const uint8_t *w [[buffer(0)]],
+                            device const float *x [[buffer(1)]],
+                            device float *y [[buffer(2)]],
+                            device const float *tables [[buffer(3)]],
+                            constant struct MatmulParams &p [[buffer(4)]],
+                            uint tid [[thread_position_in_threadgroup]],
+                            uint tg [[threadgroup_position_in_grid]]) {
+    threadgroup float sh[256];
+    uint64_t rows  = u2_to_u64(p.rows);
+    uint64_t cols  = u2_to_u64(p.cols);
+    uint64_t tiles = (rows + 7) / 8;
+    uint64_t b     = (uint64_t)tg / tiles;
+    uint64_t tile  = (uint64_t)tg % tiles;
+    uint simd = tid >> 5;
+    uint lane = tid & 31;
+    uint64_t r = tile * 8 + simd;
+    float sum = 0.0f;
+    if (r < rows) {
+        device const float *xr = x + b * cols;
+        uint64_t i0 = r * cols, i1 = i0 + cols;
+        uint64_t bs = (i0 + 255) >> 8, be = i1 >> 8;
+        uint64_t hend = (bs * 256 < i1) ? bs * 256 : i1;
+        for (uint64_t c = lane; c < hend - i0; c += 32)
+            sum += dequant_Q2_K(w, i0 + c, tables) * xr[c];
+        for (uint64_t bi = bs; bi < be; bi++) {
+            device const uint8_t *blk = w + bi * 84;
+            float d  = f16_to_f32(ld_u16(blk + 80));
+            float mn = f16_to_f32(ld_u16(blk + 82));
+            uint32_t o0 = lane * 8;
+            uint32_t sb = o0 >> 4;
+            uint32_t scr = blk[64 + (sb >> 1)];
+            if (sb & 1) scr >>= 4; else scr &= 0xF;
+            float s = d * (float)(int32_t)scr;
+            uint32_t q0 = ld_u32(blk + (o0 >> 2));      /* 4 codes in lo16 */
+            uint32_t hb = blk[lane];                     /* 8 high bits     */
+            uint64_t xc = (bi * 256 - i0) + (uint64_t)lane * 8;
+            device const float4 *xv = (device const float4 *)(xr + xc);
+            float4 v0 = xv[0], v1 = xv[1];
+            float c0 = (float)((int32_t)((q0       ) & 0x3) - (int32_t)(((hb >> 0) & 1) * 4));
+            float c1 = (float)((int32_t)((q0 >> 2) & 0x3) - (int32_t)(((hb >> 1) & 1) * 4));
+            float c2 = (float)((int32_t)((q0 >> 4) & 0x3) - (int32_t)(((hb >> 2) & 1) * 4));
+            float c3 = (float)((int32_t)((q0 >> 6) & 0x3) - (int32_t)(((hb >> 3) & 1) * 4));
+            float c4 = (float)((int32_t)((q0 >> 8) & 0x3) - (int32_t)(((hb >> 4) & 1) * 4));
+            float c5 = (float)((int32_t)((q0 >> 10) & 0x3) - (int32_t)(((hb >> 5) & 1) * 4));
+            float c6 = (float)((int32_t)((q0 >> 12) & 0x3) - (int32_t)(((hb >> 6) & 1) * 4));
+            float c7 = (float)((int32_t)((q0 >> 14) & 0x3) - (int32_t)(((hb >> 7) & 1) * 4));
+            float sq = c0 * v0.x + c1 * v0.y + c2 * v0.z + c3 * v0.w +
+                       c4 * v1.x + c5 * v1.y + c6 * v1.z + c7 * v1.w;
+            float sx = (v0.x + v0.y) + (v0.z + v0.w) + (v1.x + v1.y) + (v1.z + v1.w);
+            sum += s * sq - mn * sx;
+        }
+        uint64_t tstart = (be * 256 > i0) ? be * 256 : i0;
+        if (tstart < hend) tstart = hend;
+        for (uint64_t c = (tstart - i0) + lane; c < cols; c += 32)
+            sum += dequant_Q2_K(w, i0 + c, tables) * xr[c];
+    }
+    sh[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0 && r < rows) {
+        float s = 0.0f;
+        for (uint k = 0; k < 32; k++) s += sh[simd * 32 + k];
+        y[b * rows + r] = s;
+    }
+}
+
+/* ================================================================
  * Graph-op kernels (device-resident path)
  *
  * The host passes per-op scalars as a flat little-endian uint32 array

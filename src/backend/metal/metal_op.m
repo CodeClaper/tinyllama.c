@@ -358,7 +358,29 @@ static bool metal_op_matmul(OpCtx *c) {
     };
     if (w->type >= 31 || !suffix[w->type]) return false;
     char kname[64];
+    /* Q4_K gets a block-level vectorized dot product when its float4
+     * loads are provably aligned: x 16-byte aligned and a row length
+     * that is a multiple of 4 floats (so every row start, and hence
+     * every block start, keeps that alignment).  Anything else falls
+     * back to the exact generic kernel. */
+    bool fast = (!tr && (cols % 4) == 0 && cols >= 256 &&
+                 ((uintptr_t)x % 16) == 0 &&
+                 (w->type == GGUF_TYPE_Q4_K || w->type == GGUF_TYPE_Q5_K ||
+                  w->type == GGUF_TYPE_Q6_K || w->type == GGUF_TYPE_Q8_K ||
+                  w->type == GGUF_TYPE_Q3_K || w->type == GGUF_TYPE_Q2_K));
     snprintf(kname, sizeof(kname), "matmul_%s_%s", tr ? "t" : "nt", suffix[w->type]);
+    if (fast) {
+        const char *fk = NULL;
+        switch (w->type) {
+            case GGUF_TYPE_Q2_K: fk = "matmul_nt_Q2K_F"; break;
+            case GGUF_TYPE_Q3_K: fk = "matmul_nt_Q3K_F"; break;
+            case GGUF_TYPE_Q4_K: fk = "matmul_nt_Q4K_F"; break;
+            case GGUF_TYPE_Q5_K: fk = "matmul_nt_Q5K_F"; break;
+            case GGUF_TYPE_Q6_K: fk = "matmul_nt_Q6K_F"; break;
+            case GGUF_TYPE_Q8_K: fk = "matmul_nt_Q8K_F"; break;
+        }
+        if (fk) snprintf(kname, sizeof(kname), "%s", fk);
+    }
     dispatch(kname, bufs, offs, 5, ntg);
     return true;
 }
