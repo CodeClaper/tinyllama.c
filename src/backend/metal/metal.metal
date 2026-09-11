@@ -5,7 +5,7 @@
  * itself bit-exact against the scalar reference in quants.c: each
  * thread dequantizes one element directly from the raw GGUF bytes that
  * were uploaded to device memory, using identical integer math (the
- * manual f16/bf16 bit manipulation, not MSL `hh` conversions), so
+ * manual f16/bf16 bit manipulation, not MSL `half` conversions), so
  * GPU output is bit-for-bit comparable to gguf_dequant().
  *
  * The IQ importance grids / value tables live on the host in
@@ -302,10 +302,10 @@ static inline float dequant_Q6_K(device const uint8_t *data, uint64_t i, device 
     float d = f16_to_f32(ld_u16(blk + 208));
     int32_t sc = (int8_t)blk[192 + (o >> 4)];
 
-    uint32_t hl      = o & 127;          /* position within 128-element hh   */
+    uint32_t hl      = o & 127;          /* position within 128-element half   */
     uint32_t which   = hl >> 5;          /* 0..3: which 32-element sub-group   */
     uint32_t l       = hl & 31;          /* 0..31: position inside sub-group   */
-    uint32_t half_idx = o >> 7;          /* 0 or 1: which 128-element hh     */
+    uint32_t half_idx = o >> 7;          /* 0 or 1: which 128-element half     */
 
     uint32_t ql_off  = (half_idx << 6) + ((which & 1) << 5) + l;
     uint32_t lo      = (which >= 2) ? ((blk[ql_off] >> 4) & 0xF)
