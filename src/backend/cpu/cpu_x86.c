@@ -1050,6 +1050,8 @@ static inline __m128 sse_i16_dot_x8(__m128i v, const float *x) {
     return _mm_add_ps(f0, f1);
 }
 
+#if !(defined(__AVX2__) && defined(__FMA__))
+
 /*
  * Q6_K: sum = d * Σ(sc[sb] * Σ((q - 32) * x))
  *
@@ -1158,6 +1160,8 @@ static float sse_dot_q4_k_block(const u8 *data, const float *x) {
     }
     return d * dot_acc - dmin * sum_acc;
 }
+
+#endif /* !(__AVX2__ && __FMA__) */
 
 /* Q5_K: result = d * Σ(sc[sb] * Σ(q * x)) - dmin * Σ(mn[sb] * Σ(x)) */
 static float sse_dot_q5_k_block(const u8 *data, const float *x) {
@@ -1326,6 +1330,113 @@ static float sse_dot_q2_k_block(const u8 *data, const float *x) {
 }
 
 /* ================================================================
+ * AVX2 / FMA fused dot kernels (256-bit)
+ * ================================================================ */
+
+#if defined(__AVX2__) && defined(__FMA__)
+
+static inline float avx2_hsum_f32x8(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    __m128 s  = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    return _mm_cvtss_f32(s);
+}
+
+/* Widen the low 8 bytes of v8, shifting each byte right by k. */
+static inline __m256i avx2_u8_shr_x8(__m128i v8, u32 k) {
+    __m256i mul = _mm256_set1_epi16((i16)(1u << (8 - k)));
+    return _mm256_srli_epi16(_mm256_mullo_epi16(_mm256_cvtepu8_epi16(v8), mul), 8);
+}
+
+/* Widen the low 8 × i16 of v to 8 × f32. */
+static inline __m256 avx2_i16_to_f32_x8(__m256i v) {
+    return _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v)));
+}
+
+static float avx2_dot_q6_k_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)(data + 208));
+    const u8 *scales = data + 192;
+    const u8 *ql     = data;
+    const u8 *qh     = data + 128;
+
+    const __m256i nib  = _mm256_set1_epi16(0x0F);
+    const __m256i hi2  = _mm256_set1_epi16(0x03);
+    const __m256i bias = _mm256_set1_epi16(32);
+
+    __m256 acc = _mm256_setzero_ps();
+    for (int sb = 0; sb < 16; sb++) {
+        i32 sc = (i8)scales[sb];
+        u32 start = (u32)sb * 16;
+
+        u32 sub7  = (u32)sb & 7;
+        u32 half  = (u32)sb >> 3;
+        u32 which = sub7 >> 1;
+        u32 sbpar = sub7 & 1;
+        const u8 *qsrc = ql + (half << 6) + ((which & 1) << 5) + (sbpar << 4);
+        const u8 *hsrc = qh + (half << 5) + (sbpar << 4);
+
+        __m256 s = _mm256_setzero_ps();
+        for (int c = 0; c < 2; c++) {
+            __m256i lo = _mm256_and_si256(
+                avx2_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(qsrc + c * 8)),
+                               which >= 2 ? 4 : 0), nib);
+            __m256i hi = _mm256_and_si256(
+                avx2_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(hsrc + c * 8)),
+                               which * 2), hi2);
+
+            __m256i v = _mm256_sub_epi16(
+                _mm256_or_si256(lo, _mm256_slli_epi16(hi, 4)), bias);
+            s = _mm256_fmadd_ps(avx2_i16_to_f32_x8(v),
+                                _mm256_loadu_ps(x + start + c * 8), s);
+        }
+        acc = _mm256_fmadd_ps(_mm256_set1_ps((float)sc), s, acc);
+    }
+    return d * avx2_hsum_f32x8(acc);
+}
+
+static float avx2_dot_q4_k_block(const u8 *data, const float *x) {
+    float d    = f16_to_f32(*(const u16 *)data);
+    float dmin = f16_to_f32(*(const u16 *)(data + 2));
+    const u8 *sm = data + 4;
+    const u8 *qs = data + 16;
+
+    const __m256i nib = _mm256_set1_epi16(0x0F);
+
+    __m256 dot_acc = _mm256_setzero_ps();
+    __m256 sum_acc = _mm256_setzero_ps();
+
+    for (int sb = 0; sb < 8; sb++) {
+        u8 sc, mn;
+        q4k_scale_min(sm, (u32)sb, &sc, &mn);
+
+        u32 g  = (u32)sb >> 1;
+        u32 nb = (u32)sb & 1;
+        const u8 *src = qs + g * 32;
+        u32 off = (u32)sb * 32;
+
+        __m256 dot = _mm256_setzero_ps();
+        __m256 sx  = _mm256_setzero_ps();
+
+        for (int c = 0; c < 4; c++) {
+            __m256i w = _mm256_and_si256(
+                avx2_u8_shr_x8(_mm_loadl_epi64((const __m128i *)(src + c * 8)),
+                               nb ? 4 : 0), nib);
+            __m256 xv = _mm256_loadu_ps(x + off + c * 8);
+            dot = _mm256_fmadd_ps(avx2_i16_to_f32_x8(w), xv, dot);
+            sx  = _mm256_add_ps(sx, xv);
+        }
+
+        dot_acc = _mm256_fmadd_ps(_mm256_set1_ps((float)sc), dot, dot_acc);
+        sum_acc = _mm256_fmadd_ps(_mm256_set1_ps((float)mn), sx,  sum_acc);
+    }
+    return d * avx2_hsum_f32x8(dot_acc) - dmin * avx2_hsum_f32x8(sum_acc);
+}
+
+#endif /* __AVX2__ && __FMA__ */
+
+/* ================================================================
  * Public API
  * ================================================================ */
 
@@ -1363,9 +1474,17 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
         switch (type) {
             case GGUF_TYPE_Q2_K:     block_bytes =  84; dot_fn = sse_dot_q2_k_block; break;
             case GGUF_TYPE_Q3_K:     block_bytes = 110; dot_fn = sse_dot_q3_k_block; break;
-            case GGUF_TYPE_Q4_K:     block_bytes = 144; dot_fn = sse_dot_q4_k_block; break;
-            case GGUF_TYPE_Q5_K:     block_bytes = 176; dot_fn = sse_dot_q5_k_block; break;
-            case GGUF_TYPE_Q6_K:     block_bytes = 210; dot_fn = sse_dot_q6_k_block; break;
+#if defined(__AVX2__) && defined(__FMA__)
+            case GGUF_TYPE_Q4_K: block_bytes = 144; dot_fn = avx2_dot_q4_k_block; break;
+#else
+            case GGUF_TYPE_Q4_K: block_bytes = 144; dot_fn = sse_dot_q4_k_block; break;
+#endif
+            case GGUF_TYPE_Q5_K: block_bytes = 176; dot_fn = sse_dot_q5_k_block; break;
+#if defined(__AVX2__) && defined(__FMA__)
+            case GGUF_TYPE_Q6_K: block_bytes = 210; dot_fn = avx2_dot_q6_k_block; break;
+#else
+            case GGUF_TYPE_Q6_K: block_bytes = 210; dot_fn = sse_dot_q6_k_block; break;
+#endif
             case GGUF_TYPE_Q8_K:     block_bytes = 292; dot_fn = sse_dot_q8_k_block; break;
             case GGUF_TYPE_IQ2_XXS:  block_bytes =  66; break;
             case GGUF_TYPE_IQ2_XS:   block_bytes =  74; break;
