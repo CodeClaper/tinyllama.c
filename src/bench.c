@@ -193,8 +193,8 @@ int main(int argc, char *argv[]) {
 
         /* --- Prefill --- */
         double t0 = time_sec();
-        bool ok = session->ops.graph_execute(session, prompt_tokens,
-                                             (u32)n_prompt, session->logits);
+        bool ok = graph_execute(session, prompt_tokens,
+                                (u32)n_prompt, session->logits);
         if (!ok)
             slog(ERROR, "Forward pass failed at prefill");
         double t1 = time_sec();
@@ -233,8 +233,8 @@ int main(int argc, char *argv[]) {
             }
 
             n_gen++;
-            if (!session->ops.graph_execute(session, &next_token, 1,
-                                            session->logits))
+            if (!graph_execute(session, &next_token, 1,
+                               session->logits))
                 break;
 
             if (opts.temperature > 0.0f)

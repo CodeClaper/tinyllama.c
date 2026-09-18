@@ -644,5 +644,4 @@ const ArchOps qwen35_ops = {
     .reset         = qwen35_reset,
     .decode        = qwen35_decode,
     .graph_build   = qwen35_graph_build,
-    .graph_execute = graph_execute,
 };

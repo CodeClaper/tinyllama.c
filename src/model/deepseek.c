@@ -77,5 +77,4 @@ const ArchOps deepseek_ops = {
     .init          = deepseek_init,
     .free          = deepseek_free,
     .reset         = deepseek_reset,
-    .graph_execute = graph_execute,
 };

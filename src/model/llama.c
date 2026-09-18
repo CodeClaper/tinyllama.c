@@ -57,5 +57,4 @@ const ArchOps llama_ops = {
     .init          = llama_init,
     .free          = llama_free,
     .reset         = llama_reset,
-    .graph_execute = graph_execute,
 };

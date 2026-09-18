@@ -280,8 +280,8 @@ int main(int argc, char *argv[]) {
             n_prompt = (int)room;
             if (n_prompt <= 0) fatal("Context full — use /clear to reset");
         }
-        bool ok = session->ops.graph_execute(session, prompt_tokens,
-                                             (u32)n_prompt, session->logits);
+        bool ok = graph_execute(session, prompt_tokens,
+                                (u32)n_prompt, session->logits);
         if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
@@ -312,8 +312,8 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "\n[context full — /clear to continue]\n");
                 break;
             }
-            if (!session->ops.graph_execute(session, &next_token, 1,
-                                            session->logits))
+            if (!graph_execute(session, &next_token, 1,
+                               session->logits))
                 break;
             if (co.temperature > 0.0f)
                 next_token = sample_token(session->logits, session->cfg.n_vocab,

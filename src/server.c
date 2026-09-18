@@ -188,7 +188,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     u32 room = s->ctx_size - s->n_tokens;
     if (n_prompt > (int)room) n_prompt = (int)room;
     bool ok = n_prompt > 0 &&
-              s->ops.graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
+              graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
                      "{\"error\":\"Forward pass failed\"}");
@@ -225,7 +225,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         /* Incremental decode: one new row at the current position;
          * attention reads the cached history. */
         if (s->n_tokens >= s->ctx_size) break;
-        if (!s->ops.graph_execute(s, &next_token, 1, s->logits)) break;
+        if (!graph_execute(s, &next_token, 1, s->logits)) break;
         next_token = sample_token(s->logits, s->cfg.n_vocab,
                                     s->temperature, s->top_k, s->top_p, s->min_p,
                                     s->repeat_penalty, s->repeat_last_n,

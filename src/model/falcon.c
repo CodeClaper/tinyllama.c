@@ -55,5 +55,4 @@ const ArchOps falcon_ops = {
     .init          = falcon_init,
     .free          = falcon_free,
     .reset         = falcon_reset,
-    .graph_execute = graph_execute,
 };
