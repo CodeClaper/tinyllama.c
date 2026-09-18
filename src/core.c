@@ -903,6 +903,7 @@ static const char *arch_key_prefix(ModelArch arch) {
         case ARCH_QWEN2:    return "qwen2";
         case ARCH_DEEPSEEK: return "deepseek2";
         case ARCH_FALCON:   return "falcon";
+        case ARCH_GEMMA:    return "gemma2";
         default:            return "llama";
     }
 }
@@ -1034,6 +1035,9 @@ static ModelArch model_detect_arch(Model *m) {
     if (key_streq(arch_name, "qwen35"))    return ARCH_QWEN3;
     if (key_streq(arch_name, "deepseek2")) return ARCH_DEEPSEEK;
     if (key_streq(arch_name, "falcon"))    return ARCH_FALCON;
+    if (key_streq(arch_name, "gemma"))     return ARCH_GEMMA;
+    if (key_streq(arch_name, "gemma2"))    return ARCH_GEMMA;
+    if (key_streq(arch_name, "gemma3"))    return ARCH_GEMMA;
     slog(WARN, "Unknown architecture: %s, loading as generic.", get_key_name(arch_name));
     return ARCH_UNKNOWN;
 }
@@ -1391,6 +1395,12 @@ static const TensorMapEntry deepseek_tensor_map[] = {
     {TENSOR_OUTPUT_HC_SCALE,  "output_hc_scale.weight",    true},
 };
 
+static const TensorMapEntry gemma_tensor_map[] = {
+    {TENSOR_TOKEN_EMBD,  "token_embd.weight",   true},
+    {TENSOR_OUTPUT,      "output.weight",       false},
+    {TENSOR_OUTPUT_NORM, "output_norm.weight",  true},
+};
+
 static const TensorMapEntry unknown_tensor_map[] = {
     {TENSOR_TOKEN_EMBD,  "token_embd.weight",   true},
     {TENSOR_OUTPUT,      "output.weight",       false},
@@ -1462,6 +1472,21 @@ static const LayerTensorMap deepseek_layer_map[] = {
     {TENSOR_FFN_UP,     "ffn_up",       true},
 };
 
+static const LayerTensorMap gemma_layer_map[] = {
+    {TENSOR_ATTN_NORM,      "attn_norm",          true},
+    {TENSOR_ATTN_Q,         "attn_q",             true},
+    {TENSOR_ATTN_K,         "attn_k",             true},
+    {TENSOR_ATTN_V,         "attn_v",             true},
+    {TENSOR_ATTN_Q_NORM,    "attn_q_norm",        false},
+    {TENSOR_ATTN_K_NORM,    "attn_k_norm",        false},
+    {TENSOR_ATTN_OUT,       "attn_output",        true},
+    {TENSOR_POST_ATTN_NORM, "post_attention_norm", false},
+    {TENSOR_POST_ATTN_NORM, "ffn_norm",           false},
+    {TENSOR_FFN_GATE,       "ffn_gate",           true},
+    {TENSOR_FFN_DOWN,       "ffn_down",           true},
+    {TENSOR_FFN_UP,         "ffn_up",             true},
+};
+
 static const LayerTensorMap unknown_layer_map[] = {
     {TENSOR_ATTN_NORM,  "attn_norm",    false},
     {TENSOR_ATTN_Q,     "attn_q",       false},
@@ -1485,6 +1510,7 @@ static const TensorMapEntry *arch_tensor_map(ModelArch arch, int *count) {
         {ARCH_QWEN2,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
         {ARCH_QWEN3,    qwen2_tensor_map,    ARR_LEN(qwen2_tensor_map)},
         {ARCH_DEEPSEEK, deepseek_tensor_map, ARR_LEN(deepseek_tensor_map)},
+        {ARCH_GEMMA,    gemma_tensor_map,    ARR_LEN(gemma_tensor_map)},
         {ARCH_UNKNOWN,  unknown_tensor_map,  ARR_LEN(unknown_tensor_map)},
     };
     for (int i = 0; i < ARR_LEN(maps); i++) {
@@ -1510,6 +1536,7 @@ static const LayerTensorMap *arch_layer_map(ModelArch arch, int *count) {
         {ARCH_QWEN2,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
         {ARCH_QWEN3,    qwen2_layer_map,     ARR_LEN(qwen2_layer_map)},
         {ARCH_DEEPSEEK, deepseek_layer_map,  ARR_LEN(deepseek_layer_map)},
+        {ARCH_GEMMA,    gemma_layer_map,     ARR_LEN(gemma_layer_map)},
         {ARCH_UNKNOWN,  unknown_layer_map,   ARR_LEN(unknown_layer_map)},
     };
     for (int i = 0; i < ARR_LEN(maps); i++) {
@@ -1975,6 +2002,7 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
         case ARCH_QWEN3:    s->ops = qwen35_ops;   break;
         case ARCH_DEEPSEEK: s->ops = deepseek_ops; break;
         case ARCH_FALCON:   s->ops = falcon_ops;   break;
+        case ARCH_GEMMA:    s->ops = gemma_ops;    break;
         default:
             slog(WARN, "Unknown architecture, falling back to llama.");
             s->ops = llama_ops;

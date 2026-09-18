@@ -160,6 +160,7 @@ typedef enum {
     ARCH_QWEN3,
     ARCH_DEEPSEEK,
     ARCH_FALCON,
+    ARCH_GEMMA,
 } ModelArch;
 
 typedef enum {
