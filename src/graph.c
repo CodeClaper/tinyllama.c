@@ -6,6 +6,7 @@
 #include "graph.h"
 #include "core.h"
 #include "mm.h"
+#include "model/model.h"
 #include "slog.h"
 #include "backend/cpu/cpu_op.h"
 
@@ -86,6 +87,14 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
 _Static_assert(GRAPH_NODE_MAX_SRC == 4,
                "graph builders pass src/weights literals with 4 entries");
 
+static GraphNode *node_add_extern(Graph *g, GraphNode *n) {
+    if (g->tail) g->tail->next = n; 
+    else g->head = n;
+    g->tail = n;
+    g->n_node++;
+    return n;
+}
+
 static GraphNode *node_add(Graph *g, GraphOp op, GraphNode *const *src,
                            TensorInfo *const *weights,
                            const u32 *params, u32 n_params) {
@@ -101,13 +110,9 @@ static GraphNode *node_add(Graph *g, GraphOp op, GraphNode *const *src,
         n->src[i]     = src ? src[i] : NULL;
         n->weights[i] = weights ? weights[i] : NULL;
     }
-    if (params && n_params) memcpy(n->params, params, n_params * sizeof(u32));
-
-    if (g->tail) g->tail->next = n;
-    else         g->head = n;
-    g->tail = n;
-    g->n_node++;
-    return n;
+    if (params && n_params) 
+        memcpy(n->params, params, n_params * sizeof(u32));
+    return node_add_extern(g, n);
 }
 
 /* Leaf input: carries a run of token ids.  Shape (ne[0] = capacity,

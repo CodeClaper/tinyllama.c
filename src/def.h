@@ -349,7 +349,7 @@ struct Session {
     Graph       *graph;
 };
 
-#define GRAPH_NODE_NONE ((GraphNode *)0)  /* invalid node handle (builder return) */
+#define GRAPH_NODE_NONE  ((GraphNode *)0) /* invalid node handle (builder return) */
 #define GRAPH_STATE_NONE ((u32)-1)        /* invalid graph_state() handle */
 
 /* Fan-in / attached-weight capacity of a node.  src[] and weights[] are
