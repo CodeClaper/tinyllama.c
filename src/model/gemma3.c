@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include "model.h"
 #include "../utils.h"
@@ -18,6 +19,7 @@ typedef struct {
     float *hb2;             /* [ffn_hidden] FFN up buffer                   */
     u32    ffn_hidden;      /* feed_forward_length (6912)                   */
     float  rope_theta;      /* RoPE frequency base (1e6)                    */
+    float  attn_scale;      /* Q scale on top of OP_ATTN's 1/sqrt(kv_dim)   */
 } Gemma3WorkSpace;
 
 static bool gemma3_init(Session *s) {
@@ -75,12 +77,25 @@ static bool gemma3_init(Session *s) {
             model_get_f32(s->en->model, k, &ws->rope_theta);
     }
 
+    /* Attention scale.  OP_ATTN already applies 1/sqrt(kv_head_dim) to the
+     * scores, so this factor is the Gemma3 correction on top of it:
+     * Gemma3 scales by 1/sqrt(query_pre_attn_scalar), which equals
+     * 1/sqrt(head_dim) for every size except 27B (n_layer == 62), where
+     * query_pre_attn_scalar is n_embd / n_head instead.  (Same rule as
+     * llama.cpp, which detects the 27B variant from the layer count.) */
+    if (c->n_layer == 62 && c->n_head > 0) {
+        float qk_scalar = (float)c->n_embd / (float)c->n_head;
+        ws->attn_scale  = sqrtf((float)kv_head_dim / qk_scalar);
+    } else {
+        ws->attn_scale  = 1.0f;
+    }
+
     slog(INFO, "Gemma3 init: n_embd=%u n_head=%u n_kv_head=%u head_dim=%u kv_head_dim=%u "
          "n_layer=%u n_vocab=%u ctx_size=%u",
          c->n_embd, c->n_head, c->n_kv_head, c->head_dim, kv_head_dim,
          c->n_layer, c->n_vocab, s->ctx_size);
-    slog(INFO, "Gemma3 init: ffn_hidden=%u rope_theta=%.6f",
-         ws->ffn_hidden, ws->rope_theta);
+    slog(INFO, "Gemma3 init: ffn_hidden=%u rope_theta=%.6f attn_scale=%.6f",
+         ws->ffn_hidden, ws->rope_theta, ws->attn_scale);
 
     s->arch_data = ws;
     return true;
@@ -125,8 +140,40 @@ static void gemma3_free(Session *s) {
 }
 
 
-static int gemma3_decode(const u8 *raw, int raw_len, char *out, int max_len) {
+/* Hex digit value, or -1 when c is not a hex digit. */
+static int gemma3_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 
+/* Gemma uses a SentencePiece vocab: pieces carry the U+2581 word-boundary
+ * space and arbitrary bytes are represented by "<0xHH>" fallback tokens. */
+static int gemma3_decode(const u8 *raw, int raw_len, char *out, int max_len) {
+    int w = 0;
+
+    if (raw_len == 6 && raw[0] == '<' && raw[1] == '0' && raw[2] == 'x' && raw[5] == '>') {
+        int hi = gemma3_hex_digit((char)raw[3]);
+        int lo = gemma3_hex_digit((char)raw[4]);
+        if (hi >= 0 && lo >= 0) {
+            if (w < max_len) out[w++] = (char)(unsigned char)(hi * 16 + lo);
+            if (w < max_len) out[w] = '\0';
+            return w;
+        }
+    }
+
+    for (int i = 0; i < raw_len && w < max_len; ) {
+        /* U+2581 (E2 96 81) is the SentencePiece space marker. */
+        if (raw[i] == 0xE2 && i + 2 < raw_len && raw[i + 1] == 0x96 && raw[i + 2] == 0x81) {
+            out[w++] = ' ';
+            i += 3;
+        } else {
+            out[w++] = (char)raw[i++];
+        }
+    }
+    if (w < max_len) out[w] = '\0';
+    return w;
 }
 
 static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
@@ -156,7 +203,82 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
 
     GraphNode *cur = graph_embed(g, in, te, n_tokens);
     if (cur == GRAPH_NODE_NONE) goto fail;
-    
+
+    for (u32 l = 0; l < c->n_layer; l++) {
+        LayerWeights *lw = &w->layers[l];
+
+        TensorInfo *t_q = lw->tensors[TENSOR_ATTN_Q];
+        TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
+        TensorInfo *t_v = lw->tensors[TENSOR_ATTN_V];
+        TensorInfo *t_o = lw->tensors[TENSOR_ATTN_OUT];
+        TensorInfo *t_g = lw->tensors[TENSOR_FFN_GATE];
+        TensorInfo *t_u = lw->tensors[TENSOR_FFN_UP];
+        TensorInfo *t_d = lw->tensors[TENSOR_FFN_DOWN];
+        if (!t_q || !t_k || !t_v || !t_o || !t_g || !t_u || !t_d) {
+            slog(WARN, "graph_build: layer %u missing tensors (fused QKV unsupported)", l);
+            goto fail;
+        }
+
+        /* ---- Attention block ---- */
+        GraphNode *n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
+        if (n == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *q = graph_mul_mat(g, n, t_q, (q_dim != n_embd) && t_q->dim[0] == (i64)n_embd);
+        GraphNode *k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
+        GraphNode *v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
+        
+        q = graph_rms_norm(g, q, lw->tensors[TENSOR_ATTN_Q_NORM]);
+        k = graph_rms_norm(g, k, lw->tensors[TENSOR_ATTN_K_NORM]);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
+
+        q = graph_rope(g, q, theta, c->n_head, c->head_dim, c->head_dim);
+        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->kv_head_dim);
+        if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
+        
+        q = graph_scale(g, q, ws->attn_scale);
+        if (q == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *attn = graph_attn(g, q, k, v, l);
+        if (attn == GRAPH_NODE_NONE) goto fail;
+        
+        attn = graph_rms_norm(g, attn, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        if (attn == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
+        if (o == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *h = graph_binary(g, OP_ADD, cur, o);
+        if (h == GRAPH_NODE_NONE) goto fail;
+
+        /* ---- SwiGLU FFN ---- */
+        GraphNode *hn = graph_rms_norm(g, h, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        if (hn == GRAPH_NODE_NONE) goto fail;
+        
+        GraphNode *gate = graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd);
+        gate = graph_gelu(g, gate);
+        GraphNode *up = graph_mul_mat(g, hn, t_u, t_u->dim[0] == (i64)n_embd);
+        if (gate == GRAPH_NODE_NONE || up == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *mul = graph_binary(g, OP_MUL, gate, up);
+        if (mul == GRAPH_NODE_NONE) goto fail;
+
+        GraphNode *down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
+        if (down == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_binary(g, OP_ADD, h, down);
+        if (cur == GRAPH_NODE_NONE) goto fail;
+    }
+
+    /* ---- Final norm ---- */
+    GraphNode *fn = graph_rms_norm(g, cur, w->tensors[TENSOR_OUTPUT_NORM]);
+    if (fn == GRAPH_NODE_NONE) goto fail;
+
+    /* ---- LM head (tied to token embeddings when absent) ---- */
+    TensorInfo *t_out = w->tensors[TENSOR_OUTPUT];
+    if (!t_out) t_out = te;
+    cur = graph_mul_mat(g, fn, t_out, t_out->dim[0] == (i64)n_embd);
+    if (cur == GRAPH_NODE_NONE) goto fail;
     return g;
 fail:
     graph_free(g);
