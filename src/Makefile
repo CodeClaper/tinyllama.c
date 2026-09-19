@@ -57,13 +57,13 @@ endif
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o graph.o \
        tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-       model/gemma.o \
+       model/gemma3.o \
        backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o graph.o \
               tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
-              model/gemma.o \
+              model/gemma3.o \
               backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
 
 all: server chat bench
@@ -137,8 +137,8 @@ model/deepseek.o: model/deepseek.c model/model.h def.h
 model/falcon.o: model/falcon.c model/model.h def.h
 	$(CC) $(CFLAGS) -c model/falcon.c -o $@
 
-model/gemma.o: model/gemma.c model/model.h def.h
-	$(CC) $(CFLAGS) -c model/gemma.c -o $@
+model/gemma3.o: model/gemma3.c model/model.h def.h
+	$(CC) $(CFLAGS) -c model/gemma3.c -o $@
 
 backend/cpu/cpu.o: backend/cpu/cpu.c backend/cpu/cpu_arm.c backend/cpu/cpu_x86.c backend/cpu/cpu.h def.h quants.h
 	$(CC) $(CFLAGS) -c backend/cpu/cpu.c -o $@

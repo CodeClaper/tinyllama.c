@@ -5,7 +5,7 @@
 #include "../graph.h"
 #include "../slog.h"
 
-static bool gemma_init(Session *s) {
+static bool gemma3_init(Session *s) {
     ArchConfig *c = &s->cfg;
 
     KvCache *kc   = &s->cache;
@@ -27,7 +27,7 @@ static bool gemma_init(Session *s) {
     return true;
 }
 
-static void gemma_reset(Session *s) {
+static void gemma3_reset(Session *s) {
     KvCache *kc = &s->cache;
     for (u32 i = 0; i < kc->n_layer; i++) {
         kc->std[i].n = 0;
@@ -35,7 +35,7 @@ static void gemma_reset(Session *s) {
     s->n_tokens = 0;
 }
 
-static void gemma_free(Session *s) {
+static void gemma3_free(Session *s) {
     KvCache *kc = &s->cache;
     if (kc->std) {
         for (u32 i = 0; i < kc->n_layer; i++) {
@@ -51,8 +51,8 @@ static void gemma_free(Session *s) {
     s->logits = NULL;
 }
 
-const ArchOps gemma_ops = {
-    .init          = gemma_init,
-    .free          = gemma_free,
-    .reset         = gemma_reset,
+const ArchOps gemma3_ops = {
+    .init          = gemma3_init,
+    .free          = gemma3_free,
+    .reset         = gemma3_reset,
 };
