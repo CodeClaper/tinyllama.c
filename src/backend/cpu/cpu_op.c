@@ -109,7 +109,18 @@ static bool op_unary(OpCtx *c, void (*f)(float *, int)) {
 /* softmax() takes a u32 count; adapt it to the unary signature. */
 static void softmax_n(float *x, int n) { softmax(x, (u32)n); }
 
+/* tanh-approximation GELU (== ggml_gelu / HF gelu_pytorch_tanh). */
+static void gelu_n(float *x, int n) {
+    const float GELU_COEF_A     = 0.044715f;
+    const float SQRT_2_OVER_PI  = 0.7978845608028654f;
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        x[i] = 0.5f * v * (1.0f + tanhf(SQRT_2_OVER_PI * v * (1.0f + GELU_COEF_A * v * v)));
+    }
+}
+
 static bool op_silu(OpCtx *c)    { return op_unary(c, silu); }
+static bool op_gelu(OpCtx *c)    { return op_unary(c, gelu_n); }
 static bool op_softmax(OpCtx *c) { return op_unary(c, softmax_n); }
 
 static bool op_scale(OpCtx *c) {
@@ -361,6 +372,7 @@ bool cpu_graph_op(OpCtx *c) {
         case OP_ADD:
         case OP_MUL:            return op_binary(c);
         case OP_SILU:           return op_silu(c);
+        case OP_GELU:           return op_gelu(c);
         case OP_SCALE:          return op_scale(c);
         case OP_SOFTMAX:        return op_softmax(c);
         case OP_ROPE_NEOX:      return op_rope_neox(c);

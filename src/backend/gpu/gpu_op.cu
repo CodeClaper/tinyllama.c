@@ -235,6 +235,19 @@ __global__ void k_silu(const float *__restrict__ src, float *__restrict__ dst,
     }
 }
 
+/* ---- OP_GELU --------------------------------------------------- */
+__global__ void k_gelu(const float *__restrict__ src, float *__restrict__ dst,
+                       u32 od, u32 base, u64 total) {
+    u64 idx     = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 gstride = (u64)gridDim.x * blockDim.x;
+    for (; idx < total; idx += gstride) {
+        u32 p = (u32)(idx / od), j = (u32)(idx % od);
+        float v = src[((u64)base + p) * od + j];
+        float u = 0.7978845608028654f * v * (1.0f + 0.044715f * v * v);
+        dst[idx] = 0.5f * v * (1.0f + tanhf(u));
+    }
+}
+
 /* ---- OP_SCALE -------------------------------------------------- */
 __global__ void k_scale(const float *__restrict__ src, float *__restrict__ dst,
                         u32 od, u32 base, u64 total, float scale) {
@@ -574,6 +587,13 @@ static bool gpu_op_silu(OpCtx *c) {
     return true;
 }
 
+static bool gpu_op_gelu(OpCtx *c) {
+    k_gelu<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
+        op_src(c, 0), c->dst, c->od, c->base, (u64)c->r * c->od);
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 static bool gpu_op_scale(OpCtx *c) {
     u32 bits = op_param(c, 0);
     float scale;
@@ -714,6 +734,7 @@ bool gpu_graph_op(OpCtx *c) {
         case OP_ADD:
         case OP_MUL:            return gpu_op_binary(c);
         case OP_SILU:           return gpu_op_silu(c);
+        case OP_GELU:           return gpu_op_gelu(c);
         case OP_SCALE:          return gpu_op_scale(c);
         case OP_SOFTMAX:        return gpu_op_softmax(c);
         case OP_ROPE_NEOX:      return gpu_op_rope_neox(c);

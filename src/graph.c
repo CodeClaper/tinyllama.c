@@ -164,6 +164,11 @@ GraphNode *graph_silu(Graph *g, GraphNode *src) {
     return node_add(g, OP_SILU, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);
 }
 
+GraphNode *graph_gelu(Graph *g, GraphNode *src) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    return node_add(g, OP_GELU, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);
+}
+
 GraphNode *graph_softmax(Graph *g, GraphNode *src) {
     if (!g || !src) return GRAPH_NODE_NONE;
     return node_add(g, OP_SOFTMAX, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);

@@ -1300,6 +1300,24 @@ kernel void op_silu(device const float *src [[buffer(0)]],
     }
 }
 
+/* OP_GELU: args [od, base, total(2)]; grid covers total. */
+kernel void op_gelu(device const float *src [[buffer(0)]],
+                    device float *dst [[buffer(1)]],
+                    device const uint32_t *a [[buffer(2)]],
+                    uint gid [[thread_position_in_grid]],
+                    uint tptg [[threads_per_threadgroup]],
+                    uint ntg [[threadgroups_per_grid]]) {
+    uint od = a[0], base = a[1];
+    uint64_t total = op_u64(a, 2);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        float v = src[((uint64_t)base + p) * od + j];
+        float u = 0.7978845608028654f * v * (1.0f + 0.044715f * v * v);
+        dst[idx] = 0.5f * v * (1.0f + tanh(u));
+    }
+}
+
 /* OP_SCALE: args [od, base, total(2), scale(f32)]; grid covers total. */
 kernel void op_scale(device const float *src [[buffer(0)]],
                      device float *dst [[buffer(1)]],

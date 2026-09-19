@@ -375,6 +375,7 @@ typedef enum {
     OP_ROPE_NEOX,       /* out = rope(in)                                 */
     OP_SOFTMAX,         /* out = softmax(x)  (per-row over last dim)      */
     OP_SILU,            /* out = silu(x)                                  */
+    OP_GELU,            /* out = gelu(x)                                  */
     OP_EMBED,           /* out = token_embd[token]                        */
     OP_BIAS,            /* out = x + bias      (per-row over weight)      */
     OP_ATTN,            /* out = attn(q, k, v) (causal multi-head, GQA)   */
