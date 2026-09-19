@@ -200,17 +200,17 @@ GraphNode *graph_ssm_conv(Graph *g, GraphNode *src, TensorInfo *weight, u32 stat
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, params, 2);
 }
 
-GraphNode *graph_ssm_delta(Graph *g, GraphNode *fused, GraphNode *alpha, GraphNode *beta,
-                           TensorInfo *ssm_a, TensorInfo *dt_bias, TensorInfo *norm,
-                           u32 state, u32 n_v_heads, u32 n_k_heads, u32 head_dim) {
-    if (!g || !fused || !alpha || !beta) return GRAPH_NODE_NONE;
-    if (!ssm_a || !dt_bias || n_v_heads == 0 || head_dim == 0) return GRAPH_NODE_NONE;
-    if (n_k_heads == 0 || n_v_heads % n_k_heads != 0) return GRAPH_NODE_NONE;
-    if (state >= g->n_state) return GRAPH_NODE_NONE;
-    u32 params[] = { state, n_v_heads, n_k_heads, head_dim };
+GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args) {
+    if (!g || !args) return GRAPH_NODE_NONE;
+    if (!args->fused || !args->alpha || !args->beta) return GRAPH_NODE_NONE;
+    if (!args->ssm_a || !args->dt_bias || args->n_v_heads == 0 || args->head_dim == 0) return GRAPH_NODE_NONE;
+    if (args->n_k_heads == 0 || args->n_v_heads % args->n_k_heads != 0) return GRAPH_NODE_NONE;
+    if (args->state >= g->n_state) return GRAPH_NODE_NONE;
+    u32 params[] = { args->state, args->n_v_heads, args->n_k_heads, args->head_dim };
     return node_add(g, OP_SSM_DELTA,
-                    (GraphNode *[]){ fused, alpha, beta, NULL },
-                    (TensorInfo *[]){ ssm_a, dt_bias, norm, NULL }, params, 4);
+                    (GraphNode *[]){ args->fused, args->alpha, args->beta, NULL },
+                    (TensorInfo *[]){ args->ssm_a, args->dt_bias, args->norm, NULL },
+                    params, 4);
 }
 
 /* Caller-owned state buffers.  The graph only borrows the pointer, so the
@@ -520,7 +520,7 @@ static bool arena_plan(Graph *g, Session *s) {
  * plan; the selection must run BEFORE the arena sweep, because the
  * backend decides where the plan's arena is allocated (VRAM vs host).
  * A caller may pin the backend explicitly by pre-seeding the plan. */
-bool backend_plan(Graph *g) {
+static bool backend_plan(Graph *g) {
     if (!g) return false;
     if (!g->plan) {
         g->plan = scalloc(1, sizeof(GraphPlan));

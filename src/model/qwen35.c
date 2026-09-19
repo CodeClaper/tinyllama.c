@@ -487,8 +487,19 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             GraphNode *b = graph_mul_mat(g, n, t_b, ssm_mm_trans(t_b, n_v, n_embd));
             if (a == GRAPH_NODE_NONE || b == GRAPH_NODE_NONE) goto fail;
 
-            GraphNode *d = graph_ssm_delta(g, f, a, b, t_A, t_dt, t_sn, ssm_st,
-                                           n_v, n_k, hd_v);
+            GraphSsmDelta delta = {
+                .fused     = f,
+                .alpha     = a,
+                .beta      = b,
+                .ssm_a     = t_A,
+                .dt_bias   = t_dt,
+                .norm      = t_sn,
+                .state     = ssm_st,
+                .n_v_heads = n_v,
+                .n_k_heads = n_k,
+                .head_dim  = hd_v,
+            };
+            GraphNode *d = graph_ssm_delta(g, &delta);
             if (d == GRAPH_NODE_NONE) goto fail;
 
             /* Output gate: silu(gate @ n) * delta_out. */
