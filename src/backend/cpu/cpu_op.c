@@ -21,7 +21,7 @@
 
 /* Row-major source tensor of edge `k`. */
 static float *op_src(const OpCtx *c, int k) {
-    return (float *)c->g->node[(u32)c->node->src[k]].data;
+    return (float *)c->node->src[k]->data;
 }
 
 /* Op-specific parameter `k` of the node being executed. */
@@ -32,7 +32,7 @@ static u32 op_param(const OpCtx *c, int k) {
 static bool op_embed(OpCtx *c) {
     TensorInfo *te = c->node->weights[0];
     bool te_trans  = (te->dim[0] == (i64)c->cfg->n_vocab);
-    u32 *tok = (u32 *)c->g->node[(u32)c->node->src[0]].data;
+    u32 *tok = (u32 *)c->node->src[0]->data;
 
     /* Always the full batch: the embedding of every input row is needed. */
     for (u32 p = 0; p < c->n; p++) {

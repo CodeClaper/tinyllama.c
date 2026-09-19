@@ -254,7 +254,7 @@ static id<MTLBuffer> state_get(const void *host, size_t bytes, bool reset) {
  * ================================================================ */
 
 static float *op_src(const OpCtx *c, int k) {
-    return (float *)c->g->node[(u32)c->node->src[k]].data;
+    return (float *)c->node->src[k]->data;
 }
 static u32 op_param(const OpCtx *c, int k) {
     return c->node->params[k];

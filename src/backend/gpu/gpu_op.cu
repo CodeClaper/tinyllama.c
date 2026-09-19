@@ -40,7 +40,7 @@ static inline unsigned op_block_count(u64 n) {
 
 /* Mirror op_src()/op_param() in graph.c. */
 static inline float *op_src(const OpCtx *c, int k) {
-    return (float *)c->g->node[(u32)c->node->src[k]].data;
+    return (float *)c->node->src[k]->data;
 }
 static inline u32 op_param(const OpCtx *c, int k) {
     return c->node->params[k];
@@ -492,7 +492,7 @@ __global__ void k_attn(const float *__restrict__ qd, const float *__restrict__ c
 static bool gpu_op_embed(OpCtx *c) {
     TensorInfo *te = c->node->weights[0];
     bool te_trans  = (te->dim[0] == (i64)c->cfg->n_vocab);
-    const u32 *tok = (const u32 *)c->g->node[(u32)c->node->src[0]].data;
+    const u32 *tok = (const u32 *)c->node->src[0]->data;
     const u8 *raw  = gpu_weight_dev(te);
     if (!raw || !tok) return false;
     /* Row-major table: token t at [t*od, t*od+od); column-major:

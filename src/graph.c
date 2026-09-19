@@ -75,7 +75,7 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
 }
 
 /* Append a node; output shapes are derived at execution time.
- * src[]   = source node indices, weights[] = per-source weight tensors,
+ * src[]   = source nodes, weights[] = per-source weight tensors,
  * params[] = op-specific parameters, n_params = how many u32s of it are
  * valid (ops that need none pass NULL / 0).  The node's full params block
  * is always zeroed, so unspecified entries read back as 0.
@@ -85,143 +85,151 @@ static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
  * so the macro and the literals must move together. */
 _Static_assert(GRAPH_NODE_MAX_SRC == 4,
                "graph builders pass src/weights literals with 4 entries");
-static u32 node_add(Graph *g, GraphOp op, const int *src, TensorInfo *const *weights,
-                    const u32 *params, u32 n_params) {
+
+static GraphNode *node_add(Graph *g, GraphOp op, GraphNode *const *src,
+                           TensorInfo *const *weights,
+                           const u32 *params, u32 n_params) {
     if (!g) return GRAPH_NODE_NONE;
     if (n_params > sizeof(((GraphNode *)0)->params) / sizeof(u32)) return GRAPH_NODE_NONE;
-    if (!grow((void **)&g->node, &g->cap, g->n_node + 1, sizeof(GraphNode))) return GRAPH_NODE_NONE;
-    GraphNode *n = &g->node[g->n_node];
-    n->op = op;
+
+    GraphNode *n = scalloc(1, sizeof(GraphNode));
+    if (!n) return GRAPH_NODE_NONE;
+
+    n->op  = op;
+    n->idx = g->n_node;
     for (int i = 0; i < GRAPH_NODE_MAX_SRC; i++) {
-        n->src[i]     = src ? src[i] : -1;
+        n->src[i]     = src ? src[i] : NULL;
         n->weights[i] = weights ? weights[i] : NULL;
     }
-    memset(n->params, 0, sizeof(n->params));
     if (params && n_params) memcpy(n->params, params, n_params * sizeof(u32));
-    return g->n_node++;
+
+    if (g->tail) g->tail->next = n;
+    else         g->head = n;
+    g->tail = n;
+    g->n_node++;
+    return n;
 }
 
 /* Leaf input: carries a run of token ids.  Shape (ne[0] = capacity,
  * nb[0] = element size) is recorded in the node itself; the data slot
  * lives in the graph arena and is filled by graph_compute() at
  * execution time with the concrete tokens. */
-u32 graph_input(Graph *g, u32 n_tokens) {
+GraphNode *graph_input(Graph *g, u32 n_tokens) {
     if (!g || n_tokens == 0) return GRAPH_NODE_NONE;
 
-    u32 n = node_add(g, OP_INPUT, (int[]){ -1, -1, -1, -1 }, NULL, NULL, 0);
-    if (n == GRAPH_NODE_NONE) return GRAPH_NODE_NONE;
+    GraphNode *node = node_add(g, OP_INPUT, (GraphNode *[]){ NULL, NULL, NULL, NULL },
+                               NULL, NULL, 0);
+    if (!node) return GRAPH_NODE_NONE;
 
-    GraphNode *node = &g->node[n];
     node->ne[0] = n_tokens;       /* capacity: [n_tokens]     */
     node->nb[0] = sizeof(u32);    /* element stride           */
-    return n;
+    return node;
 }
 
-u32 graph_rms_norm(Graph *g, u32 src, TensorInfo *weight) {
-    if (!g || src >= g->n_node || !weight) return GRAPH_NODE_NONE;
-    return node_add(g, OP_RMS_NORM, (int[]){ (int)src, -1, -1, -1 },
+GraphNode *graph_rms_norm(Graph *g, GraphNode *src, TensorInfo *weight) {
+    if (!g || !src || !weight) return GRAPH_NODE_NONE;
+    return node_add(g, OP_RMS_NORM, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL, 0);
 }
 
-u32 graph_rms_norm_heads(Graph *g, u32 src, TensorInfo *weight,
-                         u32 n_heads, u32 head_dim, u32 in_stride, u32 out_stride) {
-    if (!g || src >= g->n_node || !weight) return GRAPH_NODE_NONE;
+GraphNode *graph_rms_norm_heads(Graph *g, GraphNode *src, TensorInfo *weight,
+                                u32 n_heads, u32 head_dim, u32 in_stride, u32 out_stride) {
+    if (!g || !src || !weight) return GRAPH_NODE_NONE;
     if (n_heads == 0 || head_dim == 0) return GRAPH_NODE_NONE;
     if (in_stride < head_dim || out_stride < head_dim) return GRAPH_NODE_NONE;
     u32 params[] = { n_heads, head_dim, in_stride, out_stride };
-    return node_add(g, OP_RMS_NORM_HEADS, (int[]){ (int)src, -1, -1, -1 },
+    return node_add(g, OP_RMS_NORM_HEADS, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, params, 4);
 }
 
-u32 graph_mul_mat(Graph *g, u32 src, TensorInfo *weight, bool trans) {
-    if (!g || src >= g->n_node || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
-    return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (int[]){ (int)src, -1, -1, -1 },
+GraphNode *graph_mul_mat(Graph *g, GraphNode *src, TensorInfo *weight, bool trans) {
+    if (!g || !src || !weight || weight->ndim < 2) return GRAPH_NODE_NONE;
+    return node_add(g, trans ? OP_MATMUL_T : OP_MATMUL, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL, 0);
 }
 
-u32 graph_binary(Graph *g, GraphOp op, u32 a_id, u32 b_id) {
+GraphNode *graph_binary(Graph *g, GraphOp op, GraphNode *a, GraphNode *b) {
     if (op != OP_ADD && op != OP_MUL) return GRAPH_NODE_NONE;
-    if (!g || a_id >= g->n_node || b_id >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, op, (int[]){ (int)a_id, (int)b_id, -1, -1 }, NULL, NULL, 0);
+    if (!g || !a || !b) return GRAPH_NODE_NONE;
+    return node_add(g, op, (GraphNode *[]){ a, b, NULL, NULL }, NULL, NULL, 0);
 }
 
-u32 graph_silu(Graph *g, u32 src) {
-    if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SILU, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL, 0);
+GraphNode *graph_silu(Graph *g, GraphNode *src) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    return node_add(g, OP_SILU, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);
 }
 
-u32 graph_softmax(Graph *g, u32 src) {
-    if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
-    return node_add(g, OP_SOFTMAX, (int[]){ (int)src, -1, -1, -1 }, NULL, NULL, 0);
+GraphNode *graph_softmax(Graph *g, GraphNode *src) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    return node_add(g, OP_SOFTMAX, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);
 }
 
-u32 graph_bias(Graph *g, u32 src, TensorInfo *bias) {
-    if (!g || src >= g->n_node || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
-    return node_add(g, OP_BIAS, (int[]){ (int)src, -1, -1, -1 },
+GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias) {
+    if (!g || !src || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
+    return node_add(g, OP_BIAS, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ bias, NULL, NULL, NULL }, NULL, 0);
 }
 
-u32 graph_sigmoid_gate(Graph *g, u32 a, u32 gate, u32 n_heads, u32 head_dim) {
-    if (!g || a >= g->n_node || gate >= g->n_node) return GRAPH_NODE_NONE;
+GraphNode *graph_sigmoid_gate(Graph *g, GraphNode *a, GraphNode *gate,
+                              u32 n_heads, u32 head_dim) {
+    if (!g || !a || !gate) return GRAPH_NODE_NONE;
     if (n_heads == 0 || head_dim == 0) return GRAPH_NODE_NONE;
     u32 params[] = { n_heads, head_dim };
-    return node_add(g, OP_SIGMOID_GATE, (int[]){ (int)a, (int)gate, -1, -1 },
+    return node_add(g, OP_SIGMOID_GATE, (GraphNode *[]){ a, gate, NULL, NULL },
                     NULL, params, 2);
 }
 
-u32 graph_ssm_conv(Graph *g, u32 src, TensorInfo *weight, u32 state, u32 kernel) {
-    if (!g || src >= g->n_node || !weight || kernel == 0) return GRAPH_NODE_NONE;
+GraphNode *graph_ssm_conv(Graph *g, GraphNode *src, TensorInfo *weight, u32 state, u32 kernel) {
+    if (!g || !src || !weight || kernel == 0) return GRAPH_NODE_NONE;
     if (state >= g->n_state) return GRAPH_NODE_NONE;
     u32 params[] = { state, kernel };
-    return node_add(g, OP_SSM_CONV, (int[]){ (int)src, -1, -1, -1 },
+    return node_add(g, OP_SSM_CONV, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, params, 2);
 }
 
-u32 graph_ssm_delta(Graph *g, u32 fused, u32 alpha, u32 beta,
-                    TensorInfo *ssm_a, TensorInfo *dt_bias, TensorInfo *norm,
-                    u32 state, u32 n_v_heads, u32 n_k_heads, u32 head_dim) {
-    if (!g || fused >= g->n_node || alpha >= g->n_node || beta >= g->n_node)
-        return GRAPH_NODE_NONE;
+GraphNode *graph_ssm_delta(Graph *g, GraphNode *fused, GraphNode *alpha, GraphNode *beta,
+                           TensorInfo *ssm_a, TensorInfo *dt_bias, TensorInfo *norm,
+                           u32 state, u32 n_v_heads, u32 n_k_heads, u32 head_dim) {
+    if (!g || !fused || !alpha || !beta) return GRAPH_NODE_NONE;
     if (!ssm_a || !dt_bias || n_v_heads == 0 || head_dim == 0) return GRAPH_NODE_NONE;
     if (n_k_heads == 0 || n_v_heads % n_k_heads != 0) return GRAPH_NODE_NONE;
     if (state >= g->n_state) return GRAPH_NODE_NONE;
     u32 params[] = { state, n_v_heads, n_k_heads, head_dim };
     return node_add(g, OP_SSM_DELTA,
-                    (int[]){ (int)fused, (int)alpha, (int)beta, -1 },
+                    (GraphNode *[]){ fused, alpha, beta, NULL },
                     (TensorInfo *[]){ ssm_a, dt_bias, norm, NULL }, params, 4);
 }
 
 /* Caller-owned state buffers.  The graph only borrows the pointer, so the
  * owner (the arch workspace) keeps control of allocation and reset. */
 u32 graph_state(Graph *g, void *ptr) {
-    if (!g || !ptr) return GRAPH_NODE_NONE;
+    if (!g || !ptr) return GRAPH_STATE_NONE;
     if (!grow((void **)&g->state, &g->state_cap, g->n_state + 1, sizeof(void *)))
-        return GRAPH_NODE_NONE;
+        return GRAPH_STATE_NONE;
     g->state[g->n_state] = ptr;
     return g->n_state++;
 }
 
-u32 graph_attn(Graph *g, u32 q, u32 k, u32 v, u32 layer) {
-    if (!g || q >= g->n_node || k >= g->n_node || v >= g->n_node) return GRAPH_NODE_NONE;
+GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer) {
+    if (!g || !q || !k || !v) return GRAPH_NODE_NONE;
     u32 params[] = { layer };
-    return node_add(g, OP_ATTN, (int[]){ (int)q, (int)k, (int)v, -1 }, NULL, params, 1);
+    return node_add(g, OP_ATTN, (GraphNode *[]){ q, k, v, NULL }, NULL, params, 1);
 }
 
-u32 graph_rope(Graph *g, u32 src, float theta, u32 n_heads, u32 head_dim, u32 rope_dim) {
-    if (!g || src >= g->n_node) return GRAPH_NODE_NONE;
+GraphNode *graph_rope(Graph *g, GraphNode *src, float theta,
+                      u32 n_heads, u32 head_dim, u32 rope_dim) {
+    if (!g || !src) return GRAPH_NODE_NONE;
     if (head_dim == 0 || rope_dim == 0 || rope_dim > head_dim) return GRAPH_NODE_NONE;
     u32 bits;
     memcpy(&bits, &theta, sizeof(bits));   /* float bits in params[0] */
     u32 params[] = { bits, n_heads, head_dim, rope_dim };
-    return node_add(g, OP_ROPE_NEOX, (int[]){ (int)src, -1, -1, -1 }, NULL, params, 4);
+    return node_add(g, OP_ROPE_NEOX, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 4);
 }
 
-u32 graph_embed(Graph *g, u32 src, TensorInfo *weight, u32 n_tokens) {
+GraphNode *graph_embed(Graph *g, GraphNode *src, TensorInfo *weight, u32 n_tokens) {
     if (!g || !weight || weight->ndim < 2 || n_tokens == 0) return GRAPH_NODE_NONE;
-    if (src == GRAPH_NODE_NONE || src >= g->n_node) return GRAPH_NODE_NONE;
-    const GraphNode *tok = &g->node[src];
-    if (tok->op != OP_INPUT || tok->ne[0] != (int)n_tokens) return GRAPH_NODE_NONE;
-    return node_add(g, OP_EMBED, (int[]){ (int)src, -1, -1, -1 },
+    if (!src || src->op != OP_INPUT || src->ne[0] != (int)n_tokens) return GRAPH_NODE_NONE;
+    return node_add(g, OP_EMBED, (GraphNode *[]){ src, NULL, NULL, NULL },
                     (TensorInfo *[]){ weight, NULL, NULL, NULL }, NULL, 0);
 }
 
@@ -271,7 +279,12 @@ void graph_free(Graph *g) {
     }
     sfree(g->state);   /* borrowed pointers only: targets outlive us */
     g->state = NULL;
-    sfree(g->node);
+    for (GraphNode *n = g->head; n; ) {
+        GraphNode *next = n->next;
+        sfree(n);
+        n = next;
+    }
+    g->head = g->tail = NULL;
     sfree(g);
 }
 
@@ -341,7 +354,7 @@ static u32 node_out_dim(const GraphNode *node, const u32 *dims, const ArchConfig
         case OP_ATTN:
             return c->n_head * c->head_dim;
         default:
-            return node->src[0] >= 0 ? dims[(u32)node->src[0]] : 0;
+            return node->src[0] ? dims[node->src[0]->idx] : 0;
     }
 }
 
@@ -391,20 +404,25 @@ static void arena_free(BackendType backend, void *arena) {
 static bool arena_plan(Graph *g, Session *s) {
     u32 n_node = g->n_node;
     ArchConfig *c = &s->cfg;
+    if (n_node == 0) return true;
+
+    /* Materialise the linked list into build order for random access. */
+    GraphNode *nodes[n_node];
+    for (GraphNode *n = g->head; n; n = n->next) nodes[n->idx] = n;
 
     /* Sink marks and per-node output widths (mirrors graph_compute). */
     u32 sink[n_node], dims[n_node];
     for (u32 i = 0; i < n_node; i++) sink[i] = 1;
     for (u32 j = 0; j < n_node; j++)
         for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
-            if (g->node[j].src[k] >= 0) sink[(u32)g->node[j].src[k]] = 0;
+            if (nodes[j]->src[k]) sink[nodes[j]->src[k]->idx] = 0;
     for (u32 i = 0; i < n_node; i++)
-        dims[i] = node_out_dim(&g->node[i], dims, c);
+        dims[i] = node_out_dim(nodes[i], dims, c);
 
     /* Byte needs at full capacity (INPUT slots hold u32 token ids). */
     size_t need[n_node];
     for (u32 i = 0; i < n_node; i++) {
-        const GraphNode *node = &g->node[i];
+        const GraphNode *node = nodes[i];
         u32 rows = node_cap_rows(node, sink[i] != 0, s->ctx_size);
         need[i] = align16((node->op == OP_INPUT)
                               ? (size_t)node->ne[0] * sizeof(u32)
@@ -416,8 +434,8 @@ static bool arena_plan(Graph *g, Session *s) {
     for (u32 i = 0; i < n_node; i++) release[i] = i;
     for (u32 j = 0; j < n_node; j++)
         for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
-            if (g->node[j].src[k] >= 0) {
-                u32 src = (u32)g->node[j].src[k];
+            if (nodes[j]->src[k]) {
+                u32 src = nodes[j]->src[k]->idx;
                 if (j > release[src]) release[src] = j;
             }
 
@@ -478,7 +496,7 @@ static bool arena_plan(Graph *g, Session *s) {
     g->plan = p;
 
     for (u32 i = 0; i < n_node; i++) {
-        GraphNode *node = &g->node[i];
+        GraphNode *node = nodes[i];
         node->data      = (u8 *)p->arena + node_off[i];
         node->data_cap  = need[i];
     }
@@ -540,8 +558,7 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     }
 
     /* Bind the batch's token ids into each OP_INPUT leaf. */
-    for (u32 i = 0; i < g->n_node; i++) {
-        GraphNode *node = &g->node[i];
+    for (GraphNode *node = g->head; node; node = node->next) {
         if (node->op != OP_INPUT) continue;
         if (n > (u32)node->ne[0]) {
             slog(WARN, "graph_compute: batch of %u exceeds graph capacity", n);
@@ -563,18 +580,22 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     ArchConfig *c = &s->cfg;
     u32 n_node = g->n_node;
 
+    /* Materialise the linked list into build order for random access. */
+    GraphNode *nodes[n_node];
+    for (GraphNode *it = g->head; it; it = it->next) nodes[it->idx] = it;
+
     /* Sink detection: a node is a sink iff no other node reads it.
      * (Edges point strictly backward, so scanning all nodes is enough.) */
     u32 sink[n_node];
     for (u32 i = 0; i < n_node; i++) sink[i] = 1;
     for (u32 j = 0; j < n_node; j++)
         for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
-            if (g->node[j].src[k] >= 0) sink[(u32)g->node[j].src[k]] = 0;
+            if (nodes[j]->src[k]) sink[nodes[j]->src[k]->idx] = 0;
 
     /* Elements per row of each node's output (float count). */
     u32 dims[n_node];
     for (u32 i = 0; i < n_node; i++)
-        dims[i] = node_out_dim(&g->node[i], dims, c);
+        dims[i] = node_out_dim(nodes[i], dims, c);
 
     /* Attention score scratch: the batch's last row attends every key
      * in the cache, positions 0..pos+n-1. */
@@ -587,7 +608,7 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
 
     /* Walk the graph in build order (== topo order). */
     for (u32 i = 0; i < n_node; i++) {
-        GraphNode *node = &g->node[i];
+        GraphNode *node = nodes[i];
         if (node->op == OP_INPUT) continue;
         u32 od   = dims[i];
         u32 r    = sink[i] ? 1u : n;            /* sink: last batch row only */
@@ -635,15 +656,15 @@ bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     /* Sink output (last row of the LM head) → session logits.
      * A CUDA arena hands the slot back through one D2H. */
     for (u32 i = 0; i < n_node; i++) {
-        if (!sink[i] || g->node[i].op == OP_INPUT) continue;
+        if (!sink[i] || nodes[i]->op == OP_INPUT) continue;
         u32 n = dims[i] < c->n_vocab ? dims[i] : c->n_vocab;
 #ifdef GPU_BUILD
         if (g->plan->backend == BACKEND_CUDA) {
-            CHECK(cudaMemcpy(s->logits, g->node[i].data, (size_t)n * sizeof(float),
+            CHECK(cudaMemcpy(s->logits, nodes[i]->data, (size_t)n * sizeof(float),
                              cudaMemcpyDeviceToHost));
         } else
 #endif
-            memcpy(s->logits, g->node[i].data, (size_t)n * sizeof(float));
+            memcpy(s->logits, nodes[i]->data, (size_t)n * sizeof(float));
         break;
     }
 

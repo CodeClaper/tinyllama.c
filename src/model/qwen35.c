@@ -424,10 +424,10 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     if (!g) return NULL;
 
     /* Input tokens → OP_INPUT leaf (shape only; values bound at compute). */
-    u32 in = graph_input(g, n_tokens);
+    GraphNode *in = graph_input(g, n_tokens);
     if (in == GRAPH_NODE_NONE) goto fail;
 
-    u32 cur = graph_embed(g, in, te, n_tokens);
+    GraphNode *cur = graph_embed(g, in, te, n_tokens);
     if (cur == GRAPH_NODE_NONE) goto fail;
 
     for (u32 l = 0; l < c->n_layer; l++) {
@@ -449,7 +449,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
         }
 
         /* ---- Attention norm ---- */
-        u32 n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
+        GraphNode *n = graph_rms_norm(g, cur, lw->tensors[TENSOR_ATTN_NORM]);
         if (n == GRAPH_NODE_NONE) goto fail;
 
         if (t_conv) {
@@ -472,10 +472,10 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             /* Borrow the per-layer conv ring + recurrent state. */
             u32 conv_st = graph_state(g, ws->conv_state[l]);
             u32 ssm_st  = graph_state(g, ws->ssm_state[l]);
-            if (conv_st == GRAPH_NODE_NONE || ssm_st == GRAPH_NODE_NONE) goto fail;
+            if (conv_st == GRAPH_STATE_NONE || ssm_st == GRAPH_STATE_NONE) goto fail;
 
             /* Fused QKV → conv → SiLU (reference: conv → silu → split). */
-            u32 f = graph_mul_mat(g, n, t_qkv, t_qkv->dim[0] == (i64)n_embd);
+            GraphNode *f = graph_mul_mat(g, n, t_qkv, t_qkv->dim[0] == (i64)n_embd);
             if (f == GRAPH_NODE_NONE) goto fail;
             f = graph_ssm_conv(g, f, t_conv, conv_st, ws->conv_kernel);
             if (f == GRAPH_NODE_NONE) goto fail;
@@ -483,24 +483,24 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             if (f == GRAPH_NODE_NONE) goto fail;
 
             /* Decay / update gates are projected from the same normed input. */
-            u32 a = graph_mul_mat(g, n, t_a, ssm_mm_trans(t_a, n_v, n_embd));
-            u32 b = graph_mul_mat(g, n, t_b, ssm_mm_trans(t_b, n_v, n_embd));
+            GraphNode *a = graph_mul_mat(g, n, t_a, ssm_mm_trans(t_a, n_v, n_embd));
+            GraphNode *b = graph_mul_mat(g, n, t_b, ssm_mm_trans(t_b, n_v, n_embd));
             if (a == GRAPH_NODE_NONE || b == GRAPH_NODE_NONE) goto fail;
 
-            u32 d = graph_ssm_delta(g, f, a, b, t_A, t_dt, t_sn, ssm_st,
-                                    n_v, n_k, hd_v);
+            GraphNode *d = graph_ssm_delta(g, f, a, b, t_A, t_dt, t_sn, ssm_st,
+                                           n_v, n_k, hd_v);
             if (d == GRAPH_NODE_NONE) goto fail;
 
             /* Output gate: silu(gate @ n) * delta_out. */
             if (t_ag) {
-                u32 ag = graph_silu(g, graph_mul_mat(g, n, t_ag,
-                                     ssm_mm_trans(t_ag, val_dim, n_embd)));
+                GraphNode *ag = graph_silu(g, graph_mul_mat(g, n, t_ag,
+                                          ssm_mm_trans(t_ag, val_dim, n_embd)));
                 if (ag == GRAPH_NODE_NONE) goto fail;
                 d = graph_binary(g, OP_MUL, d, ag);
                 if (d == GRAPH_NODE_NONE) goto fail;
             }
 
-            u32 y = graph_mul_mat(g, d, t_so, ssm_mm_trans(t_so, n_embd, val_dim));
+            GraphNode *y = graph_mul_mat(g, d, t_so, ssm_mm_trans(t_so, n_embd, val_dim));
             if (y == GRAPH_NODE_NONE) goto fail;
             cur = graph_binary(g, OP_ADD, cur, y);
             if (cur == GRAPH_NODE_NONE) goto fail;
@@ -527,7 +527,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
              * the second half is the raw attention gate (fused QG). */
             u32 q_proj = (u32)(t_q->dim[0] == (i64)n_embd ? t_q->dim[1] : t_q->dim[0]);
             bool q_tr  = (q_proj != n_embd) && t_q->dim[0] == (i64)n_embd;
-            u32 fq = graph_mul_mat(g, n, t_q, q_tr);
+            GraphNode *fq = graph_mul_mat(g, n, t_q, q_tr);
             if (fq == GRAPH_NODE_NONE) goto fail;
             /* Bias goes on before the norm, as in the eager path. */
             if (tb_q) {
@@ -535,7 +535,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
                 if (fq == GRAPH_NODE_NONE) goto fail;
             }
 
-            u32 q;
+            GraphNode *q;
             if (t_qn) {
                 if (q_proj != 2 * q_dim) {
                     slog(WARN, "graph_build: layer %u has Q-norm but q_proj=%u (expected %u)",
@@ -555,8 +555,8 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             }
             if (q == GRAPH_NODE_NONE) goto fail;
 
-            u32 k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
-            u32 v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
+            GraphNode *k = graph_mul_mat(g, n, t_k, t_k->dim[0] == (i64)n_embd);
+            GraphNode *v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
             if (k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
             if (tb_k) {
                 k = graph_bias(g, k, tb_k);
@@ -576,12 +576,12 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->rope_dim);
             if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
-            u32 attn = graph_attn(g, q, k, v, l);
+            GraphNode *attn = graph_attn(g, q, k, v, l);
             if (attn == GRAPH_NODE_NONE) goto fail;
 
             /* Attention output gate: silu(gate @ n) * attn. */
             if (t_ag) {
-                u32 ag = graph_silu(g, graph_mul_mat(g, n, t_ag,
+                GraphNode *ag = graph_silu(g, graph_mul_mat(g, n, t_ag,
                                      ssm_mm_trans(t_ag, q_dim, n_embd)));
                 if (ag == GRAPH_NODE_NONE) goto fail;
                 attn = graph_binary(g, OP_MUL, attn, ag);
@@ -593,7 +593,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
                 if (attn == GRAPH_NODE_NONE) goto fail;
             }
 
-            u32 o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
+            GraphNode *o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
             if (o == GRAPH_NODE_NONE) goto fail;
             cur = graph_binary(g, OP_ADD, cur, o);
             if (cur == GRAPH_NODE_NONE) goto fail;
@@ -604,17 +604,17 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
         }
 
         /* ---- SwiGLU FFN ---- */
-        u32 hn = graph_rms_norm(g, cur, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        GraphNode *hn = graph_rms_norm(g, cur, lw->tensors[TENSOR_POST_ATTN_NORM]);
         if (hn == GRAPH_NODE_NONE) goto fail;
 
-        u32 gate = graph_silu(g, graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd));
-        u32 up   = graph_mul_mat(g, hn, t_u, t_u->dim[0] == (i64)n_embd);
+        GraphNode *gate = graph_silu(g, graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd));
+        GraphNode *up   = graph_mul_mat(g, hn, t_u, t_u->dim[0] == (i64)n_embd);
         if (gate == GRAPH_NODE_NONE || up == GRAPH_NODE_NONE) goto fail;
 
-        u32 mul = graph_binary(g, OP_MUL, gate, up);
+        GraphNode *mul = graph_binary(g, OP_MUL, gate, up);
         if (mul == GRAPH_NODE_NONE) goto fail;
 
-        u32 down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
+        GraphNode *down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
         if (down == GRAPH_NODE_NONE) goto fail;
 
         cur = graph_binary(g, OP_ADD, cur, down);
@@ -624,7 +624,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     /* ---- Final norm ---- */
     TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
     if (!t_norm) t_norm = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
-    u32 fn = graph_rms_norm(g, cur, t_norm);
+    GraphNode *fn = graph_rms_norm(g, cur, t_norm);
     if (fn == GRAPH_NODE_NONE) goto fail;
 
     /* ---- LM head (tied to token embeddings when absent) ---- */

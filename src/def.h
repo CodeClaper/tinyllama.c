@@ -303,6 +303,7 @@ typedef struct {
 
 typedef struct Session Session;
 typedef struct Graph Graph;
+typedef struct GraphNode GraphNode;
 
 typedef struct {
     bool  (*init)          (Session *s);
@@ -348,7 +349,8 @@ struct Session {
     Graph       *graph;
 };
 
-#define GRAPH_NODE_NONE ((u32)-1)  /* invalid node handle (builder return) */
+#define GRAPH_NODE_NONE ((GraphNode *)0)  /* invalid node handle (builder return) */
+#define GRAPH_STATE_NONE ((u32)-1)        /* invalid graph_state() handle */
 
 /* Fan-in / attached-weight capacity of a node.  src[] and weights[] are
  * filled and scanned in lockstep by node_add()/arena_plan()/graph_compute(),
@@ -381,18 +383,20 @@ typedef enum {
     OP_D2H,
 } GraphOp;
 
-typedef struct {
+typedef struct GraphNode {
     GraphOp     op;
-    int         src[GRAPH_NODE_MAX_SRC];     /* source node indices; -1 = unused */
-    TensorInfo *weights[GRAPH_NODE_MAX_SRC];
+    u32         idx;                            /* build order index; 0..n_node-1 */
+    GraphNode   *src[GRAPH_NODE_MAX_SRC];       /* source nodes; NULL = unused */
+    TensorInfo  *weights[GRAPH_NODE_MAX_SRC];
     u32         params[64 / sizeof(u32)];
-    i64         ne[MAX_DIMS];               /* number of elements */
-    i64         nb[MAX_DIMS];               /* stride in bytes:
-                                               nb[0] = ggml_type_size(type)
-                                               nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type)) + padding
-                                               nb[i] = nb[i-1] * ne[i-1] */
-    void       *data;                       /* output buffer: slot inside the graph arena */
-    size_t      data_cap;                   /* bytes available at data */
+    i64         ne[MAX_DIMS];                   /* number of elements */
+    i64         nb[MAX_DIMS];                   /* stride in bytes:
+                                                   nb[0] = ggml_type_size(type)
+                                                   nb[1] = nb[0]   * (ne[0] / ggml_blck_size(type)) + padding
+                                                   nb[i] = nb[i-1] * ne[i-1] */
+    void        *data;                          /* output buffer: slot inside the graph arena */
+    size_t      data_cap;                       /* bytes available at data */
+    GraphNode   *next;                          /* the next node. */
 } GraphNode;
 
 
@@ -409,9 +413,9 @@ typedef struct GraphPlan {
 /* Static DAG.  Nodes are appended in build order; because every edge
  * points strictly backward, build order is also a valid topo order. */
 typedef struct Graph {
-    GraphNode   *node;
+    GraphNode   *head;
+    GraphNode   *tail;
     u32         n_node;
-    u32         cap;
     GraphPlan   *plan;
     /* Buffers borrowed from the arch workspace by stateful ops (e.g.
      * the Gated DeltaNet conv ring + recurrent state).  Indexed by the
