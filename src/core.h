@@ -13,33 +13,6 @@
 #define DEFAULT_PRESENCE_PENALTY 0.0f
 #define DEFAULT_N_THREAD -1
 
-/* Stack buffer threshold for bias dequant (see bias_add). */
-#define BIAS_BUF_STACK 4096
-
-/* ---- Operators (tensor compute kernels; implementations in core.c) ---- */
-void rms_norm(float *o, const float *x, TensorInfo *tw, int n, float eps);
-void bias_add(float *dst, TensorInfo *tb, u32 n);
-bool mat_vec_mul(float *y, TensorInfo *tw, const float *x, u64 rows, u64 cols, bool trans, pthreads_t *pool);
-bool mat_mat_mul(float *Y, TensorInfo *tw, const float *X, u64 batch, u64 rows, u64 cols, bool trans, pthreads_t *pool);
-void rope(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
-void rope_neox(float *buf, u32 n_heads, u32 head_dim, u32 pos, float theta_base);
-void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, float theta_base);
-void silu(float *x, int n);
-void softmax(float *x, u32 n);
-float softplus(float x);
-float sigmoid(float x);
-
-/* ---- SSM (Gated DeltaNet) kernels (used by the arch impls and the
- * ---- graph executor; the latter needs them as separate graph ops) ---- */
-void rms_norm_inplace(float *x, const float *weight, u32 n, float eps);
-void l2_norm_rows(float *x, u32 n_rows, u32 dim, float eps);
-void causal_conv1d_step(float *output, const float *input, const float *weight,
-                        float *state, u32 channels, u32 kernel_size);
-void gated_delta_step(const float *Q, const float *K, const float *V,
-                      float *state, const float *g, const float *beta,
-                      float *kv_mem, float *output,
-                      u32 n_v_heads, u32 n_k_heads, u32 head_dim);
-
 /* ---- Tensor dequant accessors ---- */
 float tensor_get_f32(TensorInfo *ti, u64 i);
 void  tensor_get_f32_batch(TensorInfo *ti, u64 i0, u64 nb, float *out);
