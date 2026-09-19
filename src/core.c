@@ -1217,6 +1217,132 @@ i32 vocab_merge_result(Vocab *v, i32 id1, i32 id2) {
     return (i32)VOCAB_ID_NONE;
 }
 
+/* Hex digit value, or -1 when c is not a hex digit. */
+static int spm_hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode a SentencePiece byte-fallback piece "<0xHH>" into its byte
+ * value, or -1 when the piece is not a byte token. */
+static int spm_byte_token_value(const Key *k) {
+    if (k->len != 6) return -1;
+    if (k->content[0] != '<' || k->content[1] != '0' ||
+        k->content[2] != 'x' || k->content[5] != '>')
+        return -1;
+    int hi = spm_hex_digit(k->content[3]);
+    int lo = spm_hex_digit(k->content[4]);
+    if (hi < 0 || lo < 0) return -1;
+    return hi * 16 + lo;
+}
+
+/* Load a SentencePiece vocab (tokenizer.ggml.model == "llama"): the
+ * token table plus special-token IDs and the byte-fallback table.  SPM
+ * has no BPE merge list, so v->merges stays empty.  Byte tokens are
+ * stored as "<0xHH>" pieces and are mapped to byte_token_ids[] so the
+ * byte-level encoders can round-trip arbitrary input. */
+static Vocab *vocab_load_for_spm(Model *m) {
+    Vocab *v = smalloc(sizeof(Vocab));
+    v->tokenizer_type = TOKENIZER_TYPE_SPM;
+
+    ArrayRef tokens;
+    if (!model_get_array(m, "tokenizer.ggml.tokens", &tokens) ||
+        tokens.type != GGUF_VALUE_STRING ||
+        tokens.len > INT32_MAX
+    ) slog(ERROR, "GGUF tokenizer token table is missing or invalid");
+
+    v->n_vocab = (int)tokens.len;
+    v->token = scalloc((size_t)v->n_vocab, sizeof(v->token[0]));
+
+    tokenizer_table_init(&v->tokens, tokens.len);
+    Cursor c = cursor_at(m->map, m->size, tokens.data_pos);
+    for (u32 i = 0; i < v->n_vocab; i++) {
+        if (!cursor_key(&c, &v->token[i])) slog(ERROR, c.error);
+        tokenizer_table_put(&v->tokens, v->token[i], i);
+    }
+
+    /* tokenizer.ggml.scores (unigram log-probabilities) is present in
+     * SPM files but not retained by this Vocab; the byte-fallback
+     * tokens below are all the encoders currently need. */
+
+    /* Build byte-to-token-ID table.  When the token_type array is
+     * available, only BYTE entries (type 6) are considered; otherwise
+     * every "<0xHH>" piece is accepted. */
+    for (int b = 0; b < 256; b++)
+        v->byte_token_ids[b] = VOCAB_ID_NONE;
+    ArrayRef types;
+    bool have_types = model_get_array(m, "tokenizer.ggml.token_type", &types)
+                      && types.type == GGUF_VALUE_INT32
+                      && types.len == (u64)v->n_vocab;
+    if (have_types) {
+        Cursor tc = cursor_at(m->map, m->size, types.data_pos);
+        for (u32 i = 0; i < v->n_vocab; i++) {
+            i32 t;
+            if (!cursor_i32(&tc, &t)) break;
+            if (t != 6) continue;                  /* BYTE */
+            int byte = spm_byte_token_value(&v->token[i]);
+            if (byte >= 0) v->byte_token_ids[byte] = (i32)i;
+        }
+    } else {
+        for (u32 i = 0; i < v->n_vocab; i++) {
+            int byte = spm_byte_token_value(&v->token[i]);
+            if (byte >= 0) v->byte_token_ids[byte] = (i32)i;
+        }
+    }
+
+    v->bos_id = VOCAB_ID_NONE;
+    v->eos_id = VOCAB_ID_NONE;
+
+    if (!model_get_i32(m, "tokenizer.ggml.bos_token_id", &v->bos_id)) {
+        static const char *bos_cands[] = {
+            "<s>", "<bos>",
+            "<|begin_of_text|>",
+            "<｜begin▁of▁sentence｜>",
+            "<|im_start|>",
+        };
+        for (int i = 0; i < (int)(sizeof(bos_cands) / sizeof(bos_cands[0])); i++) {
+            if (vocab_try_lookup(v, bos_cands[i], &v->bos_id)) break;
+        }
+    }
+
+    if (!model_get_i32(m, "tokenizer.ggml.eos_token_id", &v->eos_id)) {
+        static const char *eos_cands[] = {
+            "</s>", "<eos>",
+            "<|end_of_text|>",
+            "<｜end▁of▁sentence｜>",
+            "<|im_end|>",
+        };
+        for (int i = 0; i < (int)(sizeof(eos_cands) / sizeof(eos_cands[0])); i++) {
+            if (vocab_try_lookup(v, eos_cands[i], &v->eos_id)) break;
+        }
+    }
+
+    if (v->bos_id == VOCAB_ID_NONE)
+        slog(ERROR, "Cannot find BOS token in vocabulary");
+    if (v->eos_id == VOCAB_ID_NONE)
+        slog(ERROR, "Cannot find EOS token in vocabulary");
+
+    v->user_id        = VOCAB_ID_NONE;
+    v->assistant_id   = VOCAB_ID_NONE;
+    v->think_start_id = VOCAB_ID_NONE;
+    v->think_end_id   = VOCAB_ID_NONE;
+    v->dsml_id        = VOCAB_ID_NONE;
+    v->im_start_id    = VOCAB_ID_NONE;
+    v->im_end_id      = VOCAB_ID_NONE;
+
+    (void)vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
+    (void)vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
+    (void)vocab_try_lookup(v, "<think>",         &v->think_start_id);
+    (void)vocab_try_lookup(v, "</think>",        &v->think_end_id);
+    (void)vocab_try_lookup(v, "｜DSML｜",        &v->dsml_id);
+    (void)vocab_try_lookup(v, "<|im_start|>",    &v->im_start_id);
+    (void)vocab_try_lookup(v, "<|im_end|>",      &v->im_end_id);
+
+    return v;
+}
+
 /* Load a GPT-2 style BPE vocab: token & merge tables, special token
  * IDs, and the byte->token mapping (bytes_to_unicode). */
 static Vocab *vocab_load_for_bpe(Model *m) {
@@ -1345,6 +1471,7 @@ static Vocab *vocab_load_for_bpe(Model *m) {
 static Vocab *vocab_load(Model *m) {
     TokenizerType type = tokenizer_type(m);
     switch (type) {
+        case TOKENIZER_TYPE_SPM: return vocab_load_for_spm(m);
         case TOKENIZER_TYPE_BPE: return vocab_load_for_bpe(m);
         case TOKENIZER_TYPE_NONE: ERRRET(NULL, "Unknown tokenizer model type");
         default: ERRRET(NULL, "Not support tokenizer type");
