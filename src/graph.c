@@ -542,14 +542,14 @@ static bool backend_plan(Graph *g) {
     return true;
 }
 
-bool graph_plan(Graph *g, Session *s) {
+static bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
-    if (g->plan) return true;          /* already planned */
-    if (!backend_plan(g)) return false;   /* backend first: arena placement */
+    if (g->plan) return true;           /* already planned */
+    if (!backend_plan(g)) return false; /* backend first: arena placement */
     return arena_plan(g, s);
 }
 
-bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
+static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     if (!g || !s || !b || g->n_node == 0) {
         slog(WARN, "graph_compute: missing graph / session / batch");
         return false;

@@ -38,17 +38,12 @@ GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias);
 GraphNode *graph_sigmoid_gate(Graph *g, GraphNode *a, GraphNode *gate, u32 n_heads, u32 head_dim);
 GraphNode *graph_ssm_conv(Graph *g, GraphNode *src, TensorInfo *weight, u32 state, u32 kernel);
 GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args);
-/* Borrows a caller-owned buffer; graph_free() does not free it. */
-u32 graph_state(Graph *g, void *ptr);
 GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer);
+u32 graph_state(Graph *g, void *ptr);
 
 /* Generates the execution plan (arena slot layout) once: node->data
  * pointers are baked into the graph and any n <= cfg-sized batch
  * reuses the slots.  graph_compute() calls this lazily on first run. */
-bool graph_plan(Graph *g, Session *s);
-bool graph_compute(Graph *g, const GraphBatch *b, Session *s);
-/* Session-level entry point: builds the graph on first use, appends the
- * batch at s->n_tokens and runs it. */
 bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits);
 
 #endif
