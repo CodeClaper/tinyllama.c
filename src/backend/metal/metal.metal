@@ -1300,6 +1300,23 @@ kernel void op_silu(device const float *src [[buffer(0)]],
     }
 }
 
+/* OP_SCALE: args [od, base, total(2), scale(f32)]; grid covers total. */
+kernel void op_scale(device const float *src [[buffer(0)]],
+                     device float *dst [[buffer(1)]],
+                     device const uint32_t *a [[buffer(2)]],
+                     uint gid [[thread_position_in_grid]],
+                     uint tptg [[threads_per_threadgroup]],
+                     uint ntg [[threadgroups_per_grid]]) {
+    uint od = a[0], base = a[1];
+    uint64_t total = op_u64(a, 2);
+    float scale = op_f32(a, 4);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        dst[idx] = src[((uint64_t)base + p) * od + j] * scale;
+    }
+}
+
 /* OP_SOFTMAX: args [od, base]; one threadgroup per row. */
 kernel void op_softmax(device const float *src [[buffer(0)]],
                        device float *dst [[buffer(1)]],

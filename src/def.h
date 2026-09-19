@@ -368,6 +368,7 @@ typedef enum {
     OP_MATMUL,          /* out = W @ x                 (mat-vec)          */
     OP_MATMULARRY,      /* out[b] = W @ x[b]           (mat-mat, batch)   */
     OP_MATMUL_T,        /* out = W^T @ x               (mat-vec)          */
+    OP_SCALE,
     OP_RMS_NORM,        /* out = rms(x) * w                               */
     OP_RMS_NORM_HEADS,  /* per-head rms(x)*w over [n_heads, head_dim]     */
     OP_SIGMOID_GATE,    /* out = a * sigmoid(gate half of b)              */

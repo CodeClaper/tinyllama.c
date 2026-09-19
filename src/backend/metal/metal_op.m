@@ -443,6 +443,24 @@ static bool metal_op_silu(OpCtx *c) {
     return true;
 }
 
+/* OP_SCALE */
+static bool metal_op_scale(OpCtx *c) {
+    id<MTLBuffer> src, dst;
+    NSUInteger soff, doff;
+    if (!bind_ptr(op_src(c, 0), &src, &soff) || !bind_ptr(c->dst, &dst, &doff))
+        return false;
+    NSUInteger aoff = args_alloc(5 * sizeof(uint32_t));
+    if (aoff == (NSUInteger)-1) return false;
+    uint32_t *p = args_ptr(aoff);
+    p[0] = c->od; p[1] = c->base;
+    put_u64(p, 2, (u64)c->r * c->od);
+    p[4] = op_param(c, 0);           /* scale float bits */
+    id<MTLBuffer> bufs[3] = { src, dst, g_args };
+    NSUInteger    offs[3] = { soff, doff, aoff };
+    dispatch("op_scale", bufs, offs, 3, op_blocks((u64)c->r * c->od));
+    return true;
+}
+
 /* OP_SOFTMAX */
 static bool metal_op_softmax(OpCtx *c) {
     id<MTLBuffer> src, dst;
@@ -643,6 +661,7 @@ bool metal_graph_op(OpCtx *c) {
         case OP_ADD:
         case OP_MUL:            return metal_op_binary(c);
         case OP_SILU:           return metal_op_silu(c);
+        case OP_SCALE:          return metal_op_scale(c);
         case OP_SOFTMAX:        return metal_op_softmax(c);
         case OP_ROPE_NEOX:      return metal_op_rope_neox(c);
         case OP_SIGMOID_GATE:   return metal_op_sigmoid_gate(c);

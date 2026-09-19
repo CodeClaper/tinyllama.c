@@ -169,6 +169,14 @@ GraphNode *graph_softmax(Graph *g, GraphNode *src) {
     return node_add(g, OP_SOFTMAX, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, NULL, 0);
 }
 
+GraphNode *graph_scale(Graph *g, GraphNode *src, float scale) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    u32 bits;
+    memcpy(&bits, &scale, sizeof(bits));   /* float bits in params[0] */
+    u32 params[] = { bits };
+    return node_add(g, OP_SCALE, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 1);
+}
+
 GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias) {
     if (!g || !src || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
     return node_add(g, OP_BIAS, (GraphNode *[]){ src, NULL, NULL, NULL },

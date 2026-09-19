@@ -235,6 +235,17 @@ __global__ void k_silu(const float *__restrict__ src, float *__restrict__ dst,
     }
 }
 
+/* ---- OP_SCALE -------------------------------------------------- */
+__global__ void k_scale(const float *__restrict__ src, float *__restrict__ dst,
+                        u32 od, u32 base, u64 total, float scale) {
+    u64 idx     = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 gstride = (u64)gridDim.x * blockDim.x;
+    for (; idx < total; idx += gstride) {
+        u32 p = (u32)(idx / od), j = (u32)(idx % od);
+        dst[idx] = src[((u64)base + p) * od + j] * scale;
+    }
+}
+
 /* ---- OP_SOFTMAX ------------------------------------------------
  * One block per row, block-strided over the row width. */
 __global__ void k_softmax(const float *__restrict__ src, float *__restrict__ dst,
@@ -563,6 +574,16 @@ static bool gpu_op_silu(OpCtx *c) {
     return true;
 }
 
+static bool gpu_op_scale(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float scale;
+    memcpy(&scale, &bits, sizeof(scale));
+    k_scale<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
+        op_src(c, 0), c->dst, c->od, c->base, (u64)c->r * c->od, scale);
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 static bool gpu_op_softmax(OpCtx *c) {
     k_softmax<<<c->r, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, c->od, c->base);
     CHECK(cudaGetLastError());
@@ -693,6 +714,7 @@ bool gpu_graph_op(OpCtx *c) {
         case OP_ADD:
         case OP_MUL:            return gpu_op_binary(c);
         case OP_SILU:           return gpu_op_silu(c);
+        case OP_SCALE:          return gpu_op_scale(c);
         case OP_SOFTMAX:        return gpu_op_softmax(c);
         case OP_ROPE_NEOX:      return gpu_op_rope_neox(c);
         case OP_SIGMOID_GATE:   return gpu_op_sigmoid_gate(c);

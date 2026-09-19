@@ -23,6 +23,8 @@ GraphNode *graph_rope(Graph *g, GraphNode *src, float theta,
                       u32 n_heads, u32 head_dim, u32 rope_dim);
 GraphNode *graph_silu(Graph *g, GraphNode *src);
 GraphNode *graph_softmax(Graph *g, GraphNode *src);
+/* out = src * scale (element-wise scalar multiply). */
+GraphNode *graph_scale(Graph *g, GraphNode *src, float scale);
 GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias);
 /* out = a * sigmoid(gate); gate is the 2nd half of each 2*head_dim block. */
 GraphNode *graph_sigmoid_gate(Graph *g, GraphNode *a, GraphNode *gate,

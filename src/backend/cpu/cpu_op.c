@@ -112,6 +112,20 @@ static void softmax_n(float *x, int n) { softmax(x, (u32)n); }
 static bool op_silu(OpCtx *c)    { return op_unary(c, silu); }
 static bool op_softmax(OpCtx *c) { return op_unary(c, softmax_n); }
 
+static bool op_scale(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float scale;
+    memcpy(&scale, &bits, sizeof(scale));
+    float *src = op_src(c, 0);
+    for (u32 p = 0; p < c->r; p++) {
+        float *dp = c->dst + (u64)p * c->od;
+        const float *sp = src + ((u64)c->base + p) * c->od;
+        for (u32 j = 0; j < c->od; j++)
+            dp[j] = sp[j] * scale;
+    }
+    return true;
+}
+
 static bool op_rope_neox(OpCtx *c) {
     u32 bits = op_param(c, 0);
     float theta;
@@ -347,6 +361,7 @@ bool cpu_graph_op(OpCtx *c) {
         case OP_ADD:
         case OP_MUL:            return op_binary(c);
         case OP_SILU:           return op_silu(c);
+        case OP_SCALE:          return op_scale(c);
         case OP_SOFTMAX:        return op_softmax(c);
         case OP_ROPE_NEOX:      return op_rope_neox(c);
         case OP_SIGMOID_GATE:   return op_sigmoid_gate(c);
