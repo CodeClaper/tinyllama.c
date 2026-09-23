@@ -1335,6 +1335,22 @@ kernel void op_scale(device const float *src [[buffer(0)]],
     }
 }
 
+kernel void op_softcap(device const float *src [[buffer(0)]],
+                       device float *dst [[buffer(1)]],
+                       device const uint32_t *a [[buffer(2)]],
+                       uint gid [[thread_position_in_grid]],
+                       uint tptg [[threads_per_threadgroup]],
+                       uint ntg [[threadgroups_per_grid]]) {
+    uint od = a[0], base = a[1];
+    uint64_t total = op_u64(a, 2);
+    float cap = op_f32(a, 4);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / od), j = (uint)(idx % od);
+        dst[idx] = tanh(src[((uint64_t)base + p) * od + j] / cap) * cap;
+    }
+}
+
 /* OP_SOFTMAX: args [od, base]; one threadgroup per row. */
 kernel void op_softmax(device const float *src [[buffer(0)]],
                        device float *dst [[buffer(1)]],
@@ -1561,20 +1577,24 @@ kernel void op_attn(device const float *qd [[buffer(0)]],
     uint64_t hs = op_u64(a, 5);
     uint pos = a[7];
     float scale = op_f32(a, 8);
+    uint win = a[9];
     uint h = tg % n_head, qi = tg / n_head;
     device const float *qh = qd + (uint64_t)qi * q_dim + (uint64_t)h * hd;
-    device const float *Kb = ck + (uint64_t)(h / gqa) * hs;
-    device const float *Vb = cv + (uint64_t)(h / gqa) * hs;
     uint n_keys = pos + qi + 1;
+    /* Sliding window: visible keys are the last `win` (win == 0 = full). */
+    uint start = (win && n_keys > win) ? n_keys - win : 0;
+    uint n_vis = n_keys - start;
+    device const float *Kb = ck + (uint64_t)(h / gqa) * hs + (uint64_t)start * khd;
+    device const float *Vb = cv + (uint64_t)(h / gqa) * hs + (uint64_t)start * khd;
 
     for (uint d = tid; d < khd; d += tptg) acc[d] = 0.0f;
     if (tid == 0) { msm[0] = op_neg_inf(); lsm[0] = 0.0f; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint t0 = 0; t0 < n_keys; t0 += tptg) {
+    for (uint t0 = 0; t0 < n_vis; t0 += tptg) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float mval = msm[0];
-        uint tile = min(tptg, n_keys - t0);
+        uint tile = min(tptg, n_vis - t0);
         float s = op_neg_inf();
         if (tid < tile) {
             device const float *kt = Kb + (uint64_t)(t0 + tid) * khd;

@@ -182,6 +182,14 @@ GraphNode *graph_scale(Graph *g, GraphNode *src, float scale) {
     return node_add(g, OP_SCALE, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 1);
 }
 
+GraphNode *graph_softcap(Graph *g, GraphNode *src, float cap) {
+    if (!g || !src || cap <= 0.0f) return GRAPH_NODE_NONE;
+    u32 bits;
+    memcpy(&bits, &cap, sizeof(bits));     /* float bits in params[0] */
+    u32 params[] = { bits };
+    return node_add(g, OP_SOFTCAP, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 1);
+}
+
 GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias) {
     if (!g || !src || !bias || bias->ndim < 1) return GRAPH_NODE_NONE;
     return node_add(g, OP_BIAS, (GraphNode *[]){ src, NULL, NULL, NULL },
@@ -228,10 +236,11 @@ u32 graph_state(Graph *g, void *ptr) {
     return g->n_state++;
 }
 
-GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer) {
+GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v,
+                      u32 layer, u32 window) {
     if (!g || !q || !k || !v) return GRAPH_NODE_NONE;
-    u32 params[] = { layer };
-    return node_add(g, OP_ATTN, (GraphNode *[]){ q, k, v, NULL }, NULL, params, 1);
+    u32 params[] = { layer, window };   /* window == 0: full causal attention */
+    return node_add(g, OP_ATTN, (GraphNode *[]){ q, k, v, NULL }, NULL, params, 2);
 }
 
 GraphNode *graph_rope(Graph *g, GraphNode *src, float theta,

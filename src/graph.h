@@ -35,11 +35,12 @@ GraphNode *graph_silu(Graph *g, GraphNode *src);
 GraphNode *graph_gelu(Graph *g, GraphNode *src);
 GraphNode *graph_softmax(Graph *g, GraphNode *src);
 GraphNode *graph_scale(Graph *g, GraphNode *src, float scale);
+GraphNode *graph_softcap(Graph *g, GraphNode *src, float cap);
 GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias);
 GraphNode *graph_sigmoid_gate(Graph *g, GraphNode *a, GraphNode *gate, u32 n_heads, u32 head_dim);
 GraphNode *graph_ssm_conv(Graph *g, GraphNode *src, TensorInfo *weight, u32 state, u32 kernel);
 GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args);
-GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer);
+GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer, u32 window);
 u32 graph_state(Graph *g, void *ptr);
 
 /* Generates the execution plan (arena slot layout) once: node->data

@@ -588,7 +588,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->rope_dim);
             if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
-            GraphNode *attn = graph_attn(g, q, k, v, l);
+            GraphNode *attn = graph_attn(g, q, k, v, l, 0);
             if (attn == GRAPH_NODE_NONE) goto fail;
 
             /* Attention output gate: silu(gate @ n) * attn. */

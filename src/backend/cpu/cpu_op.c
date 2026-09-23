@@ -613,6 +613,21 @@ static bool op_scale(OpCtx *c) {
     return true;
 }
 
+/* Gemma final-logit soft cap: out = tanh(x / cap) * cap. */
+static bool op_softcap(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float cap;
+    memcpy(&cap, &bits, sizeof(cap));
+    float *src = op_src(c, 0);
+    for (u32 p = 0; p < c->r; p++) {
+        float *dp = c->dst + (u64)p * c->od;
+        const float *sp = src + ((u64)c->base + p) * c->od;
+        for (u32 j = 0; j < c->od; j++)
+            dp[j] = tanhf(sp[j] / cap) * cap;
+    }
+    return true;
+}
+
 
 /* Partial RoPE: rotates only the first rope_dim dimensions of each head.
  * head_dim is the full head dimension (stride between heads),
@@ -796,6 +811,7 @@ static bool op_attn(OpCtx *c) {
         return false;
     }
     u32 layer = op_param(c, 0);
+    u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
     AttnKvCache *akc = &c->s->cache.std[layer];
     if (!akc->k || !akc->v) return false;
 
@@ -831,17 +847,22 @@ static bool op_attn(OpCtx *c) {
             float *qh = qd + (u64)qi * c->q_dim + (u64)h * hd;
             u32 n_keys = c->pos + qi + 1;   /* causal */
 
-            /* Scores = K-block [n_keys × khd] (contiguous per head) @ qh.
+            /* Sliding window: only the last `win` keys (including the
+             * current one) stay visible; win == 0 means full causal. */
+            u32 start = (win && n_keys > win) ? n_keys - win : 0;
+            u32 n_vis = n_keys - start;
+
+            /* Scores = K-block [n_vis × khd] (contiguous per head) @ qh.
              * SIMD matrix-vector dot, then apply the 1/sqrt(kv_head_dim)
              * scale once to the whole score vector. */
-            mul_mat_vec(c->scr, kh_base, qh, n_keys, khd);
-            for (u32 t = 0; t < n_keys; t++)
+            mul_mat_vec(c->scr, kh_base + (u64)start * khd, qh, n_vis, khd);
+            for (u32 t = 0; t < n_vis; t++)
                 c->scr[t] *= c->scale;
-            softmax(c->scr, n_keys);
+            softmax(c->scr, n_vis);
 
             float *oh = c->dst + (u64)qi * c->q_dim + (u64)h * hd;
-            float *vt = vh_base;
-            for (u32 t = 0; t < n_keys; t++, vt += khd) {
+            float *vt = vh_base + (u64)start * khd;
+            for (u32 t = 0; t < n_vis; t++, vt += khd) {
                 float st = c->scr[t];
                 for (u32 d = 0; d < khd; d++)
                     oh[d] += st * vt[d];
@@ -871,6 +892,7 @@ bool cpu_graph_op(OpCtx *c) {
         case OP_SILU:           return op_silu(c);
         case OP_GELU:           return op_gelu(c);
         case OP_SCALE:          return op_scale(c);
+        case OP_SOFTCAP:        return op_softcap(c);
         case OP_SOFTMAX:        return op_softmax(c);
         case OP_ROPE_NEOX:      return op_rope_neox(c);
         case OP_SIGMOID_GATE:   return op_sigmoid_gate(c);

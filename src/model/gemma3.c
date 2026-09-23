@@ -19,8 +19,11 @@ typedef struct {
     float *hb;              /* [ffn_hidden] FFN gate buffer                 */
     float *hb2;             /* [ffn_hidden] FFN up buffer                   */
     u32    ffn_hidden;      /* feed_forward_length (6912)                   */
-    float  rope_theta;      /* RoPE frequency base (1e6)                    */
+    float  rope_theta;      /* RoPE frequency base, global layers (1e6)     */
+    float  rope_theta_swa;  /* RoPE frequency base, sliding-window (1e4)    */
+    u32    n_swa;           /* attention.sliding_window (0 = no SWA)        */
     float  attn_scale;      /* Q scale on top of OP_ATTN's 1/sqrt(kv_dim)   */
+    float  logit_softcap;   /* final_logit_softcapping (0 = disabled)       */
 } Gemma3WorkSpace;
 
 static bool gemma3_init(Session *s) {
@@ -68,15 +71,30 @@ static bool gemma3_init(Session *s) {
     ws->hb  = scalloc((u64)ws->ffn_hidden, sizeof(float));
     ws->hb2 = scalloc((u64)ws->ffn_hidden, sizeof(float));
 
-    /* RoPE frequency base (gemma3.rope.freq_base, default 1e6). */
+    /* RoPE bases.  Global layers use gemma3.rope.freq_base (default 1e6);
+     * sliding-window layers use gemma3.rope.freq_base_swa (default 1e4,
+     * matching llama.cpp's rope_freq_base_train_swa default).
+     * gemma3.attention.sliding_window enables SWA (0 = disabled). */
+    const char *pfx = s->en->model->arch_name[0]
+                      ? s->en->model->arch_name : "gemma3";
+    char k[96];
     ws->rope_theta = 1000000.0f;
-    {
-        const char *pfx = s->en->model->arch_name[0]
-                          ? s->en->model->arch_name : "gemma3";
-        char k[96];
-        if (snprintf(k, sizeof(k), "%s.rope.freq_base", pfx) > 0)
-            model_get_f32(s->en->model, k, &ws->rope_theta);
+    if (snprintf(k, sizeof(k), "%s.rope.freq_base", pfx) > 0)
+        model_get_f32(s->en->model, k, &ws->rope_theta);
+    ws->rope_theta_swa = 10000.0f;
+    if (snprintf(k, sizeof(k), "%s.rope.freq_base_swa", pfx) > 0)
+        model_get_f32(s->en->model, k, &ws->rope_theta_swa);
+    ws->n_swa = 0;
+    if (snprintf(k, sizeof(k), "%s.attention.sliding_window", pfx) > 0) {
+        i32 sw = 0;
+        if (model_get_i32(s->en->model, k, &sw) && sw > 0)
+            ws->n_swa = (u32)sw;
     }
+
+    /* Final logit soft cap (gemma3.final_logit_softcapping, default 0). */
+    ws->logit_softcap = 0.0f;
+    if (snprintf(k, sizeof(k), "%s.final_logit_softcapping", pfx) > 0)
+        model_get_f32(s->en->model, k, &ws->logit_softcap);
 
     /* Attention scale.  OP_ATTN already applies 1/sqrt(kv_head_dim) to the
      * scores, so this factor is the Gemma3 correction on top of it:
@@ -95,8 +113,10 @@ static bool gemma3_init(Session *s) {
          "n_layer=%u n_vocab=%u ctx_size=%u",
          c->n_embd, c->n_head, c->n_kv_head, c->head_dim, kv_head_dim,
          c->n_layer, c->n_vocab, s->ctx_size);
-    slog(INFO, "Gemma3 init: ffn_hidden=%u rope_theta=%.6f attn_scale=%.6f",
-         ws->ffn_hidden, ws->rope_theta, ws->attn_scale);
+    slog(INFO, "Gemma3 init: ffn_hidden=%u rope_theta=%.1f rope_theta_swa=%.1f "
+         "n_swa=%u attn_scale=%.6f logit_softcap=%.1f",
+         ws->ffn_hidden, ws->rope_theta, ws->rope_theta_swa,
+         ws->n_swa, ws->attn_scale, ws->logit_softcap);
 
     s->arch_data = ws;
     return true;
@@ -187,7 +207,6 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
     u32 n_embd  = c->n_embd;
     u32 q_dim   = c->n_head * c->head_dim;
     u32 fh      = ws->ffn_hidden;
-    float theta = ws->rope_theta;
 
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (!te || te->ndim < 2) {
@@ -205,8 +224,19 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
     GraphNode *cur = graph_embed(g, in, te, n_tokens);
     if (cur == GRAPH_NODE_NONE) goto fail;
 
+    /* Gemma scales the input embeddings by sqrt(n_embd). */
+    cur = graph_scale(g, cur, sqrtf((float)n_embd));
+    if (cur == GRAPH_NODE_NONE) goto fail;
+
     for (u32 l = 0; l < c->n_layer; l++) {
         LayerWeights *lw = &w->layers[l];
+
+        /* Sliding-window pattern:
+         * every 6th layer (l % 6 == 5) is global, the rest are local.
+         * Local layers use the SWA RoPE base and a windowed attention. */
+        bool  is_swa  = (ws->n_swa > 0) && (l % 6 != 5);
+        float theta_l = is_swa ? ws->rope_theta_swa : ws->rope_theta;
+        u32   win     = is_swa ? ws->n_swa : 0;
 
         TensorInfo *t_q = lw->tensors[TENSOR_ATTN_Q];
         TensorInfo *t_k = lw->tensors[TENSOR_ATTN_K];
@@ -233,14 +263,14 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
         k = graph_rms_norm_heads(g, k, lw->tensors[TENSOR_ATTN_K_NORM], c->n_kv_head, c->kv_head_dim, c->kv_head_dim, c->kv_head_dim);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
-        q = graph_rope(g, q, theta, c->n_head, c->head_dim, c->head_dim);
-        k = graph_rope(g, k, theta, c->n_kv_head, c->kv_head_dim, c->kv_head_dim);
+        q = graph_rope(g, q, theta_l, c->n_head, c->head_dim, c->head_dim);
+        k = graph_rope(g, k, theta_l, c->n_kv_head, c->kv_head_dim, c->kv_head_dim);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
         
         q = graph_scale(g, q, ws->attn_scale);
         if (q == GRAPH_NODE_NONE) goto fail;
 
-        GraphNode *attn = graph_attn(g, q, k, v, l);
+        GraphNode *attn = graph_attn(g, q, k, v, l, win);
         if (attn == GRAPH_NODE_NONE) goto fail;
 
         GraphNode *o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
@@ -284,6 +314,12 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
     if (!t_out) t_out = te;
     cur = graph_mul_mat(g, fn, t_out, t_out->dim[0] == (i64)n_embd);
     if (cur == GRAPH_NODE_NONE) goto fail;
+
+    /* ---- Final logit soft cap (Gemma3) ---- */
+    if (ws->logit_softcap > 0.0f) {
+        cur = graph_softcap(g, cur, ws->logit_softcap);
+        if (cur == GRAPH_NODE_NONE) goto fail;
+    }
     return g;
 fail:
     graph_free(g);

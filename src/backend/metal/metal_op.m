@@ -478,6 +478,24 @@ static bool metal_op_scale(OpCtx *c) {
     return true;
 }
 
+/* OP_SOFTCAP */
+static bool metal_op_softcap(OpCtx *c) {
+    id<MTLBuffer> src, dst;
+    NSUInteger soff, doff;
+    if (!bind_ptr(op_src(c, 0), &src, &soff) || !bind_ptr(c->dst, &dst, &doff))
+        return false;
+    NSUInteger aoff = args_alloc(5 * sizeof(uint32_t));
+    if (aoff == (NSUInteger)-1) return false;
+    uint32_t *p = args_ptr(aoff);
+    p[0] = c->od; p[1] = c->base;
+    put_u64(p, 2, (u64)c->r * c->od);
+    p[4] = op_param(c, 0);           /* cap float bits */
+    id<MTLBuffer> bufs[3] = { src, dst, g_args };
+    NSUInteger    offs[3] = { soff, doff, aoff };
+    dispatch("op_softcap", bufs, offs, 3, op_blocks((u64)c->r * c->od));
+    return true;
+}
+
 /* OP_SOFTMAX */
 static bool metal_op_softmax(OpCtx *c) {
     id<MTLBuffer> src, dst;
@@ -608,6 +626,7 @@ static bool metal_op_attn(OpCtx *c) {
         return false;
     }
     u32 layer = op_param(c, 0);
+    u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
     AttnKvCache *akc = &c->s->cache.std[layer];
     if (!akc->k || !akc->v) return false;
 
@@ -642,13 +661,14 @@ static bool metal_op_attn(OpCtx *c) {
     c->s->cache.std[layer].n = c->pos + c->n;
 
     /* Phase 2: causal attention over the mirror. */
-    NSUInteger aoff2 = args_alloc(9 * sizeof(uint32_t));
+    NSUInteger aoff2 = args_alloc(10 * sizeof(uint32_t));
     if (aoff2 == (NSUInteger)-1) return false;
     uint32_t *q = args_ptr(aoff2);
     q[0] = n_head; q[1] = gqa; q[2] = c->cfg->head_dim; q[3] = khd; q[4] = c->q_dim;
     put_u64(q, 5, hs);
     q[7] = c->pos;
     memcpy(&q[8], &c->scale, sizeof(float));
+    q[9] = win;
     id<MTLBuffer> qd;
     NSUInteger qoff;
     if (!bind_ptr(op_src(c, 0), &qd, &qoff)) return false;
@@ -680,6 +700,7 @@ bool metal_graph_op(OpCtx *c) {
         case OP_SILU:           return metal_op_silu(c);
         case OP_GELU:           return metal_op_gelu(c);
         case OP_SCALE:          return metal_op_scale(c);
+        case OP_SOFTCAP:        return metal_op_softcap(c);
         case OP_SOFTMAX:        return metal_op_softmax(c);
         case OP_ROPE_NEOX:      return metal_op_rope_neox(c);
         case OP_SIGMOID_GATE:   return metal_op_sigmoid_gate(c);

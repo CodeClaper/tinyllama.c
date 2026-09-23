@@ -394,6 +394,7 @@ typedef enum {
     OP_ATTN,            /* out = attn(q, k, v) (causal multi-head, GQA)   */
     OP_SSM_CONV,        /* depthwise causal conv1d (Gated DeltaNet)       */
     OP_SSM_DELTA,       /* gated delta recurrence (Gated DeltaNet)        */
+    OP_SOFTCAP,         /* out = tanh(x / cap) * cap  (Gemma logit cap)   */
     OP_H2D,
     OP_D2H,
 } GraphOp;

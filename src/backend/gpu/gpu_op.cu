@@ -259,6 +259,19 @@ __global__ void k_scale(const float *__restrict__ src, float *__restrict__ dst,
     }
 }
 
+/* ---- OP_SOFTCAP ------------------------------------------------
+ * Gemma final-logit soft cap: out = tanh(x / cap) * cap. */
+__global__ void k_softcap(const float *__restrict__ src, float *__restrict__ dst,
+                          u32 od, u32 base, u64 total, float cap) {
+    u64 idx     = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 gstride = (u64)gridDim.x * blockDim.x;
+    for (; idx < total; idx += gstride) {
+        u32 p = (u32)(idx / od), j = (u32)(idx % od);
+        float v = src[((u64)base + p) * od + j];
+        dst[idx] = tanhf(v / cap) * cap;
+    }
+}
+
 /* ---- OP_SOFTMAX ------------------------------------------------
  * One block per row, block-strided over the row width. */
 __global__ void k_softmax(const float *__restrict__ src, float *__restrict__ dst,
@@ -466,23 +479,26 @@ __global__ void k_kv_write(float *__restrict__ ck, float *__restrict__ cv,
 __global__ void k_attn(const float *__restrict__ qd, const float *__restrict__ ck,
                        const float *__restrict__ cv, float *__restrict__ dst,
                        u32 gqa, u32 hd, u32 khd, u32 q_dim, u64 hs,
-                       u32 pos, float scale) {
+                       u32 pos, float scale, u32 win) {
     extern __shared__ float sm[];   /* acc[khd] | red[32] | p[T] | m | l */
     float *acc = sm, *red = sm + khd, *p = red + 32;
     float *msm = p + blockDim.x, *lsm = msm + 1;
     const u32 h = blockIdx.x, qi = blockIdx.y;
     const int tid = threadIdx.x;
     const float *qh = qd + (u64)qi * q_dim + (u64)h * hd;
-    const float *Kb = ck + (u64)(h / gqa) * hs;
-    const float *Vb = cv + (u64)(h / gqa) * hs;
     const u32 n_keys = pos + qi + 1;
+    /* Sliding window: visible keys are the last `win` (win == 0 = full). */
+    const u32 start = (win && n_keys > win) ? n_keys - win : 0;
+    const u32 n_vis = n_keys - start;
+    const float *Kb = ck + (u64)(h / gqa) * hs + (u64)start * khd;
+    const float *Vb = cv + (u64)(h / gqa) * hs + (u64)start * khd;
 
     for (u32 d = tid; d < khd; d += blockDim.x) acc[d] = 0.0f;
     if (tid == 0) { *msm = op_neg_inf(); *lsm = 0.0f; }
     __syncthreads();
 
-    for (u32 t0 = 0; t0 < n_keys; t0 += blockDim.x) {
-        u32 tile = min(blockDim.x, n_keys - t0);
+    for (u32 t0 = 0; t0 < n_vis; t0 += blockDim.x) {
+        u32 tile = min(blockDim.x, n_vis - t0);
         float s = op_neg_inf();
         if ((u32)tid < tile) {
             const float *kt = Kb + (u64)(t0 + tid) * khd;
@@ -604,6 +620,16 @@ static bool gpu_op_scale(OpCtx *c) {
     return true;
 }
 
+static bool gpu_op_softcap(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float cap;
+    memcpy(&cap, &bits, sizeof(cap));
+    k_softcap<<<op_block_count((u64)c->r * c->od), GPU_OP_THREADS>>>(
+        op_src(c, 0), c->dst, c->od, c->base, (u64)c->r * c->od, cap);
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 static bool gpu_op_softmax(OpCtx *c) {
     k_softmax<<<c->r, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, c->od, c->base);
     CHECK(cudaGetLastError());
@@ -688,6 +714,7 @@ static bool gpu_op_attn(OpCtx *c) {
         return false;
     }
     u32 layer = op_param(c, 0);
+    u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
     AttnKvCache *akc = &c->s->cache.std[layer];
     if (!akc->k || !akc->v) return false;
 
@@ -710,7 +737,7 @@ static bool gpu_op_attn(OpCtx *c) {
     size_t shmem = ((size_t)khd + 32 + GPU_OP_THREADS + 2) * sizeof(float);
     k_attn<<<grid, GPU_OP_THREADS, shmem>>>(
         op_src(c, 0), akc->k, akc->v, c->dst,
-        gqa, c->cfg->head_dim, khd, c->q_dim, hs, c->pos, c->scale);
+        gqa, c->cfg->head_dim, khd, c->q_dim, hs, c->pos, c->scale, win);
     CHECK(cudaGetLastError());
     (void)c->scr;
     return true;
@@ -736,6 +763,7 @@ bool gpu_graph_op(OpCtx *c) {
         case OP_SILU:           return gpu_op_silu(c);
         case OP_GELU:           return gpu_op_gelu(c);
         case OP_SCALE:          return gpu_op_scale(c);
+        case OP_SOFTCAP:        return gpu_op_softcap(c);
         case OP_SOFTMAX:        return gpu_op_softmax(c);
         case OP_ROPE_NEOX:      return gpu_op_rope_neox(c);
         case OP_SIGMOID_GATE:   return gpu_op_sigmoid_gate(c);
