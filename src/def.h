@@ -181,6 +181,8 @@ typedef enum {
     TENSOR_ATTN_OUT,
     TENSOR_ATTN_GATE,
     TENSOR_POST_ATTN_NORM,
+    TENSOR_FFN_NORM,        /* pre-feedforward layernorm (Gemma)   */
+    TENSOR_FFN_POST_NORM,   /* post-feedforward layernorm (Gemma)  */
     TENSOR_FFN_GATE,
     TENSOR_FFN_DOWN,
     TENSOR_FFN_UP,

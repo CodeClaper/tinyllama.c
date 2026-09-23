@@ -242,20 +242,20 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
 
         GraphNode *attn = graph_attn(g, q, k, v, l);
         if (attn == GRAPH_NODE_NONE) goto fail;
-        
-        attn = graph_rms_norm(g, attn, lw->tensors[TENSOR_POST_ATTN_NORM]);
-        if (attn == GRAPH_NODE_NONE) goto fail;
 
         GraphNode *o = graph_mul_mat(g, attn, t_o, (n_embd != q_dim) && t_o->dim[0] == (i64)q_dim);
+        if (o == GRAPH_NODE_NONE) goto fail;
+
+        o = graph_rms_norm(g, o, lw->tensors[TENSOR_POST_ATTN_NORM]);
         if (o == GRAPH_NODE_NONE) goto fail;
 
         GraphNode *h = graph_binary(g, OP_ADD, cur, o);
         if (h == GRAPH_NODE_NONE) goto fail;
 
-        /* ---- SwiGLU FFN ---- */
-        GraphNode *hn = graph_rms_norm(g, h, lw->tensors[TENSOR_POST_ATTN_NORM]);
+        /* ---- GeGLU FFN ---- */
+        GraphNode *hn = graph_rms_norm(g, h, lw->tensors[TENSOR_FFN_NORM]);
         if (hn == GRAPH_NODE_NONE) goto fail;
-        
+
         GraphNode *gate = graph_mul_mat(g, hn, t_g, t_g->dim[0] == (i64)n_embd);
         gate = graph_gelu(g, gate);
         GraphNode *up = graph_mul_mat(g, hn, t_u, t_u->dim[0] == (i64)n_embd);
@@ -265,6 +265,10 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
         if (mul == GRAPH_NODE_NONE) goto fail;
 
         GraphNode *down = graph_mul_mat(g, mul, t_d, t_d->dim[0] == (i64)fh);
+        if (down == GRAPH_NODE_NONE) goto fail;
+
+        /* post_feedforward_layernorm, then the residual add. */
+        down = graph_rms_norm(g, down, lw->tensors[TENSOR_FFN_POST_NORM]);
         if (down == GRAPH_NODE_NONE) goto fail;
 
         cur = graph_binary(g, OP_ADD, h, down);
