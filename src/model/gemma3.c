@@ -228,8 +228,8 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
         GraphNode *v = graph_mul_mat(g, n, t_v, t_v->dim[0] == (i64)n_embd);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE || v == GRAPH_NODE_NONE) goto fail;
         
-        q = graph_rms_norm(g, q, lw->tensors[TENSOR_ATTN_Q_NORM]);
-        k = graph_rms_norm(g, k, lw->tensors[TENSOR_ATTN_K_NORM]);
+        q = graph_rms_norm_heads(g, q, lw->tensors[TENSOR_ATTN_Q_NORM], c->n_head, c->head_dim, c->head_dim, c->head_dim);
+        k = graph_rms_norm_heads(g, k, lw->tensors[TENSOR_ATTN_K_NORM], c->n_kv_head, c->kv_head_dim, c->kv_head_dim, c->kv_head_dim);
         if (q == GRAPH_NODE_NONE || k == GRAPH_NODE_NONE) goto fail;
 
         q = graph_rope(g, q, theta, c->n_head, c->head_dim, c->head_dim);

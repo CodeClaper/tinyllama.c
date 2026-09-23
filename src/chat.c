@@ -15,19 +15,19 @@
 #include "linenoise.h"
 
 typedef struct {
-    EngineOptons engine;
-    int ctx_size;
-    u32 n_tokens;
-    float temperature;
-    u32 top_k;
-    float top_p;
-    float min_p;
-    float repeat_penalty;
-    u32 repeat_last_n;
-    float frequency_penalty;
-    float presence_penalty;
-    int nthread;
-    const char *system;
+    EngineOptons    engine;
+    int             ctx_size;
+    u32             n_tokens;
+    float           temperature;
+    u32             top_k;
+    float           top_p;
+    float           min_p;
+    float           repeat_penalty;
+    u32             repeat_last_n;
+    float           frequency_penalty;
+    float           presence_penalty;
+    int             nthread;
+    const char      *system;
 } ChatOptions;
 
 /* Usage. */
