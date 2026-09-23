@@ -261,11 +261,11 @@ int main(int argc, char *argv[]) {
         /* Build prompt tokens. */
         int n_prompt;
         if (first_turn) {
-            n_prompt = build_chat_tokens(v, input, co.system, prompt_tokens, max_pt);
+            n_prompt = session->ops.chat_prompt(session, input, co.system, prompt_tokens, max_pt);
             if (n_prompt == 0) fatal("No valid tokens in input");
             first_turn = false;
         } else {
-            n_prompt = build_continuation_tokens(v, input, prompt_tokens, max_pt);
+            n_prompt = session->ops.chat_continuation(session, input, prompt_tokens, max_pt);
             if (n_prompt == 0) fatal("No valid tokens in input");
         }
         if (n_prompt >= max_pt)

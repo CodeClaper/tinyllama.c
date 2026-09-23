@@ -98,7 +98,10 @@ falcon.o: $(SRC_DIR)/model/falcon.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 gemma3.o: $(SRC_DIR)/model/gemma3.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/gemma3.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o $(GPU_LINK) $(METAL_LINK)
+tokenizer.o: $(SRC_DIR)/tokenizer.c $(SRC_DIR)/tokenizer.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/tokenizer.c -o $@
+
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o tokenizer.o $(GPU_LINK) $(METAL_LINK)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h

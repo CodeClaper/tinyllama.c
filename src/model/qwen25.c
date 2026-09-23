@@ -7,6 +7,7 @@
 #include "../graph.h"
 #include "../mm.h"
 #include "../slog.h"
+#include "../tokenizer.h"
 #include "../utils.h"
 
 typedef struct {
@@ -308,9 +309,11 @@ fail:
 }
 
 const ArchOps qwen25_ops = {
-    .init          = qwen25_init,
-    .free          = qwen25_free,
-    .reset         = qwen25_reset,
-    .decode        = qwen25_decode,
-    .graph_build   = qwen25_graph_build,
+    .init              = qwen25_init,
+    .free              = qwen25_free,
+    .reset             = qwen25_reset,
+    .decode            = qwen25_decode,
+    .graph_build       = qwen25_graph_build,
+    .chat_prompt       = chatml_prompt,
+    .chat_continuation = chatml_continuation,
 };

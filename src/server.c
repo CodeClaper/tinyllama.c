@@ -172,7 +172,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     /* 3. Build chat prompt tokens. */
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    int n_prompt = build_chat_tokens(v, user_msg, sys_msg, prompt_tokens, max_pt);
+    int n_prompt =  s->ops.chat_prompt(s, user_msg, sys_msg, prompt_tokens, max_pt);
     if (n_prompt == 0) {
         http_respond(fd, 400, "Bad Request",
                     "{\"error\":\"No valid tokens in input\"}");

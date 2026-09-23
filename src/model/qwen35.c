@@ -7,6 +7,7 @@
 #include "../core.h"
 #include "../mm.h"
 #include "../slog.h"
+#include "../tokenizer.h"
 #include "../utils.h"
 #include "../graph.h"
 
@@ -650,9 +651,11 @@ fail:
 }
 
 const ArchOps qwen35_ops = {
-    .init          = qwen35_init,
-    .free          = qwen35_free,
-    .reset         = qwen35_reset,
-    .decode        = qwen35_decode,
-    .graph_build   = qwen35_graph_build,
+    .init              = qwen35_init,
+    .free              = qwen35_free,
+    .reset             = qwen35_reset,
+    .decode            = qwen35_decode,
+    .graph_build       = qwen35_graph_build,
+    .chat_prompt       = chatml_prompt,
+    .chat_continuation = chatml_continuation,
 };

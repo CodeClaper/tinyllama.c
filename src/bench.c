@@ -163,13 +163,7 @@ int main(int argc, char *argv[]) {
     slog(INFO, "Tokenizing input...");
     u32 prompt_tokens[8192];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    int n_prompt = build_chat_tokens(v, opts.input, NULL, prompt_tokens, max_pt);
-    if (n_prompt == 0) {
-        /* Fallback: direct tokenization without chat template. */
-        slog(WARN, "Chat template not available, tokenizing raw input");
-        n_prompt = tokenize_bpe(v, opts.input, (int)strlen(opts.input),
-                                prompt_tokens, max_pt);
-    }
+    int n_prompt = session->ops.chat_prompt(session, opts.input, NULL, prompt_tokens, max_pt);
     if (n_prompt == 0) slog(ERROR, "No valid tokens in input");
     slog(INFO, "Prompt tokens: %d", n_prompt);
 

@@ -707,9 +707,20 @@ static Vocab *vocab_load_for_spm(Model *m) {
         tokenizer_table_put(&v->tokens, v->token[i], i);
     }
 
-    /* tokenizer.ggml.scores (unigram log-probabilities) is present in
-     * SPM files but not retained by this Vocab; the byte-fallback
-     * tokens below are all the encoders currently need. */
+    /* tokenizer.ggml.scores: per-piece unigram log-probabilities used
+     * by the SPM encoder to rank merges.  Kept as a flat [n_vocab]
+     * array; NULL when the file lacks it. */
+    v->scores = NULL;
+    ArrayRef scores;
+    if (model_get_array(m, "tokenizer.ggml.scores", &scores) &&
+        scores.type == GGUF_VALUE_FLOAT32 &&
+        scores.len == (u64)v->n_vocab) {
+        v->scores = scalloc((size_t)v->n_vocab, sizeof(float));
+        Cursor sc = cursor_at(m->map, m->size, scores.data_pos);
+        for (u32 i = 0; i < v->n_vocab; i++) {
+            if (!cursor_float(&sc, &v->scores[i])) break;
+        }
+    }
 
     /* Build byte-to-token-ID table.  When the token_type array is
      * available, only BYTE entries (type 6) are considered; otherwise
@@ -775,6 +786,8 @@ static Vocab *vocab_load_for_spm(Model *m) {
     v->dsml_id        = VOCAB_ID_NONE;
     v->im_start_id    = VOCAB_ID_NONE;
     v->im_end_id      = VOCAB_ID_NONE;
+    v->start_of_turn_id = VOCAB_ID_NONE;
+    v->end_of_turn_id   = VOCAB_ID_NONE;
 
     (void)vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
     (void)vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
@@ -783,6 +796,8 @@ static Vocab *vocab_load_for_spm(Model *m) {
     (void)vocab_try_lookup(v, "｜DSML｜",        &v->dsml_id);
     (void)vocab_try_lookup(v, "<|im_start|>",    &v->im_start_id);
     (void)vocab_try_lookup(v, "<|im_end|>",      &v->im_end_id);
+    (void)vocab_try_lookup(v, "<start_of_turn>", &v->start_of_turn_id);
+    (void)vocab_try_lookup(v, "<end_of_turn>",   &v->end_of_turn_id);
 
     return v;
 }
@@ -795,6 +810,7 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     
     v = smalloc(sizeof(Vocab));
     v->tokenizer_type = TOKENIZER_TYPE_BPE;
+    v->scores = NULL;   /* BPE ranks merges by table order, not scores */
     if (!model_get_array(m, "tokenizer.ggml.tokens", &tokens) ||
         tokens.type != GGUF_VALUE_STRING ||
         tokens.len > INT32_MAX
@@ -862,6 +878,8 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     v->dsml_id        = VOCAB_ID_NONE;
     v->im_start_id    = VOCAB_ID_NONE;
     v->im_end_id      = VOCAB_ID_NONE;
+    v->start_of_turn_id = VOCAB_ID_NONE;
+    v->end_of_turn_id   = VOCAB_ID_NONE;
 
     (void)vocab_try_lookup(v, "<｜User｜>",      &v->user_id);
     (void)vocab_try_lookup(v, "<｜Assistant｜>", &v->assistant_id);
@@ -870,6 +888,8 @@ static Vocab *vocab_load_for_bpe(Model *m) {
     (void)vocab_try_lookup(v, "｜DSML｜",        &v->dsml_id);
     (void)vocab_try_lookup(v, "<|im_start|>",    &v->im_start_id);
     (void)vocab_try_lookup(v, "<|im_end|>",      &v->im_end_id);
+    (void)vocab_try_lookup(v, "<start_of_turn>", &v->start_of_turn_id);
+    (void)vocab_try_lookup(v, "<end_of_turn>",   &v->end_of_turn_id);
 
     /* Build byte-to-token-ID table for GPT-2 bytes_to_unicode mapping.
      * Token pieces in the GGUF store the UTF-8 encoding of the MAPPED
@@ -926,6 +946,7 @@ static Vocab *vocab_load(Model *m) {
 static void vocab_free(Vocab *v) {
     if (!v) return;
     sfree(v->token);
+    sfree(v->scores);
     tokenizer_table_free(&v->tokens);
     tokenizer_table_free(&v->merges);
     memset(v, 0, sizeof(*v));

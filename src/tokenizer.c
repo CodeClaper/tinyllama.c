@@ -3,6 +3,7 @@
 #include <string.h>
 #include "def.h"
 #include "core.h"
+#include "mm.h"
 #include "utils.h"
 #include "tokenizer.h"
 
@@ -83,7 +84,7 @@ static int bpe_encode_chunk(Vocab *v, const char *chunk, int chunk_len,
  * 1. Detects special tokens (<|...|>) by direct vocab lookup.
  * 2. Applies GPT-2 regex pre-tokenization to split text into chunks.
  * 3. Byte-encodes and BPE-merges within each chunk independently. */
-int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+static int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
     #define BPE_MAX_SYMBOLS 4096
     u32 symbols[BPE_MAX_SYMBOLS];
     int n = 0, pos = 0;
@@ -165,33 +166,146 @@ int tokenize_bpe(Vocab *v, const char *text, int text_len, u32 *tokens, int max_
     #undef BPE_MAX_SYMBOLS
 }
 
-/* Chat template (Qwen-style) — build token ID array directly.
- * Pre-looks up format tokens from the vocabulary; tokenizes user/system
- * message content via BPE. Returns total number of prompt tokens. */
-int build_chat_tokens(Vocab *v, const char *user_msg, const char *sys_msg,
-                      u32 *tokens, int max_tokens) {
+/* Number of bytes in the UTF-8 sequence starting at lead byte c. */
+static int utf8_char_len(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+/* SentencePiece (unigram) encoder.
+ *
+ * Mirrors llama.cpp's llm_tokenizer_spm_session: the text is escaped
+ * (spaces -> U+2581), split into UTF-8 characters, then adjacent
+ * characters are greedily merged into the highest-scoring known piece
+ * until no merge is possible.  Symbols that never form a piece fall
+ * back to per-byte "<0xHH>" tokens.  add_prefix_space prepends the
+ * SentencePiece word-boundary marker, as when text follows a special
+ * token or starts a prompt. */
+static int tokenize_spm(Vocab *v, const char *text, int text_len, u32 *tokens,
+                 int max_tokens, bool add_prefix_space) {
+    if (!v->scores)   /* no unigram scores: best effort via byte fallback */
+        return tokenize_bpe(v, text, text_len, tokens, max_tokens);
+
+    /* Normalize: optional word-boundary marker, then ' ' -> U+2581. */
+    char *norm = smalloc((size_t)text_len * 3 + 3);
+    if (!norm) return 0;
+    int nn = 0;
+    if (add_prefix_space) {
+        norm[nn++] = (char)0xE2; norm[nn++] = (char)0x96; norm[nn++] = (char)0x81;
+    }
+    for (int i = 0; i < text_len; i++) {
+        if (text[i] == ' ') {
+            norm[nn++] = (char)0xE2; norm[nn++] = (char)0x96; norm[nn++] = (char)0x81;
+        } else {
+            norm[nn++] = text[i];
+        }
+    }
+
+    /* Split into UTF-8 characters, linked into a doubly-linked list. */
+    typedef struct { const char *text; int n, prev, next; } SpmSym;
+    SpmSym *sym = smalloc((size_t)(nn + 1) * sizeof(SpmSym));
+    if (!sym) { sfree(norm); return 0; }
+    int nsym = 0;
+    for (int off = 0; off < nn; ) {
+        int cl = utf8_char_len((unsigned char)norm[off]);
+        if (off + cl > nn) cl = 1;
+        sym[nsym].text = norm + off;
+        sym[nsym].n    = cl;
+        sym[nsym].prev = nsym - 1;
+        sym[nsym].next = nsym + 1;
+        nsym++;
+        off += cl;
+    }
+    if (nsym == 0) { sfree(sym); sfree(norm); return 0; }
+    sym[nsym - 1].next = -1;
+
+    /* Greedy merge: repeatedly join the adjacent pair whose concatenation
+     * is a known piece with the highest score (leftmost on ties). */
+    for (;;) {
+        int best = -1;
+        float best_score = 0.0f;
+        for (int i = 0; i >= 0 && sym[i].next >= 0; i = sym[i].next) {
+            int r   = sym[i].next;
+            int len = sym[i].n + sym[r].n;
+            if (len > 255) continue;            /* Key.len is u8 */
+            i32 id;
+            if (!vocab_lookup_len(v, sym[i].text, len, &id)) continue;
+            if ((u32)id >= v->n_vocab) continue;
+            float sc = v->scores[id];
+            if (best < 0 || sc > best_score ||
+                (sc == best_score && i < best)) {
+                best = i;
+                best_score = sc;
+            }
+        }
+        if (best < 0) break;
+        int r = sym[best].next;
+        sym[best].n += sym[r].n;
+        sym[r].n = 0;
+        sym[best].next = sym[r].next;
+        if (sym[r].next >= 0) sym[sym[r].next].prev = best;
+    }
+
+    /* Emit: known pieces as-is, everything else byte by byte. */
+    int n = 0;
+    for (int i = 0; i >= 0; i = sym[i].next) {
+        if (sym[i].n == 0) continue;
+        i32 id;
+        if (vocab_lookup_len(v, sym[i].text, sym[i].n, &id)) {
+            if (n < max_tokens) tokens[n++] = (u32)id;
+        } else {
+            for (int j = 0; j < sym[i].n; j++) {
+                i32 bid = v->byte_token_ids[(unsigned char)sym[i].text[j]];
+                if (bid >= 0 && n < max_tokens) tokens[n++] = (u32)bid;
+            }
+        }
+    }
+    sfree(sym);
+    sfree(norm);
+    return n;
+}
+
+/* Generic text encoder: SentencePiece for SPM vocabs, BPE otherwise.
+ * Starts a fresh fragment, so SPM text gets the leading word-boundary
+ * marker (matching llama.cpp's initial is_prev_special == true). */
+static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int max_tokens) {
+    if (v->tokenizer_type == TOKENIZER_TYPE_SPM)
+        return tokenize_spm(v, text, text_len, tokens, max_tokens, true);
+    return tokenize_bpe(v, text, text_len, tokens, max_tokens);
+}
+
+/* ChatML prompt template, shared by the Qwen family (and any other
+ * arch whose ops table points here).  Lays out the first turn:
+ *   [<|im_start|>system\n{sys}<|im_end|>\n]
+ *   <|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n
+ * Returns 0 when the vocabulary lacks the ChatML markers. */
+int chatml_prompt(Session *s, const char *user_msg, const char *sys_msg,
+                  u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
     int n = 0;
 
     /* Pre-lookup format tokens. */
     i32 im_start_id = v->im_start_id;
     i32 im_end_id   = v->im_end_id;
-    if (im_start_id == (i32)VOCAB_ID_NONE) {
+    if (im_start_id == (i32)VOCAB_ID_NONE)
         im_start_id = vocab_lookup(v, "<|im_start|>");
-        if (im_start_id == (i32)VOCAB_ID_NONE) return 0;
-    }
-    if (im_end_id == (i32)VOCAB_ID_NONE) {
+    if (im_end_id == (i32)VOCAB_ID_NONE)
         im_end_id = vocab_lookup(v, "<|im_end|>");
-        if (im_end_id == (i32)VOCAB_ID_NONE) return 0;
-    }
+    if (im_start_id == (i32)VOCAB_ID_NONE || im_end_id == (i32)VOCAB_ID_NONE)
+        return 0;
     i32 nl_id = v->byte_token_ids[(unsigned char)'\n'];
 
     #define ADD(id) do { \
         if (n < max_tokens) tokens[n++] = (u32)(id); \
     } while (0)
     #define ADD_TEXT(txt) do { \
-        int tlen = (int)strlen(txt); \
-        int added = tokenize_bpe(v, txt, tlen, tokens + n, max_tokens - n); \
-        n += added; \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
     } while (0)
 
     if (sys_msg && sys_msg[0]) {
@@ -217,32 +331,32 @@ int build_chat_tokens(Vocab *v, const char *user_msg, const char *sys_msg,
     return n;
 }
 
-/* Build continuation tokens for multi-turn chat.
- * Appends: <|im_end|>\n<|im_start|>user\n<user_msg><|im_end|>\n<|im_start|>assistant\n
- * This closes the previous assistant block and opens a new user→assistant round. */
-int build_continuation_tokens(Vocab *v, const char *user_msg,
-                               u32 *tokens, int max_tokens) {
+/* ChatML continuation: closes the previous assistant block and opens a
+ * new user→assistant round:
+ *   <|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n */
+int chatml_continuation(Session *s, const char *user_msg,
+                        u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
     int n = 0;
 
     i32 im_start_id = v->im_start_id;
     i32 im_end_id   = v->im_end_id;
-    if (im_start_id == (i32)VOCAB_ID_NONE) {
+    if (im_start_id == (i32)VOCAB_ID_NONE)
         im_start_id = vocab_lookup(v, "<|im_start|>");
-        if (im_start_id == (i32)VOCAB_ID_NONE) return 0;
-    }
-    if (im_end_id == (i32)VOCAB_ID_NONE) {
+    if (im_end_id == (i32)VOCAB_ID_NONE)
         im_end_id = vocab_lookup(v, "<|im_end|>");
-        if (im_end_id == (i32)VOCAB_ID_NONE) return 0;
-    }
+    if (im_start_id == (i32)VOCAB_ID_NONE || im_end_id == (i32)VOCAB_ID_NONE)
+        return 0;
     i32 nl_id = v->byte_token_ids[(unsigned char)'\n'];
 
     #define ADD(id) do { \
         if (n < max_tokens) tokens[n++] = (u32)(id); \
     } while (0)
     #define ADD_TEXT(txt) do { \
-        int tlen = (int)strlen(txt); \
-        int added = tokenize_bpe(v, txt, tlen, tokens + n, max_tokens - n); \
-        n += added; \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
     } while (0)
 
     ADD(im_end_id);
@@ -256,6 +370,93 @@ int build_continuation_tokens(Vocab *v, const char *user_msg,
     ADD(im_start_id);
     ADD_TEXT("assistant");
     ADD(nl_id);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
+/* Encode one Gemma template fragment.  SPM text that follows a special
+ * token gets the word-boundary marker, matching llama.cpp. */
+static int gemma_text(Vocab *v, const char *txt, u32 *out, int max_out, bool prefix_space) {
+    int len = (int)strlen(txt);
+    if (v->tokenizer_type == TOKENIZER_TYPE_SPM)
+        return tokenize_spm(v, txt, len, out, max_out, prefix_space);
+    return tokenize_bpe(v, txt, len, out, max_out);
+}
+
+/* Gemma chat template.  Gemma has no dedicated system role, so the
+ * system prompt is merged into the first user turn:
+ *   <bos><start_of_turn>user\n{sys}\n\n{user}<end_of_turn>\n
+ *        <start_of_turn>model\n
+ * Returns 0 when the vocabulary lacks the turn markers. */
+int gemma3_chat_prompt(Session *s, const char *user_msg, const char *sys_msg,
+                       u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 st = v->start_of_turn_id;
+    i32 et = v->end_of_turn_id;
+    if (st == (i32)VOCAB_ID_NONE || et == (i32)VOCAB_ID_NONE) return 0;
+    int n = 0;
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt, sp) do { \
+        if (n < max_tokens) \
+            n += gemma_text(v, txt, tokens + n, max_tokens - n, sp); \
+    } while (0)
+
+    if (v->bos_id != (i32)VOCAB_ID_NONE) ADD(v->bos_id);
+    ADD(st);
+    ADD_TEXT("user", true);      /* word-boundary marker after <start_of_turn> */
+    ADD_TEXT("\n", false);
+    if (sys_msg && sys_msg[0]) {
+        ADD_TEXT(sys_msg, false);
+        ADD_TEXT("\n\n", false);
+    }
+    ADD_TEXT(user_msg, false);
+    ADD(et);
+    ADD_TEXT("\n", false);
+    ADD(st);
+    ADD_TEXT("model", true);
+    ADD_TEXT("\n", false);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
+/* Gemma continuation: close the previous model turn and open the next
+ * user/model round:
+ *   <end_of_turn>\n<start_of_turn>user\n{user}<end_of_turn>\n
+ *                  <start_of_turn>model\n */
+int gemma3_chat_continuation(Session *s, const char *user_msg,
+                             u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 st = v->start_of_turn_id;
+    i32 et = v->end_of_turn_id;
+    if (st == (i32)VOCAB_ID_NONE || et == (i32)VOCAB_ID_NONE) return 0;
+    int n = 0;
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt, sp) do { \
+        if (n < max_tokens) \
+            n += gemma_text(v, txt, tokens + n, max_tokens - n, sp); \
+    } while (0)
+
+    ADD(et);
+    ADD_TEXT("\n", false);
+    ADD(st);
+    ADD_TEXT("user", true);
+    ADD_TEXT("\n", false);
+    ADD_TEXT(user_msg, false);
+    ADD(et);
+    ADD_TEXT("\n", false);
+    ADD(st);
+    ADD_TEXT("model", true);
+    ADD_TEXT("\n", false);
 
     #undef ADD
     #undef ADD_TEXT
