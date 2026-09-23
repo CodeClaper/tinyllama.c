@@ -292,6 +292,6 @@ const ArchOps gemma3_ops = {
     .reset             = gemma3_reset,
     .decode            = gemma3_decode,
     .graph_build       = gemma3_graph_build,
-    .chat_prompt       = gemma3_chat_prompt,
-    .chat_continuation = gemma3_chat_continuation,
+    .chat_prompt       = gemma_chat_prompt,
+    .chat_continuation = gemma_chat_continuation,
 };

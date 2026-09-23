@@ -390,7 +390,7 @@ static int gemma_text(Vocab *v, const char *txt, u32 *out, int max_out, bool pre
  *   <bos><start_of_turn>user\n{sys}\n\n{user}<end_of_turn>\n
  *        <start_of_turn>model\n
  * Returns 0 when the vocabulary lacks the turn markers. */
-int gemma3_chat_prompt(Session *s, const char *user_msg, const char *sys_msg,
+int gemma_chat_prompt(Session *s, const char *user_msg, const char *sys_msg,
                        u32 *tokens, int max_tokens) {
     Vocab *v = s->en->vocab;
     i32 st = v->start_of_turn_id;
@@ -430,7 +430,7 @@ int gemma3_chat_prompt(Session *s, const char *user_msg, const char *sys_msg,
  * user/model round:
  *   <end_of_turn>\n<start_of_turn>user\n{user}<end_of_turn>\n
  *                  <start_of_turn>model\n */
-int gemma3_chat_continuation(Session *s, const char *user_msg,
+int gemma_chat_continuation(Session *s, const char *user_msg,
                              u32 *tokens, int max_tokens) {
     Vocab *v = s->en->vocab;
     i32 st = v->start_of_turn_id;
