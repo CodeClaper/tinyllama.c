@@ -286,10 +286,11 @@ void graph_free(Graph *g) {
                 total, (unsigned long long)calls);
         for (size_t i = 0; i < sizeof(op_stat_secs) / sizeof(op_stat_secs[0]); i++)
             if (op_stat_secs[i] > 1e-5)
-                fprintf(stderr, "  %-9s %8.3fs %6.1f%%  (%llu calls)\n",
+                fprintf(stderr, "  %-9s %8.3fs %6.1f%%  (%llu calls, avg %.3f ms)\n",
                         op_stat_name[i], op_stat_secs[i],
                         100.0 * op_stat_secs[i] / total,
-                        (unsigned long long)op_stat_calls[i]);
+                        (unsigned long long)op_stat_calls[i],
+                        op_stat_calls[i] ? 1000.0 * op_stat_secs[i] / (double)op_stat_calls[i] : 0.0);
     }
     if (g->plan)
         fprintf(stderr, "graph arena: %.1f MB\n",
