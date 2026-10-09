@@ -284,13 +284,21 @@ void graph_free(Graph *g) {
     if (total > 1e-4) {
         fprintf(stderr, "graph timing: total %.3fs over %llu node execs\n",
                 total, (unsigned long long)calls);
-        for (size_t i = 0; i < sizeof(op_stat_secs) / sizeof(op_stat_secs[0]); i++)
-            if (op_stat_secs[i] > 1e-5)
-                fprintf(stderr, "  %-9s %8.3fs %6.1f%%  (%llu calls, avg %.3f ms)\n",
-                        op_stat_name[i], op_stat_secs[i],
-                        100.0 * op_stat_secs[i] / total,
-                        (unsigned long long)op_stat_calls[i],
-                        op_stat_calls[i] ? 1000.0 * op_stat_secs[i] / (double)op_stat_calls[i] : 0.0);
+        fprintf(stderr, "  +-----------+----------+-------+-------------------------------+\n");
+        fprintf(stderr, "  | %-9s | %8s | %5s | %-29s |\n",
+                "op", "total", "pct", "calls / avg");
+        fprintf(stderr, "  +-----------+----------+-------+-------------------------------+\n");
+        for (size_t i = 0; i < sizeof(op_stat_secs) / sizeof(op_stat_secs[0]); i++) {
+            if (op_stat_secs[i] <= 1e-5) continue;
+            char extra[32];
+            snprintf(extra, sizeof(extra), "%llu / %.3f ms",
+                     (unsigned long long)op_stat_calls[i],
+                     op_stat_calls[i] ? 1000.0 * op_stat_secs[i] / (double)op_stat_calls[i] : 0.0);
+            fprintf(stderr, "  | %-9s | %7.3fs | %4.1f%% | %-29s |\n",
+                    op_stat_name[i], op_stat_secs[i],
+                    100.0 * op_stat_secs[i] / total, extra);
+        }
+        fprintf(stderr, "  +-----------+----------+-------+-------------------------------+\n");
     }
     if (g->plan)
         fprintf(stderr, "graph arena: %.1f MB\n",
