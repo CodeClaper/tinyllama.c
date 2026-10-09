@@ -838,12 +838,12 @@ int gpu_available(void) {
 
 static void gpu_load_tables(void) {
     if (g_tables_loaded) return;
-    CHECK(cudaMemcpyToSymbol(d_iq2_xxs_grid, iq2_xxs_grid, IQ2_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpyToSymbol(d_iq2_xs_grid,  iq2_xs_grid,  IQ2_XS_SIZE  * sizeof(float), 0, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpyToSymbol(d_iq3_xxs_grid, iq3_xxs_grid, IQ3_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpyToSymbol(d_iq1_s_grid,   iq1_s_grid,   IQ1_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpyToSymbol(d_iq4_nl_values, iq4_nl_values, IQ4_NL_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpyToSymbol(d_iq3_s_grid,   iq3_s_grid,   IQ3_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq2_xxs_grid,  iq2_xxs_grid,  IQ2_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq2_xs_grid,   iq2_xs_grid,   IQ2_XS_SIZE  * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq3_xxs_grid,  iq3_xxs_grid,  IQ3_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq1_s_grid,    iq1_s_grid,    IQ1_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq4_nl_values, iq4_nl_values, IQ4_NL_SIZE  * sizeof(float), 0, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(d_iq3_s_grid,    iq3_s_grid,    IQ3_S_SIZE   * sizeof(float), 0, cudaMemcpyHostToDevice));
     g_tables_loaded = 1;
 }
 
