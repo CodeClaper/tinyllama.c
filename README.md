@@ -17,6 +17,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - Supports multiple model architectures:
   - LLaMA
   - Qwen2
+  - Qwen3 / Qwen3.5
   - DeepSeek (including MLA)
   - Falcon
   - Gemma 3
@@ -31,7 +32,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 | Model Family | GGUF Architecture ID | Status |
 |---|---|---|
 | Qwen2 / Qwen2.5 | `qwen2` | Supported |
-| Qwen3 / Qwen3.5 | `qwen35` | WIP |
+| Qwen3 / Qwen3.5 | `qwen35` | Supported |
 | LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | WIP |
 | DeepSeek-V2 | `deepseek2` | WIP |
 | Falcon | `falcon` | WIP |
@@ -169,8 +170,8 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
 | Qwen2.5 1.5B Instruct | CUDA | Q4_K_M | 1403 MB | 480.8 ms | 480.8 ms (27.0 tok/s) | 1739.0 ms | 73.6 |
 | Qwen2.5 1.5B Instruct | CPU | Q3_K_M | 1043 MB | 427.9 ms | 427.9 ms (30.4 tok/s) | 10054.4 ms | 9.8 |
 | Qwen2.5 1.5B Instruct | CUDA | Q3_K_M | 1249 MB | 374.7 ms | 374.7 ms (34.7 tok/s) | 1772.0 ms | 72.2 |
-| Qwen3.5 0.8B | CPU | BF16 | 1883 MB | 799.2 ms | 799.2 ms (16.3 tok/s) | 24080.8 ms | 5.3 |
-| Qwen3.5 0.8B | CUDA | BF16 | 2087 MB | 414.2 ms | 414.2 ms (31.4 tok/s) | 1665.0 ms | 76.9 |
+| Qwen3.5 0.8B | CPU | BF16 | 3013 MB | 609.9 ms | 609.9 ms (57.4 tok/s) | 23790.0 ms | 5.4 |
+| Qwen3.5 0.8B | CUDA | BF16 | 2017 MB | 522.1 ms | 522.1 ms (67.0 tok/s) | 1482.0 ms | 86.4 |
 | Gemma 3 1B Instruct | CPU | F16 | 2597 MB | 540.6 ms | 540.6 ms (66.6 tok/s) | 30472.3 ms | 4.2 |
 | Gemma 3 1B Instruct | CUDA | F16 | 2290 MB | 696.6 ms | 696.6 ms (51.7 tok/s) | 2367.7 ms | 54.1 |
 
