@@ -1,0 +1,54 @@
+[2026-10-13 21:58:46.692058][62865][WARN]:	No output.weight found, using tied embeddings (output = token_embd)
+[2026-10-13 21:58:46.668140][62865][INFO]:	Loading model: /home/zc/Work/model/Gema4b.f16.gguf
+[2026-10-13 21:58:46.692114][62865][INFO]:	Loaded model (gemma3)
+[2026-10-13 21:58:46.692300][62865][INFO]:	ArchConfig: arch=gemma3 n_embd=1152 n_head=4 n_kv_head=1 head_dim=256 kv_head_dim=256 rope_dim=256 n_layer=26 n_vocab=262144
+[2026-10-13 21:58:46.752163][62865][INFO]:	Gemma3 init: n_embd=1152 n_head=4 n_kv_head=1 head_dim=256 kv_head_dim=256 n_layer=26 n_vocab=262144 ctx_size=4096
+[2026-10-13 21:58:46.752182][62865][INFO]:	Gemma3 init: ffn_hidden=6912 rope_theta=1000000.0 rope_theta_swa=10000.0 n_swa=512 attn_scale=1.000000 logit_softcap=0.0
+[2026-10-13 21:58:46.752184][62865][INFO]:	Session created: ctx_size=4096 n_layer=26 n_embd=1152 n_head=4 head_dim=256
+[2026-10-13 21:58:46.752186][62865][INFO]:	Tokenizing input...
+[2026-10-13 21:58:46.752269][62865][INFO]:	Prompt tokens: 36
+[2026-10-13 21:58:46.752289][62865][INFO]:	Running benchmark: 1 iterations, 128 tokens each
+................................................................................................................................[1/1] TTFT: 696.6 ms | Prefill: 696.6 ms | Generate: 2367.7 ms (128 tokens, 54.1 tok/s)    
+graph timing: total 0.668s over 70950 node execs
+  +-----------+----------+-------+-------------------------------+
+  | op        |    total |   pct | calls / avg                   |
+  +-----------+----------+-------+-------------------------------+
+  | embed     |   0.059s |  8.8% | 129 / 0.454 ms                |
+  | rms_norm  |   0.182s | 27.3% | 20253 / 0.009 ms              |
+  | matmul    |   0.386s | 57.7% | 23607 / 0.016 ms              |
+  | attn      |   0.009s |  1.4% | 3354 / 0.003 ms               |
+  | rope      |   0.009s |  1.4% | 6708 / 0.001 ms               |
+  | add/mul   |   0.014s |  2.0% | 10062 / 0.001 ms              |
+  | other     |   0.010s |  1.5% | 6837 / 0.001 ms               |
+  +-----------+----------+-------+-------------------------------+
+graph arena: 436.0 MB
+
+
+===== TinyLLaMA Benchmark =====
+Model:              /home/zc/Work/model/Gema4b.f16.gguf
+Architecture:       gemma3
+Device:             CUDA
+Context Size:       4096
+Threads:            12
+Prompt Tokens:      36
+Target Tokens:      128
+Repeats:            1
+Temperature:        0.80
+Top-k:              40
+Top-p:              0.90
+Min-p:              0.05
+Repeat Penalty:     1.10
+Repeat Last N:      64
+Frequency Penalty:  0.00
+Presence Penalty:   0.00
+────────────────────────────────────────────────────────────────────────────────────────────────
+[1/1] TTFT:    696.6 ms | Prefill:    696.6 ms (   51.7 tok/s) | Generate:   2367.7 ms (128 tok,    54.1 tok/s)
+────────────────────────────────────────────────────────────────────────────────────────────────
+Avg TTFT:          696.6 ms
+Avg Prefill:       696.6 ms (   51.7 tok/s)
+Avg Generate:     2367.7 ms (   54.1 tok/s)
+Min/Max TTFT:     696.6 / 696.6 ms
+Min/Max Generate: 2367.7 / 2367.7 ms
+Peak Memory:    2290 MB
+════════════════════════════════════════════════════════════════════════════════════════════════
+[2026-10-13 21:58:49.817046][62865][INFO]:	Output written to /home/zc/Work/c/tinyllama.c/docs/bench/Gema4b.f16_20261013_215846.gen.txt

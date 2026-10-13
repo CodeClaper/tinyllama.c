@@ -19,6 +19,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
   - Qwen2
   - DeepSeek (including MLA)
   - Falcon
+  - Gemma 3
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
 - epoll-based event loop for HTTP serving
 - Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
@@ -34,6 +35,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 | LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | WIP |
 | DeepSeek-V2 | `deepseek2` | WIP |
 | Falcon | `falcon` | WIP |
+| Gemma 3 | `gemma3` | Supported |
 
 ## Dependencies
 
@@ -159,7 +161,7 @@ The benchmark runs the prompt through prefill and generation phases, repeating `
 
 ## Benchmark
 
-Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tokens, 128 generated tokens). Offloading matmuls to the GPU speeds up generation by roughly 6-14x over CPU-only:
+Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated tokens). Offloading matmuls to the GPU speeds up generation by roughly 6-14x over CPU-only:
 
 | Model | Device | Quant | Peak Mem | TTFT | Prefill | Generate | tok/s |
 |---|---|---|---|---|---|---|---|
@@ -169,6 +171,8 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tok
 | Qwen2.5 1.5B Instruct | CUDA | Q3_K_M | 1249 MB | 374.7 ms | 374.7 ms (34.7 tok/s) | 1772.0 ms | 72.2 |
 | Qwen3.5 0.8B | CPU | BF16 | 1883 MB | 799.2 ms | 799.2 ms (16.3 tok/s) | 24080.8 ms | 5.3 |
 | Qwen3.5 0.8B | CUDA | BF16 | 2087 MB | 414.2 ms | 414.2 ms (31.4 tok/s) | 1665.0 ms | 76.9 |
+| Gemma 3 1B Instruct | CPU | F16 | 2597 MB | 540.6 ms | 540.6 ms (66.6 tok/s) | 30472.3 ms | 4.2 |
+| Gemma 3 1B Instruct | CUDA | F16 | 2290 MB | 696.6 ms | 696.6 ms (51.7 tok/s) | 2367.7 ms | 54.1 |
 
 > CUDA row built with `GPU=1 make`; matmuls above a size threshold run on the GPU, smaller ones fall back to CPU. The GPU path trades slower prefill on the small prompt (fixed kernel-launch overhead per op) for a large generation throughput win.
 
@@ -211,6 +215,7 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 13 prompt tok
     - qwen35.c        — Qwen3.5 architecture
     - deepseek.c      — DeepSeek architecture
     - falcon.c        — Falcon architecture
+    - gemma3.c        — Gemma 3 architecture
   - backend/          — Hardware backends
     - cpu/            — CPU-optimized kernels
       - cpu.c         — Kernel dispatcher
