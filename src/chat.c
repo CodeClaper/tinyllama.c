@@ -280,6 +280,7 @@ int main(int argc, char *argv[]) {
             n_prompt = (int)room;
             if (n_prompt <= 0) fatal("Context full — use /clear to reset");
         }
+        double t_prefill = time_sec();
         bool ok = graph_execute(session, prompt_tokens,
                                 (u32)n_prompt, session->logits);
         if (!ok) fatal("Forward pass failed");
@@ -292,6 +293,7 @@ int main(int argc, char *argv[]) {
                     co.frequency_penalty, co.presence_penalty, 
                     session->tokens, session->n_tokens)
             : sample_greedy(session->logits, session->cfg.n_vocab);
+        double ttft_ms = (time_sec() - t_prefill) * 1000.0;
 
         /* Generate. */
         u32 n_gen = 0;
@@ -326,7 +328,7 @@ int main(int argc, char *argv[]) {
         }
         double dt = time_sec() - t0;
         double tok_s = dt > 0.0 ? (double)n_gen / dt : 0.0;
-        printf("\n[%u tokens, %.1f tok/s]\n", n_gen, tok_s);
+        printf("\n[%u tokens, %.1f tok/s, TTFT %.1f ms]\n", n_gen, tok_s, ttft_ms);
     }
 
     printf("Bye.\n");
