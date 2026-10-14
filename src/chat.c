@@ -222,6 +222,12 @@ int main(int argc, char *argv[]) {
     session->repeat_last_n    = co.repeat_last_n;
     session->frequency_penalty = co.frequency_penalty;
     session->presence_penalty  = co.presence_penalty;
+
+    /* Warmup: build the graph, plan the arena and preload weights onto
+     * the device backend so the first turn only pays compute. */
+    if (!graph_prepare(session))
+        fprintf(stderr, "Warning: graph warmup failed; first turn will be slower.\n");
+
     Vocab *v = engine->vocab;
     u32 max_tokens = session->max_tokens > 0 ? session->max_tokens : 256;
     bool first_turn = true;
