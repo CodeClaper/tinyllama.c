@@ -1,0 +1,10 @@
+<think>
+
+</think>
+
+**Sir Isaac Newton** (1643–1727) was an English mathematician, physicist, astronomer, and philosopher best known as the father of **classical mechanics**. His work fundamentally changed how scientists understand motion, gravity, and light.
+
+### Core Contributions
+Newton's most famous theories include:
+
+*   **The Law of Universal Gravitation**: He formulated this principle that every particle of matter in the universe attracts every other particle with a force that is directly proportional to the product of their masses and inversely proportional to the square of the distance between them. This law explains why objects
