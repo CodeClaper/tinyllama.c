@@ -48,4 +48,10 @@ u32 graph_state(Graph *g, void *ptr);
  * reuses the slots.  graph_compute() calls this lazily on first run. */
 bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits);
 
+/* Build the graph (if needed), generate the execution plan and preload
+ * every weight onto the device backend.  Call once at startup so the
+ * first request does not pay the graph-build / planning / H2D cost
+ * (warmup).  Safe to call repeatedly. */
+bool graph_prepare(Session *s);
+
 #endif

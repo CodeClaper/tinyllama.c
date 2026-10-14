@@ -639,6 +639,11 @@ void metal_arena_free(void *base) {
     pthread_mutex_unlock(&g_lock);
 }
 
+/* Warmup: force a tensor into the persistent device weight cache. */
+void metal_weight_preload(TensorInfo *ti) {
+    (void)metal_i_weight(ti);
+}
+
 void metal_shutdown(void) {
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_cache_n; i++) g_cache_dev[i] = nil;

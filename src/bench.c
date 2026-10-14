@@ -167,6 +167,11 @@ int main(int argc, char *argv[]) {
     if (n_prompt == 0) slog(ERROR, "No valid tokens in input");
     slog(INFO, "Prompt tokens: %d", n_prompt);
 
+    /* Warmup: build the graph, plan the arena and preload weights so the
+     * measured TTFT excludes the one-time setup / H2D cost. */
+    if (!graph_prepare(session))
+        slog(WARN, "Graph warmup failed; timings include setup cost");
+
     /* Benchmark iterations. */
     double *prefill_times = smalloc((size_t)opts.repeat * sizeof(double));
     double *gen_times     = smalloc((size_t)opts.repeat * sizeof(double));

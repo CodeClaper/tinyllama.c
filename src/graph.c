@@ -645,6 +645,30 @@ static void cache_destroy(GraphPlan *p) {
     p->cache       = NULL;
 }
 
+/* Warmup: preload every weight tensor the graph references onto the
+ * plan's device backend so the first forward pass never pays an H2D
+ * cost mid-compute.  The device backend caches each upload for the
+ * process lifetime, so this is a one-time cost.  CPU weights are the
+ * mmap itself and host-resident already, so the CPU plan is a no-op. */
+static void graph_warmup(Graph *g) {
+    GraphPlan *p = g ? g->plan : NULL;
+    if (!p) return;
+
+    for (GraphNode *n = g->head; n; n = n->next) {
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
+            TensorInfo *w = n->weights[k];
+            if (!w) continue;
+#if defined(GPU_BUILD)
+            if (p->backend == BACKEND_CUDA) { (void)gpu_weight_dev(w); continue; }
+#endif
+#if defined(METAL_BUILD)
+            if (p->backend == BACKEND_METAL) { metal_weight_preload(w); continue; }
+#endif
+            (void)w;
+        }
+    }
+}
+
 /* Auto-select the compute backend targeted by the graph's execution
  * plan; the selection must run BEFORE the arena sweep, because the
  * backend decides where the plan's arena is allocated (VRAM vs host).
@@ -680,7 +704,9 @@ static bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
     if (g->plan) return true;                  /* already planned */
     if (!backend_plan(g, s)) return false;     /* backend first: arena placement */
-    return arena_plan(g, s);
+    if (!arena_plan(g, s)) return false;
+    graph_warmup(g);                           /* upload weights to the device */
+    return true;
 }
 
 static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
@@ -874,5 +900,29 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
     if (logits && logits != s->logits)
         memcpy(logits, s->logits, (size_t)s->cfg.n_vocab * sizeof(float));
 
+    return true;
+}
+
+/* Build + plan + preload up front.  graph_execute() does all of this
+ * lazily on first call; calling this at startup moves the one-time
+ * graph-build, arena planning and weight upload (warmup) off the first
+ * request's critical path, so TTFT reflects compute only. */
+bool graph_prepare(Session *s) {
+    if (!s) return false;
+    if (!s->graph) {
+        if (!s->ops.graph_build) {
+            slog(WARN, "graph_prepare: no graph builder for this architecture");
+            return false;
+        }
+        s->graph = s->ops.graph_build(s, s->ctx_size);
+        if (!s->graph) {
+            slog(WARN, "graph_prepare: graph build failed");
+            return false;
+        }
+    }
+    if (!s->graph->plan && !graph_plan(s->graph, s)) {
+        slog(WARN, "graph_prepare: plan / warmup failed");
+        return false;
+    }
     return true;
 }

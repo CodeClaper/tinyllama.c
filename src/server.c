@@ -454,6 +454,11 @@ int main(int argc, char *argv[]) {
     session->frequency_penalty = so.frequency_penalty;
     session->presence_penalty  = so.presence_penalty;
 
+    /* Warmup: build the graph, plan the arena and preload weights onto
+     * the device backend so the first request only pays compute. */
+    if (!graph_prepare(session))
+        slog(WARN, "Graph warmup failed; first request will be slower");
+
     /* 4. Set up server & signal handling. */
     Server server;
     server.engine = engine;

@@ -70,6 +70,10 @@ void metal_shutdown(void);
 void *metal_arena_alloc(size_t bytes);
 void  metal_arena_free(void *base);
 
+/* Warmup: upload a weight tensor to the persistent device cache now
+ * instead of on first matmul.  No-op when no device is available. */
+void  metal_weight_preload(TensorInfo *ti);
+
 #ifdef __cplusplus
 }
 #endif
