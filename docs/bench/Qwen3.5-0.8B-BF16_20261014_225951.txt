@@ -1,0 +1,57 @@
+[2026-10-14 22:59:51.966791][112227][WARN]:	No output.weight found, using tied embeddings (output = token_embd)
+[2026-10-14 22:59:51.944052][112227][INFO]:	Loading model: /home/zc/Work/model/Qwen3.5-0.8B-BF16.gguf
+[2026-10-14 22:59:51.966863][112227][INFO]:	Loaded model (qwen35)
+[2026-10-14 22:59:51.967061][112227][INFO]:	ArchConfig: arch=llama n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 kv_head_dim=256 rope_dim=64 n_layer=24 n_vocab=248320
+[2026-10-14 22:59:51.973004][112227][INFO]:	Qwen3 SSM: n_k=16 n_v=16 head_k=128 head_v=128 key_dim=2048 val_dim=2048 fused=6144 conv_k=4 layers=18 (state_per_layer=1.1 MB)
+[2026-10-14 22:59:51.973012][112227][INFO]:	Qwen3 init: n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 kv_head_dim=256 n_layer=24 n_vocab=248320 ctx_size=4096
+[2026-10-14 22:59:51.973014][112227][INFO]:	Qwen3 init: rope_theta=10000000.000000
+[2026-10-14 22:59:51.973016][112227][INFO]:	Session created: ctx_size=4096 n_layer=24 n_embd=1024 n_head=8 head_dim=256
+[2026-10-14 22:59:51.973018][112227][INFO]:	Tokenizing input...
+[2026-10-14 22:59:51.973038][112227][INFO]:	Prompt tokens: 14
+[2026-10-14 22:59:51.973057][112227][INFO]:	Running benchmark: 1 iterations, 128 tokens each
+................................................................................................................................[1/1] TTFT: 451.7 ms | Prefill: 451.7 ms | Generate: 1271.4 ms (128 tokens, 100.7 tok/s)    
+graph timing: total 0.315s over 59211 node execs
+  +-----------+----------+-------+-------------------------------+
+  | op        |    total |   pct | calls / avg                   |
+  +-----------+----------+-------+-------------------------------+
+  | embed     |   0.048s | 15.3% | 129 / 0.373 ms                |
+  | rms_norm  |   0.034s | 10.7% | 7869 / 0.004 ms               |
+  | matmul    |   0.181s | 57.3% | 24123 / 0.007 ms              |
+  | attn      |   0.002s |  0.8% | 774 / 0.003 ms                |
+  | rope      |   0.002s |  0.6% | 1548 / 0.001 ms               |
+  | silu      |   0.010s |  3.1% | 7740 / 0.001 ms               |
+  | add/mul   |   0.015s |  4.7% | 11610 / 0.001 ms              |
+  | gate      |   0.001s |  0.3% | 774 / 0.001 ms                |
+  | ssm       |   0.023s |  7.2% | 4644 / 0.005 ms               |
+  +-----------+----------+-------+-------------------------------+
+graph arena: 1128.3 MB
+
+
+===== TinyLLaMA Benchmark =====
+Model:              /home/zc/Work/model/Qwen3.5-0.8B-BF16.gguf
+Architecture:       qwen35
+Device:             CUDA
+Context Size:       4096
+Threads:            12
+Prompt Tokens:      14
+Target Tokens:      128
+Repeats:            1
+Temperature:        0.80
+Top-k:              40
+Top-p:              0.90
+Min-p:              0.05
+Repeat Penalty:     1.10
+Repeat Last N:      64
+Frequency Penalty:  0.00
+Presence Penalty:   0.00
+────────────────────────────────────────────────────────────────────────────────────────────────
+[1/1] TTFT:    451.7 ms | Prefill:    451.7 ms (   31.0 tok/s) | Generate:   1271.4 ms (128 tok,   100.7 tok/s)
+────────────────────────────────────────────────────────────────────────────────────────────────
+Avg TTFT:          451.7 ms
+Avg Prefill:       451.7 ms (   31.0 tok/s)
+Avg Generate:     1271.4 ms (  100.7 tok/s)
+Min/Max TTFT:     451.7 / 451.7 ms
+Min/Max Generate: 1271.4 / 1271.4 ms
+Peak Memory:    1634 MB
+════════════════════════════════════════════════════════════════════════════════════════════════
+[2026-10-14 22:59:53.697708][112227][INFO]:	Output written to /home/zc/Work/c/tinyllama.c/docs/bench/Qwen3.5-0.8B-BF16_20261014_225951.gen.txt
