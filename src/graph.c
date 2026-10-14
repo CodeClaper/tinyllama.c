@@ -539,11 +539,59 @@ static bool arena_plan(Graph *g, Session *s) {
     return true;
 }
 
+/* Total bytes of every distinct weight tensor the graph references.
+ * Weights are mmap-backed model tensors shared across nodes, so a
+ * pointer first seen at a lower build index is counted only once. */
+static size_t graph_weights_bytes(const Graph *g) {
+    size_t total = 0;
+    for (GraphNode *n = g->head; n; n = n->next) {
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
+            TensorInfo *w = n->weights[k];
+            if (!w) continue;
+            bool seen = false;
+            for (GraphNode *m = g->head; m && !seen; m = m->next) {
+                if (m->idx > n->idx) break;
+                int lim = (m == n) ? k : GRAPH_NODE_MAX_SRC;
+                for (int t = 0; t < lim; t++)
+                    if (m->weights[t] == w) { seen = true; break; }
+            }
+            if (!seen) total += (size_t)w->bytes;
+        }
+    }
+    return total;
+}
+
+/* Bytes held by the session's KV cache (standard or MLA layout). */
+static size_t session_kvcache_bytes(const Session *s) {
+    const KvCache *kc = &s->cache;
+    const ArchConfig *c = &s->cfg;
+    if (!kc->std) return 0;
+
+    u64 total = 0;
+    bool mla = s->en && s->en->model && s->en->model->arch == ARCH_DEEPSEEK;
+    if (mla) {
+        u64 rank = c->kv_lora_rank ? c->kv_lora_rank : 1;
+        for (u32 i = 0; i < kc->n_layer; i++) {
+            const MLAKvCache *mc = &kc->mla[i];
+            total += (u64)mc->cap_raw * c->head_dim;   /* raw_kv            */
+            total += (u64)mc->comp_cap * rank * 4;     /* comp/state KV x4  */
+            total += (u64)mc->comp_cap * 2;            /* score buffers x2  */
+        }
+    } else {
+        /* K and V: [cap][n_kv_head][head_dim] per layer. */
+        for (u32 i = 0; i < kc->n_layer; i++)
+            total += (u64)kc->std[i].cap * kc->n_kv_head * kc->head_dim * 2;
+    }
+    return (size_t)(total * sizeof(float));
+}
+
 /* Auto-select the compute backend targeted by the graph's execution
  * plan; the selection must run BEFORE the arena sweep, because the
  * backend decides where the plan's arena is allocated (VRAM vs host).
- * A caller may pin the backend explicitly by pre-seeding the plan. */
-static bool backend_plan(Graph *g) {
+ * A caller may pin the backend explicitly by pre-seeding the plan.
+ * The static memory footprint (weights + KV cache) is tallied here;
+ * the activation arena size is filled in by arena_plan(). */
+static bool backend_plan(Graph *g, Session *s) {
     if (!g) return false;
     if (!g->plan) {
         g->plan = scalloc(1, sizeof(GraphPlan));
@@ -562,13 +610,15 @@ static bool backend_plan(Graph *g) {
 #endif
         g->plan->backend = backend;
     }
+    g->plan->weights_size = graph_weights_bytes(g);
+    if (s) g->plan->kvcache_size = session_kvcache_bytes(s);
     return true;
 }
 
 static bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
-    if (g->plan) return true;           /* already planned */
-    if (!backend_plan(g)) return false; /* backend first: arena placement */
+    if (g->plan) return true;                  /* already planned */
+    if (!backend_plan(g, s)) return false;     /* backend first: arena placement */
     return arena_plan(g, s);
 }
 

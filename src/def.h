@@ -423,6 +423,8 @@ typedef struct GraphPlan {
      * lifetime analysis on the first execution. */
     void        *arena;
     size_t      arena_size;
+    size_t      weights_size;
+    size_t      kvcache_size;
 } GraphPlan;
 
 
