@@ -16,9 +16,8 @@
  * staged in an auxiliary shared buffer at 256-byte-aligned offsets
  * (constant-buffer alignment).
  *
- * The KV cache lives in host memory allocated by the arch init; this
- * backend keeps a per-layer device mirror that op_kv_write fills
- * directly from the arena, so attention runs device-resident.  Gated
+ * The KV cache is allocated on this backend as part of the graph plan
+ * (graph.c cache_build), so attention runs device-resident.  Gated
  * DeltaNet state gets a zero-initialized device mirror, reset when a
  * batch starts at position 0.
  */
@@ -178,42 +177,6 @@ static id<MTLBuffer> weight_f32(TensorInfo *ti) {
     g_wc_buf[g_wc_n] = f;
     g_wc_n++;
     return f;
-}
-
-/* ================================================================
- * KV-cache device mirror
- * ================================================================ */
-
-#define OP_KV_MAX 256
-typedef struct {
-    const float *host;   /* akc->k — cache key                  */
-    id<MTLBuffer> k, v;  /* [cap * n_kv_head * kv_head_dim]     */
-    u64 cap;             /* float capacity of each buffer       */
-} OpKv;
-static OpKv g_kv[OP_KV_MAX];
-static int  g_kv_n;
-
-static OpKv *kv_get(const float *host, u64 need) {
-    for (int i = 0; i < g_kv_n; i++) {
-        if (g_kv[i].host != host) continue;
-        if (g_kv[i].cap >= need) return &g_kv[i];
-        g_kv[i].k = [metal_i_dev() newBufferWithLength:(NSUInteger)(need * sizeof(float))
-                                               options:MTLResourceStorageModeShared];
-        g_kv[i].v = [metal_i_dev() newBufferWithLength:(NSUInteger)(need * sizeof(float))
-                                               options:MTLResourceStorageModeShared];
-        g_kv[i].cap = need;
-        return &g_kv[i];
-    }
-    if (g_kv_n >= OP_KV_MAX) return NULL;
-    OpKv *e = &g_kv[g_kv_n];
-    e->host = host;
-    e->cap  = need;
-    e->k = [metal_i_dev() newBufferWithLength:(NSUInteger)(need * sizeof(float))
-                                      options:MTLResourceStorageModeShared];
-    e->v = [metal_i_dev() newBufferWithLength:(NSUInteger)(need * sizeof(float))
-                                      options:MTLResourceStorageModeShared];
-    g_kv_n++;
-    return e;
 }
 
 /* ================================================================
@@ -621,13 +584,14 @@ static bool metal_op_ssm_delta(OpCtx *c) {
 
 /* OP_ATTN */
 static bool metal_op_attn(OpCtx *c) {
-    if (!c->s->cache.std) {
+    KvCache *kc = c->g->plan->cache;
+    if (!kc || !kc->std) {
         slog(WARN, "metal_op_attn: OP_ATTN requires the std KV cache");
         return false;
     }
     u32 layer = op_param(c, 0);
     u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
-    AttnKvCache *akc = &c->s->cache.std[layer];
+    AttnKvCache *akc = &kc->std[layer];
     if (!akc->k || !akc->v) return false;
 
     u32 n_head = c->cfg->n_head;
@@ -636,8 +600,12 @@ static bool metal_op_attn(OpCtx *c) {
     u32 gqa    = n_head / n_kv;
     u64 hs     = (u64)akc->cap * khd;
 
-    OpKv *e = kv_get(akc->k, (u64)akc->cap * n_kv * khd);
-    if (!e || !e->k || !e->v) return false;
+    /* The cache buffers are arena-allocated on this backend, so they are
+     * already device-resident: resolve their MTLBuffer + offset directly. */
+    id<MTLBuffer> ck, cv;
+    NSUInteger cko, cvo;
+    if (!bind_ptr(akc->k, &ck, &cko) || !bind_ptr(akc->v, &cv, &cvo))
+        return false;
 
     id<MTLBuffer> kd, vd, dst;
     NSUInteger ko, vo, doff;
@@ -646,7 +614,7 @@ static bool metal_op_attn(OpCtx *c) {
         !bind_ptr(c->dst, &dst, &doff))
         return false;
 
-    /* Phase 1: write-through into the device mirror. */
+    /* Phase 1: write-through into the cache. */
     u64 total = (u64)c->n * n_kv * khd;
     NSUInteger aoff = args_alloc(8 * sizeof(uint32_t));
     if (aoff == (NSUInteger)-1) return false;
@@ -655,12 +623,12 @@ static bool metal_op_attn(OpCtx *c) {
     put_u64(p, 3, hs);
     p[5] = c->pos;
     put_u64(p, 6, total);
-    id<MTLBuffer> bufs1[5] = { e->k, e->v, kd, vd, g_args };
-    NSUInteger    offs1[5] = { 0, 0, ko, vo, aoff };
+    id<MTLBuffer> bufs1[5] = { ck, cv, kd, vd, g_args };
+    NSUInteger    offs1[5] = { cko, cvo, ko, vo, aoff };
     dispatch("op_kv_write", bufs1, offs1, 5, op_blocks(total));
-    c->s->cache.std[layer].n = c->pos + c->n;
+    akc->n = c->pos + c->n;
 
-    /* Phase 2: causal attention over the mirror. */
+    /* Phase 2: causal attention over the cache. */
     NSUInteger aoff2 = args_alloc(10 * sizeof(uint32_t));
     if (aoff2 == (NSUInteger)-1) return false;
     uint32_t *q = args_ptr(aoff2);
@@ -672,8 +640,8 @@ static bool metal_op_attn(OpCtx *c) {
     id<MTLBuffer> qd;
     NSUInteger qoff;
     if (!bind_ptr(op_src(c, 0), &qd, &qoff)) return false;
-    id<MTLBuffer> bufs2[5] = { qd, e->k, e->v, dst, g_args };
-    NSUInteger    offs2[5] = { qoff, 0, 0, doff, aoff2 };
+    id<MTLBuffer> bufs2[5] = { qd, ck, cv, dst, g_args };
+    NSUInteger    offs2[5] = { qoff, cko, cvo, doff, aoff2 };
     dispatch("op_attn", bufs2, offs2, 5, (NSUInteger)c->r * n_head);
     return true;
 }

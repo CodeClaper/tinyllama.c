@@ -1,12 +1,12 @@
 /*
  * gpu_op.cu — CUDA graph operators (device twins of graph.c's op_table).
  *
- * The graph executor runs with the arena, the session KV cache, the
- * Gated DeltaNet state buffers and the token ids all resident in VRAM,
- * so activations flow device-to-device and no per-op H2D/D2H takes
- * place.  Weights are the only host-originated data: they are served
- * from gpu.cu's persistent device cache through the gpu_*_dev()
- * primitives in gpu.h (uploaded once on first use).
+ * The graph executor runs with the arena, the KV cache (both built into
+ * the graph plan), the Gated DeltaNet state buffers and the token ids
+ * all resident in VRAM, so activations flow device-to-device and no
+ * per-op H2D/D2H takes place.  Weights are the only host-originated
+ * data: they are served from gpu.cu's persistent device cache through
+ * the gpu_*_dev() primitives in gpu.h (uploaded once on first use).
  *
  * Every op function mirrors its CPU twin in graph.c op-for-op — same
  * indexing, same math order, same params[] layout — with the loops
@@ -709,13 +709,14 @@ static bool gpu_op_ssm_delta(OpCtx *c) {
 }
 
 static bool gpu_op_attn(OpCtx *c) {
-    if (!c->s->cache.std) {
+    KvCache *kc = c->g->plan->cache;
+    if (!kc || !kc->std) {
         slog(WARN, (char *)"gpu_op_attn: OP_ATTN requires the std KV cache");
         return false;
     }
     u32 layer = op_param(c, 0);
     u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
-    AttnKvCache *akc = &c->s->cache.std[layer];
+    AttnKvCache *akc = &kc->std[layer];
     if (!akc->k || !akc->v) return false;
 
     u32 n_head = c->cfg->n_head;

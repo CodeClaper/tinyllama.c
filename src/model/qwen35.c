@@ -72,20 +72,6 @@ static bool qwen35_init(Session *s) {
     u32 kv_dim      = c->n_kv_head * kv_head_dim;
     u32 max_fused   = q_dim + 2 * kv_dim;
 
-    /* Allocate standard KV cache. */
-    KvCache *kc   = &s->cache;
-    kc->n_layer   = c->n_layer;
-    kc->head_dim  = kv_head_dim;
-    kc->n_kv_head = c->n_kv_head;
-    kc->std       = scalloc((u64)c->n_layer, sizeof(AttnKvCache));
-
-    u64 per_layer = (u64)s->ctx_size * (u64)c->n_kv_head * (u64)kv_head_dim;
-    for (u32 i = 0; i < c->n_layer; i++) {
-        kc->std[i].k   = scalloc(per_layer, sizeof(float));
-        kc->std[i].v   = scalloc(per_layer, sizeof(float));
-        kc->std[i].cap = (u32)s->ctx_size;
-    }
-
     s->tokens = scalloc((u64)s->ctx_size, sizeof(u32));
     s->logits = scalloc((u64)c->n_vocab, sizeof(float));
 
@@ -274,9 +260,6 @@ static bool qwen35_init(Session *s) {
 }
 
 static void qwen35_reset(Session *s) {
-    KvCache *kc = &s->cache;
-    for (u32 i = 0; i < kc->n_layer; i++)
-        kc->std[i].n = 0;
     s->n_tokens = 0;
 
     /* Zero SSM recurrent state and conv state. */
@@ -294,15 +277,6 @@ static void qwen35_reset(Session *s) {
 }
 
 static void qwen35_free(Session *s) {
-    KvCache *kc = &s->cache;
-    if (kc->std) {
-        for (u32 i = 0; i < kc->n_layer; i++) {
-            sfree(kc->std[i].k);
-            sfree(kc->std[i].v);
-        }
-        sfree(kc->std);
-        kc->std = NULL;
-    }
     sfree(s->tokens);
     sfree(s->logits);
     s->tokens = NULL;

@@ -803,16 +803,17 @@ static bool op_ssm_delta(OpCtx *c) {
 }
 
 static bool op_attn(OpCtx *c) {
-    /* Write the batch's K/V into the session cache at positions
+    /* Write the batch's K/V into the plan's cache at positions
      * pos..pos+n-1, then attend causally over the cached keys (rows
      * 0..pos+qi) — history included. */
-    if (!c->s->cache.std) {
+    KvCache *kc = c->g->plan->cache;
+    if (!kc || !kc->std) {
         slog(WARN, "cpu_graph_op: OP_ATTN requires the std KV cache");
         return false;
     }
     u32 layer = op_param(c, 0);
     u32 win   = op_param(c, 1);   /* sliding window; 0 = full causal */
-    AttnKvCache *akc = &c->s->cache.std[layer];
+    AttnKvCache *akc = &kc->std[layer];
     if (!akc->k || !akc->v) return false;
 
     float *qd  = op_src(c, 0);

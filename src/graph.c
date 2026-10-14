@@ -267,6 +267,7 @@ GraphNode *graph_embed(Graph *g, GraphNode *src, TensorInfo *weight, u32 n_token
 
 static void *arena_alloc(BackendType backend, size_t bytes);
 static void arena_free(BackendType backend, void *arena);
+static void cache_destroy(GraphPlan *p);
 
 Graph *graph_new(void) {
     return scalloc(1, sizeof(Graph));
@@ -309,6 +310,7 @@ void graph_free(Graph *g) {
     /* Every node->data aliases a slot inside the plan's arena; its
      * placement (host vs VRAM) follows the plan's backend. */
     if (g->plan) {
+        cache_destroy(g->plan);
         arena_free(g->plan->backend, g->plan->arena);
         sfree(g->plan);
         g->plan = NULL;
@@ -561,36 +563,95 @@ static size_t graph_weights_bytes(const Graph *g) {
     return total;
 }
 
-/* Bytes held by the session's KV cache (standard or MLA layout). */
-static size_t session_kvcache_bytes(const Session *s) {
-    const KvCache *kc = &s->cache;
-    const ArchConfig *c = &s->cfg;
-    if (!kc->std) return 0;
+/* Build the KV cache inside the plan.  All float storage is carved from
+ * one contiguous block allocated on the plan's backend (host for CPU,
+ * VRAM for CUDA/Metal) — the same allocator as the activation arena.
+ * The KvCache metadata and the per-layer descriptor arrays stay on the
+ * host because the executor reads them there before dispatching each
+ * OP_ATTN. */
+static bool cache_build(Graph *g, Session *s) {
+    ArchConfig *c = &s->cfg;
+    GraphPlan  *p = g->plan;
+    if (p->cache) return true;              /* already built */
 
-    u64 total = 0;
+    KvCache *kc = scalloc(1, sizeof(KvCache));
+    if (!kc) return false;
+    kc->n_layer   = c->n_layer;
+    kc->n_kv_head = c->n_kv_head;
+    p->cache      = kc;
+
     bool mla = s->en && s->en->model && s->en->model->arch == ARCH_DEEPSEEK;
+    kc->is_mla = mla;
+
+    size_t total;
     if (mla) {
-        u64 rank = c->kv_lora_rank ? c->kv_lora_rank : 1;
-        for (u32 i = 0; i < kc->n_layer; i++) {
-            const MLAKvCache *mc = &kc->mla[i];
-            total += (u64)mc->cap_raw * c->head_dim;   /* raw_kv            */
-            total += (u64)mc->comp_cap * rank * 4;     /* comp/state KV x4  */
-            total += (u64)mc->comp_cap * 2;            /* score buffers x2  */
+        kc->head_dim = c->head_dim;
+        u64 rank        = c->kv_lora_rank ? c->kv_lora_rank : 1;
+        u64 raw_bytes   = (u64)s->ctx_size * c->head_dim * sizeof(float);
+        u64 comp_bytes  = (u64)s->ctx_size * rank * sizeof(float);
+        u64 score_bytes = (u64)s->ctx_size * sizeof(float);
+        total = (size_t)(raw_bytes + comp_bytes * 4 + score_bytes * 2) * c->n_layer;
+
+        kc->mla = scalloc((u64)c->n_layer, sizeof(MLAKvCache));
+        if (!kc->mla) return false;
+        p->cache_arena = arena_alloc(p->backend, total);
+        if (!p->cache_arena) return false;
+
+        u8 *base = p->cache_arena;
+        for (u32 i = 0; i < c->n_layer; i++) {
+            MLAKvCache *mc = &kc->mla[i];
+            mc->cap_raw        = s->ctx_size;
+            mc->compress_ratio = c->kv_lora_rank > 0 ? c->head_dim / c->kv_lora_rank : 2;
+            mc->comp_cap       = s->ctx_size;
+            mc->raw_kv            = (float *)base; base += raw_bytes;
+            mc->attn_comp_kv      = (float *)base; base += comp_bytes;
+            mc->attn_state_kv     = (float *)base; base += comp_bytes;
+            mc->attn_state_score  = (float *)base; base += score_bytes;
+            mc->index_comp_kv     = (float *)base; base += comp_bytes;
+            mc->index_state_kv    = (float *)base; base += comp_bytes;
+            mc->index_state_score = (float *)base; base += score_bytes;
         }
     } else {
-        /* K and V: [cap][n_kv_head][head_dim] per layer. */
-        for (u32 i = 0; i < kc->n_layer; i++)
-            total += (u64)kc->std[i].cap * kc->n_kv_head * kc->head_dim * 2;
+        kc->head_dim   = c->kv_head_dim;
+        size_t bytes   = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim
+                         * sizeof(float);
+        total = bytes * 2 * c->n_layer;
+
+        kc->std = scalloc((u64)c->n_layer, sizeof(AttnKvCache));
+        if (!kc->std) return false;
+        p->cache_arena = arena_alloc(p->backend, total);
+        if (!p->cache_arena) return false;
+
+        u8 *base = p->cache_arena;
+        for (u32 i = 0; i < c->n_layer; i++) {
+            kc->std[i].k   = (float *)base; base += bytes;
+            kc->std[i].v   = (float *)base; base += bytes;
+            kc->std[i].cap = s->ctx_size;
+        }
     }
-    return (size_t)(total * sizeof(float));
+    p->kvcache_size = total;
+    return true;
+}
+
+/* Release the plan's KV cache storage on the plan's backend. */
+static void cache_destroy(GraphPlan *p) {
+    KvCache *kc = p->cache;
+    if (!kc) return;
+    if (kc->is_mla) sfree(kc->mla);
+    else            sfree(kc->std);
+    sfree(kc);
+    arena_free(p->backend, p->cache_arena);
+    p->cache_arena = NULL;
+    p->cache       = NULL;
 }
 
 /* Auto-select the compute backend targeted by the graph's execution
  * plan; the selection must run BEFORE the arena sweep, because the
  * backend decides where the plan's arena is allocated (VRAM vs host).
  * A caller may pin the backend explicitly by pre-seeding the plan.
- * The static memory footprint (weights + KV cache) is tallied here;
- * the activation arena size is filled in by arena_plan(). */
+ * The weights size is tallied here and the KV cache is built on the
+ * chosen backend; the activation arena size is filled in by
+ * arena_plan(). */
 static bool backend_plan(Graph *g, Session *s) {
     if (!g) return false;
     if (!g->plan) {
@@ -611,7 +672,7 @@ static bool backend_plan(Graph *g, Session *s) {
         g->plan->backend = backend;
     }
     g->plan->weights_size = graph_weights_bytes(g);
-    if (s) g->plan->kvcache_size = session_kvcache_bytes(s);
+    if (s && !cache_build(g, s)) return false;   /* KV cache on the plan's backend */
     return true;
 }
 

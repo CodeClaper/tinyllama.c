@@ -293,6 +293,7 @@ typedef struct {
     u32 n_layer;
     u32 head_dim;
     u32 n_kv_head;
+    bool is_mla;            /* selects which union arm is live     */
     union {
         AttnKvCache *std;   /* [n_layer] — non-MLA architectures   */
         MLAKvCache  *mla;   /* [n_layer] — DeepSeek MLA            */
@@ -337,9 +338,6 @@ struct Session {
     u32        n_tokens;     /* current position in ring buffer    */
     float     *logits;       /* [n_vocab] output buffer            */
     u32        ctx_size;
-
-    /* ---- KV cache ---- */
-    KvCache    cache;
 
     /* ---- Arch-specific workspace ---- */
     void       *arch_data;
@@ -424,6 +422,8 @@ typedef struct GraphPlan {
     void        *arena;
     size_t      arena_size;
     size_t      weights_size;
+    KvCache     *cache;         /* KV cache descriptors (host)      */
+    void        *cache_arena;   /* cache float storage on `backend` */
     size_t      kvcache_size;
 } GraphPlan;
 
