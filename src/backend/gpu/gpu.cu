@@ -11,6 +11,7 @@
  */
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <stdlib.h>
 
 #include "../../def.h"
@@ -53,27 +54,11 @@ __device__ __constant__ float d_iq3_s_grid[IQ3_S_SIZE];
  * Device helpers
  * ================================================================ */
 
-/* Identical math to f16_to_f32() in quants.c. */
+/* Hardware conversion.  Bit-identical to the scalar f16_to_f32() in
+ * quants.c for every finite value and infinity; only NaN payloads are
+ * quieted differently, and quant block headers never carry NaNs. */
 __device__ static inline float f16_to_f32(u16 bits) {
-    u32 sign = (u32)(bits >> 15) << 31;
-    u32 exp  = (bits >> 10) & 0x1f;
-    u32 mant = bits & 0x3ff;
-    u32 f32;
-    if (exp == 0) {
-        if (mant == 0) {
-            f32 = sign;
-        } else {
-            int e = 1 - 15;
-            while ((mant & 0x400) == 0) { mant <<= 1; e--; }
-            mant &= 0x3ff;
-            f32 = sign | ((u32)(e + 127) << 23) | (mant << 13);
-        }
-    } else if (exp == 31) {
-        f32 = sign | (0xff << 23) | (mant << 13); /* inf / nan */
-    } else {
-        f32 = sign | ((u32)(exp - 15 + 127) << 23) | (mant << 13);
-    }
-    return __int_as_float((int)f32);
+    return __half2float(__ushort_as_half(bits));
 }
 
 __device__ static inline float bf16_to_f32(u16 bits) {
@@ -1067,28 +1052,18 @@ typedef void (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
 template<int TYPE>
 static void matmul_launch(const u8 *w, const float *x, float *y,
                           u64 rows, u64 cols, u64 batch, bool trans) {
-    const size_t smem = (size_t)cols * sizeof(float);
-    if (smem <= (size_t)GPU_SMEM_MAX_BYTES) {
-        dim3 block(256);
-        if (trans) {
-            dim3 grid((unsigned)((rows + 255) / 256), (unsigned)batch);
-            matmul_kernel_trans_share_memory<TYPE><<<grid, block, smem>>>(
-                w, x, y, rows, cols, batch);
-        } else {
-            dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
-            matmul_kernel_nontrans_share_memory<TYPE><<<grid, block, smem>>>(
-                w, x, y, rows, cols, batch);
-        }
-        CHECK(cudaGetLastError());
-        return;
-    }
     /* Fast path — one warp per output row, with each quant block's
      * header decoded once per lane instead of once per element.  Used
      * only when the activation row exceeds the shared-memory budget.
      * Only the non-transposed orientation has that layout, and it needs
      * cols % QK == 0 so no block straddles a row.  Everything else
-     * falls through to the per-element kernels below. */
-    if constexpr (QT<TYPE>::QK > 0) {
+     * falls through to the per-element kernels below.
+     *
+     * Q8_0 is excluded: its EPT is 1, so the per-lane header hoist buys
+     * nothing, and the grid-stride loop plus BlkS plumbing make this
+     * kernel measurably slower than the plain per-element kernel
+     * (~80 GB/s vs ~185 GB/s on a RTX 3060). */
+    if constexpr (QT<TYPE>::QK > 0 && TYPE != GGUF_TYPE_Q8_0) {
         if (!trans && cols % (u64)QT<TYPE>::QK == 0) {
             u64 want = (rows + 7) / 8;   /* 8 warps per block */
             dim3 grid((unsigned)(want < GPU_MAX_BLOCKS ? want : GPU_MAX_BLOCKS),
