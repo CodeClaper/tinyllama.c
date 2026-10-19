@@ -815,6 +815,61 @@ __global__ void matmul_kernel_trans(const u8 * __restrict__ w,
     y[(u64)blockIdx.y * rows + idx] = sum;
 }
 
+/* ---- Shared-memory variants -----------------------------------
+ * Same arithmetic and index mapping as the two fallback kernels above,
+ * but the input activation row x[b*cols .. b*cols+cols) is staged once
+ * per block into dynamic shared memory.  All warps/threads in the block
+ * then read it from SMEM instead of re-issuing the same global loads.
+ *
+ * The weight stream is deliberately unchanged: every weight element is
+ * still consumed exactly once, so there is no tile reuse to exploit.
+ * The host selects these kernels whenever cols*sizeof(float) fits the
+ * static shared-memory budget; a larger activation row cannot be staged
+ * and falls back to the fast-path (or global-memory) kernels.
+ */
+#define GPU_SMEM_MAX_BYTES (48u * 1024u)
+
+template<int TYPE>
+__global__ void matmul_kernel_nontrans_share_memory(
+        const u8 *__restrict__ w, const float *__restrict__ x,
+        float *__restrict__ y, u64 rows, u64 cols, u64 batch) {
+    extern __shared__ float sx[];
+    const float *xr = x + (u64)blockIdx.y * cols;
+    for (u64 c = threadIdx.x; c < cols; c += blockDim.x)
+        sx[c] = xr[c];
+    __syncthreads();
+
+    u64 r = (u64)blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    float sum = 0.0f;
+    for (u64 c = threadIdx.x & 31; c < cols; c += 32)
+        sum += dequant_one_t<TYPE>(w, r * cols + c) * sx[c];
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, o);
+    if ((threadIdx.x & 31) == 0) y[(u64)blockIdx.y * rows + r] = sum;
+    (void)batch;
+}
+
+template<int TYPE>
+__global__ void matmul_kernel_trans_share_memory(
+        const u8 *__restrict__ w, const float *__restrict__ x,
+        float *__restrict__ y, u64 rows, u64 cols, u64 batch) {
+    extern __shared__ float sx[];
+    const float *xr = x + (u64)blockIdx.y * cols;
+    for (u64 c = threadIdx.x; c < cols; c += blockDim.x)
+        sx[c] = xr[c];
+    __syncthreads();
+
+    u64 idx = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows) return;
+    float sum = 0.0f;
+    for (u64 c = 0; c < cols; c++)
+        sum += dequant_one_t<TYPE>(w, c * rows + idx) * sx[c];
+    y[(u64)blockIdx.y * rows + idx] = sum;
+    (void)batch;
+}
+
 /* ================================================================
  * Host-side plumbing
  * ================================================================ */
@@ -1012,9 +1067,25 @@ typedef void (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
 template<int TYPE>
 static void matmul_launch(const u8 *w, const float *x, float *y,
                           u64 rows, u64 cols, u64 batch, bool trans) {
+    const size_t smem = (size_t)cols * sizeof(float);
+    if (smem <= (size_t)GPU_SMEM_MAX_BYTES) {
+        dim3 block(256);
+        if (trans) {
+            dim3 grid((unsigned)((rows + 255) / 256), (unsigned)batch);
+            matmul_kernel_trans_share_memory<TYPE><<<grid, block, smem>>>(
+                w, x, y, rows, cols, batch);
+        } else {
+            dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
+            matmul_kernel_nontrans_share_memory<TYPE><<<grid, block, smem>>>(
+                w, x, y, rows, cols, batch);
+        }
+        CHECK(cudaGetLastError());
+        return;
+    }
     /* Fast path — one warp per output row, with each quant block's
-     * header decoded once per lane instead of once per element.  Only
-     * the non-transposed orientation has that layout, and it needs
+     * header decoded once per lane instead of once per element.  Used
+     * only when the activation row exceeds the shared-memory budget.
+     * Only the non-transposed orientation has that layout, and it needs
      * cols % QK == 0 so no block straddles a row.  Everything else
      * falls through to the per-element kernels below. */
     if constexpr (QT<TYPE>::QK > 0) {
@@ -1189,6 +1260,48 @@ int gpu_matmat(TensorInfo *ti, const float *X, float *Y,
     cudaFree(d_x);
     cudaFree(d_y);
     return 0;
+}
+
+/* Device-time one matvec kernel (warmup + CUDA events, no H2D/D2H).
+ * Returns average milliseconds per launch, or -1 on failure. */
+double gpu_bench_matvec(TensorInfo *ti, u64 rows, u64 cols, bool trans,
+                        int iters) {
+    if (!ti || !ti->data || rows == 0 || cols == 0 || iters <= 0) return -1.0;
+    if (rows * cols > ti->n_element || !gpu_available()) return -1.0;
+
+    u8 *d_w;
+    if (gpu_matmul_prep(ti, &d_w) != 0) return -1.0;
+
+    float *d_x = NULL, *d_y = NULL;
+    CHECK(cudaMalloc(&d_x, cols * sizeof(float)));
+    CHECK(cudaMalloc(&d_y, rows * sizeof(float)));
+    float *h_x = (float *)malloc(cols * sizeof(float));
+    if (!h_x) { cudaFree(d_x); cudaFree(d_y); return -1.0; }
+    for (u64 i = 0; i < cols; i++)
+        h_x[i] = (float)(i % 7) * 0.125f - 0.5f;
+    CHECK(cudaMemcpy(d_x, h_x, cols * sizeof(float), cudaMemcpyHostToDevice));
+    free(h_x);
+
+    for (int i = 0; i < 5; i++)
+        gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans);
+    CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t e0, e1;
+    CHECK(cudaEventCreate(&e0));
+    CHECK(cudaEventCreate(&e1));
+    CHECK(cudaEventRecord(e0));
+    for (int i = 0; i < iters; i++)
+        gpu_matmul_dispatch[ti->type](d_w, d_x, d_y, rows, cols, 1, trans);
+    CHECK(cudaEventRecord(e1));
+    CHECK(cudaEventSynchronize(e1));
+    float ms = 0.0f;
+    CHECK(cudaEventElapsedTime(&ms, e0, e1));
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+
+    cudaFree(d_x);
+    cudaFree(d_y);
+    return (double)ms / (double)iters;
 }
 
 /* ================================================================

@@ -343,6 +343,84 @@ TYPE_TEST(IQ2_S)
 TYPE_TEST(IQ4_XS)
 TYPE_TEST(IQ1_M)
 
+/* Look up the block geometry for a type. */
+static const TypeGeom *geom_for(u32 type) {
+    for (u64 i = 0; i < N_TYPES; i++)
+        if (type_geoms[i].type == type)
+            return &type_geoms[i];
+    return NULL;
+}
+
+/* Shared-memory matmul variants must produce the same results as the
+ * reference decode for both orientations.  All test shapes keep
+ * cols*sizeof(float) within the shared-memory budget, so this exercises
+ * the automatically selected shared-memory path. */
+MU_TEST(test_smem_correctness) {
+    static const u32 types[] = {
+        GGUF_TYPE_Q2_K, GGUF_TYPE_Q3_K, GGUF_TYPE_Q4_K, GGUF_TYPE_Q5_K,
+        GGUF_TYPE_Q6_K, GGUF_TYPE_Q8_0, GGUF_TYPE_F16,  GGUF_TYPE_BF16,
+    };
+    int fails = 0;
+    for (u64 t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        const TypeGeom *g = geom_for(types[t]);
+        if (!g) continue;
+        for (u64 s = 0; s < N_SHAPES; s++) {
+            u64 rows = shapes[s][0], cols = shapes[s][1];
+            u8 *buf;
+            TensorInfo ti;
+            make_tensor(g->type, g->be, g->bb, rows, cols, &buf, &ti);
+
+            int bad = check_matmul(&ti, rows, cols, false, 1);
+            if (bad)
+                printf("  [%s %llux%llu] smem matvec: %d mismatches\n",
+                       type_name(g->type), (unsigned long long)rows,
+                       (unsigned long long)cols, bad);
+            fails += bad;
+
+            bad = check_matmul(&ti, cols, rows, true, 1);
+            if (bad)
+                printf("  [%s %llux%llu] smem matvec trans: %d mismatches\n",
+                       type_name(g->type), (unsigned long long)rows,
+                       (unsigned long long)cols, bad);
+            fails += bad;
+
+            free(buf);
+        }
+    }
+    mu_assert_int_eq(0, fails);
+}
+
+/* Performance: on-device timing (no H2D/D2H) of the automatically
+ * selected kernel — the shared-memory path for these shapes.  Uses a
+ * Q3_K FFN-shaped GEMV, the dominant decode op for the qwen2.5 q3_k_m
+ * model. */
+MU_TEST(test_smem_perf) {
+    const u64 rows = 8960, cols = 1536;
+    const int iters = 100;
+    u8 *buf;
+    TensorInfo ti;
+    make_tensor(GGUF_TYPE_Q3_K, 256, 110, rows, cols, &buf, &ti);
+    double bytes = (double)ti.bytes;
+
+    double base = gpu_bench_matvec(&ti, rows, cols, false, iters);
+    mu_assert(base > 0.0, "gpu_bench_matvec nontrans failed");
+
+    printf("\n  Q3_K GEMV %llux%llu  (%.2f MB weights, %d iters, nontrans)\n",
+           (unsigned long long)rows, (unsigned long long)cols,
+           bytes / (1024.0 * 1024.0), iters);
+    printf("    shared mem     : %8.3f ms  %7.1f GB/s  %7.1f tok/s\n",
+           base, bytes / base / 1e6, 1000.0 / base);
+
+    double tbase = gpu_bench_matvec(&ti, cols, rows, true, iters);
+    mu_assert(tbase > 0.0, "gpu_bench_matvec trans failed");
+    printf("  Q3_K GEMV trans (cols=%llu rows=%llu, %d iters)\n",
+           (unsigned long long)rows, (unsigned long long)cols, iters);
+    printf("    shared mem     : %8.3f ms  %7.1f GB/s\n",
+           tbase, bytes / tbase / 1e6);
+
+    free(buf);
+}
+
 /* Cache behaviour: a second call on the same tensor must reuse the
  * cached device copy and give identical results. */
 MU_TEST(test_cache_hit) {
@@ -394,6 +472,8 @@ static void all_tests(void) {
     MU_RUN_TEST(test_IQ4_NL); MU_RUN_TEST(test_IQ3_S);
     MU_RUN_TEST(test_IQ2_S);  MU_RUN_TEST(test_IQ4_XS);
     MU_RUN_TEST(test_IQ1_M);
+    MU_RUN_TEST(test_smem_correctness);
+    MU_RUN_TEST(test_smem_perf);
     MU_RUN_TEST(test_cache_hit);
     MU_RUN_TEST(test_bad_dims);
 }

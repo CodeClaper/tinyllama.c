@@ -70,6 +70,11 @@ int gpu_matvec(TensorInfo *ti, const float *x, float *y, u64 rows, u64 cols, boo
  * [batch x rows].  A single launch covers all batches. */
 int gpu_matmat(TensorInfo *ti, const float *X, float *Y, u64 batch, u64 rows, u64 cols, bool trans);
 
+/* Device-time one matvec launch with CUDA events, excluding the
+ * H2D/D2H round trip and warmup.  Returns ms per launch, or -1. */
+double gpu_bench_matvec(TensorInfo *ti, u64 rows, u64 cols, bool trans,
+                        int iters);
+
 /* Free all cached device weight buffers.  Call once at teardown. */
 void gpu_shutdown(void);
 
