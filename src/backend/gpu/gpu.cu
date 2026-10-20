@@ -800,6 +800,71 @@ __global__ void matmul_kernel_trans(const u8 * __restrict__ w,
     y[(u64)blockIdx.y * rows + idx] = sum;
 }
 
+/* ---- Q8_0 int8 dot product (__dp4a) ----------------------------
+ * The activation row is quantized to q8 once per CUDA block into
+ * shared memory (one f32 scale + 32 int8 per block), then the dot
+ * product runs as packed int8 multiply-adds: each lane owns four
+ * consecutive weights, so one __dp4a does four MACs and a warp covers
+ * four 32-element quant blocks (128 elements) per iteration.  The
+ * per-block weight and activation scales are applied in float after
+ * the integer dot.  This avoids converting every weight to float and
+ * makes the kernel bandwidth- rather than instruction-bound.
+ *
+ * Requires cols % 128 == 0 so the four-block warp step stays in
+ * bounds; matmul_launch() checks that and falls back otherwise.
+ * Shared memory per block is cols + cols/8 bytes, so it also requires
+ * that to fit the 48 KB budget.  __dp4a needs compute capability 6.1+.
+ */
+#define GPU_DP4A_SMEM_MAX_BYTES (48u * 1024u)
+
+__global__ void matmul_kernel_q8_0_dp4a(const u8 *__restrict__ w,
+                                        const float *__restrict__ x,
+                                        float *__restrict__ y,
+                                        u64 rows, u64 cols, u64 batch) {
+    extern __shared__ u8 smem_q8[];
+    const u32 nblk = (u32)(cols / 32);
+    u8    *sxq = smem_q8;                        /* nblk * 32 int8      */
+    float *sxd = (float *)(smem_q8 + cols);      /* nblk activation d   */
+    const float *xr = x + (u64)blockIdx.y * cols;
+
+    /* Quantize the activation row: one thread per 32-element block. */
+    for (u32 bi = threadIdx.x; bi < nblk; bi += blockDim.x) {
+        const float *xb = xr + (u64)bi * 32;
+        float amax = 0.0f;
+        #pragma unroll
+        for (int k = 0; k < 32; k++) amax = fmaxf(amax, fabsf(xb[k]));
+        float d  = amax / 127.0f;
+        float id = d > 0.0f ? 1.0f / d : 0.0f;
+        sxd[bi] = d;
+        i8 *qb = (i8 *)(sxq + bi * 32);
+        #pragma unroll
+        for (int k = 0; k < 32; k++)
+            qb[k] = (i8)__float2int_rn(xb[k] * id);
+    }
+    __syncthreads();
+
+    const u32 lane = threadIdx.x & 31u;
+    const u32 sub  = lane >> 3;           /* which of the four blocks  */
+    const u32 eo   = 4u * (lane & 7u);    /* four-element lane offset  */
+    u64 r = (u64)blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const u64 blk0 = (r * cols) / 32;
+    float sum = 0.0f;
+    for (u64 b = 0; b < (u64)nblk; b += 4) {
+        const u64 bb  = b + sub;
+        const u8 *blk = w + (blk0 + bb) * 34;
+        int wq = (int)ld_u32(blk + 2 + eo);
+        int xq = *(const int *)(sxq + bb * 32 + eo);
+        float d = f16_to_f32(ld_u16(blk));
+        sum += (float)__dp4a(wq, xq, 0) * d * sxd[bb];
+    }
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, o);
+    if (lane == 0) y[(u64)blockIdx.y * rows + r] = sum;
+    (void)batch;
+}
+
 /* ================================================================
  * Host-side plumbing
  * ================================================================ */
@@ -997,6 +1062,19 @@ typedef void (*matmul_launch_fn)(const u8 *w, const float *x, float *y,
 template<int TYPE>
 static void matmul_launch(const u8 *w, const float *x, float *y,
                           u64 rows, u64 cols, u64 batch, bool trans) {
+    if constexpr (TYPE == GGUF_TYPE_Q8_0) {
+        /* dp4a path: quantize the activation to q8 in shared memory and
+         * run the weight dot as packed int8 MACs.  cols % 128 keeps the
+         * four-block warp step in bounds. */
+        const size_t q8_smem = (size_t)cols + (size_t)(cols / 32) * sizeof(float);
+        if (!trans && cols % 128 == 0 && q8_smem <= GPU_DP4A_SMEM_MAX_BYTES) {
+            dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
+            matmul_kernel_q8_0_dp4a<<<grid, 256, q8_smem>>>(
+                w, x, y, rows, cols, batch);
+            CHECK(cudaGetLastError());
+            return;
+        }
+    }
     /* Fast path — one warp per output row, with each quant block's
      * header decoded once per lane instead of once per element.  Used
      * only when the activation row exceeds the shared-memory budget.

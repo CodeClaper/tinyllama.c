@@ -167,9 +167,17 @@ static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
     return sum;
 }
 
+/* Whether the non-transposed matvec takes the Q8_0 __dp4a path for this
+ * column count (mirrors matmul_launch in gpu.cu). */
+static bool uses_dp4a(u32 type, u64 cols) {
+    return type == GGUF_TYPE_Q8_0 && cols % 128 == 0;
+}
+
 /* Part B: matvec (both orientations) and matmat (batch=3).  Tolerance
  * covers f32 accumulation drift (values bounded by the 0x3F mask);
- * any index/decode error is orders of magnitude larger. */
+ * any index/decode error is orders of magnitude larger.  The Q8_0 dp4a
+ * path quantizes the activation to int8, so its reference uses the same
+ * quantized input. */
 static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
                         bool trans, u64 batch) {
     u64 nx = batch * cols, ny = batch * rows;
@@ -177,6 +185,26 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
     float *got = malloc(ny * sizeof(float));
     for (u64 i = 0; i < nx; i++)
         x[i] = (float)((int32_t)rng_next() % 2000001 - 1000000) / 1000000.0f;
+
+    const float *xe = x;
+    float *xq = NULL;
+    if (!trans && uses_dp4a(ti->type, cols)) {
+        xq = malloc(nx * sizeof(float));
+        for (u64 b = 0; b < batch; b++) {
+            for (u64 blk = 0; blk < cols / 32; blk++) {
+                const float *src = x + b * cols + blk * 32;
+                float amax = 0.0f;
+                for (u64 k = 0; k < 32; k++)
+                    amax = fmaxf(amax, fabsf(src[k]));
+                float d  = amax / 127.0f;
+                float id = d > 0.0f ? 1.0f / d : 0.0f;
+                for (u64 k = 0; k < 32; k++)
+                    xq[b * cols + blk * 32 + k] =
+                        d * (float)(int)nearbyintf(src[k] * id);
+            }
+        }
+        xe = xq;
+    }
 
     int bad = 0;
     int rc;
@@ -190,7 +218,7 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
     } else {
         for (u64 b = 0; b < batch; b++) {
             for (u64 r = 0; r < rows; r++) {
-                double ref = ref_dot(ti, rows, cols, trans, b, r, batch, x);
+                double ref = ref_dot(ti, rows, cols, trans, b, r, batch, xe);
                 double tol = 1e-2 * (fabs(ref) + 100.0);
                 double err = fabs((double)got[b * rows + r] - ref);
                 if (err > tol) {
@@ -205,6 +233,7 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
     }
     free(x);
     free(got);
+    free(xq);
     return bad;
 }
 
@@ -231,6 +260,26 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
     for (u64 i = 0; i < cols; i++)
         x[i] = (float)((int32_t)rng_next() % 2000001 - 1000000) / 1000000.0f;
 
+    /* Q8_0's dp4a matvec quantizes the activation to int8 first;
+     * reproduce that here so the comparison isolates mapping/decode
+     * errors rather than the intentional rounding. */
+    const float *xe = x;
+    float *xq = NULL;
+    if (uses_dp4a(ti->type, cols)) {
+        xq = malloc(cols * sizeof(float));
+        for (u64 blk = 0; blk < cols / 32; blk++) {
+            const float *src = x + blk * 32;
+            float amax = 0.0f;
+            for (u64 k = 0; k < 32; k++)
+                amax = fmaxf(amax, fabsf(src[k]));
+            float d  = amax / 127.0f;
+            float id = d > 0.0f ? 1.0f / d : 0.0f;
+            for (u64 k = 0; k < 32; k++)
+                xq[blk * 32 + k] = d * (float)(int)nearbyintf(src[k] * id);
+        }
+        xe = xq;
+    }
+
     int bad = 0;
     if (gpu_matvec(ti, x, got, rows, cols, false) != 0) {
         printf("    gpu_matvec failed\n");
@@ -239,8 +288,8 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
         for (u64 r = 0; r < rows; r++) {
             double ref = 0.0;
             for (u64 c = 0; c < cols; c++)
-                ref += (double)w[r * cols + c] * (double)x[c];
-            double tol = 1e-3 * (fabs(ref) + 1.0) + 1e-4 * (double)cols;
+                ref += (double)w[r * cols + c] * (double)xe[c];
+            double tol = 2e-3 * (fabs(ref) + 1.0) + 1e-4 * (double)cols;
             double err = fabs((double)got[r] - ref);
             if (err > tol) {
                 if (bad < 5)
@@ -250,7 +299,7 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
             }
         }
     }
-    free(w); free(x); free(got);
+    free(w); free(x); free(got); free(xq);
     return bad;
 }
 
