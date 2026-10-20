@@ -480,7 +480,7 @@ static ModelArch model_detect_arch(Model *m) {
     if (key_streq(arch_name, "deepseek2")) return ARCH_DEEPSEEK;
     if (key_streq(arch_name, "falcon"))    return ARCH_FALCON;
     if (key_streq(arch_name, "gemma3"))    return ARCH_GEMMA3;
-    slog(WARN, "Unknown architecture: %s, loading as generic.", get_key_name(arch_name));
+    slog(ERROR, "Unknown architecture: %s, can't to support.", get_key_name(arch_name));
     return ARCH_UNKNOWN;
 }
 
