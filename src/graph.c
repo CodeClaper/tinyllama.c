@@ -734,6 +734,25 @@ static bool graph_plan(Graph *g, Session *s) {
     return true;
 }
 
+static bool graph_op_compute(OpCtx ctx) {
+    /* Device backends own data in VRAM: the CUDA plan fully
+     * replaces the CPU op path, while the CPU path runs the
+     * operators in backend/cpu/cpu_op.c via cpu_graph_op(). */
+    bool ok;
+#ifdef METAL_BUILD
+    if (ctx.g->plan->backend == BACKEND_METAL)
+        ok = metal_graph_op(&ctx);
+    else
+#endif
+#ifdef GPU_BUILD
+    if (ctx.g->plan->backend == BACKEND_CUDA)
+        ok = gpu_graph_op(&ctx);
+    else
+#endif
+        ok = cpu_graph_op(&ctx);
+    return ok;
+}
+
 static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     if (!g || !s || !b || g->n_node == 0) {
         slog(WARN, "graph_compute: missing graph / session / batch");
@@ -822,22 +841,8 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
             .od = od, .r = r, .base = base, .pos = pos, .n = n,
             .scr = scr, .scale = scale, .q_dim = q_dim, .kv_dim = kv_dim,
         };
-
-        /* Device backends own data in VRAM: the CUDA plan fully
-         * replaces the CPU op path, while the CPU path runs the
-         * operators in backend/cpu/cpu_op.c via cpu_graph_op(). */
-        bool ok;
-#ifdef METAL_BUILD
-        if (g->plan->backend == BACKEND_METAL)
-            ok = metal_graph_op(&ctx);
-        else
-#endif
-#ifdef GPU_BUILD
-        if (g->plan->backend == BACKEND_CUDA)
-            ok = gpu_graph_op(&ctx);
-        else
-#endif
-            ok = cpu_graph_op(&ctx);
+            
+        bool ok = graph_op_compute(ctx);
         if (!ok) goto fail;
         
         /* Graph stats. */
