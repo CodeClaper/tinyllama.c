@@ -681,9 +681,9 @@ static void scalar_block_iq1_s(const u8 *data, float *out) {
 
 static void scalar_block_iq4_nl(const u8 *data, float *out) {
     float d = f16_to_f32(*(const u16 *)data);
-    for (u32 o = 0; o < 256; o++) {
-        u32 q = (data[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-        out[o] = d * iq4_nl_values[q | ((o & 0xF) << 4)];
+    for (u32 o = 0; o < 32; o++) {
+        u32 q = (o < 16) ? (data[2 + o] & 0xF) : (data[2 + o - 16] >> 4);
+        out[o] = d * iq4_nl_values[q];
     }
 }
 
@@ -797,7 +797,7 @@ void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
     u32 block_bytes;
 
     /* Determine block parameters from the GGUF type. */
-    if (type <= GGUF_TYPE_Q8_1) {
+    if (type <= GGUF_TYPE_Q8_1 || type == GGUF_TYPE_IQ4_NL) {
         block_elems = BLOCK_SIMPLE;
         switch (type) {
             case GGUF_TYPE_Q4_0: block_bytes = 18; break;
@@ -806,6 +806,7 @@ void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
             case GGUF_TYPE_Q5_1: block_bytes = 24; break;
             case GGUF_TYPE_Q8_0: block_bytes = 34; break;
             case GGUF_TYPE_Q8_1: block_bytes = 40; break;
+            case GGUF_TYPE_IQ4_NL: block_bytes = 18; break;
             default: goto fallback;
         }
     } else {
@@ -821,7 +822,6 @@ void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out) {
             case GGUF_TYPE_IQ2_XS:   block_bytes =  74; break;
             case GGUF_TYPE_IQ3_XXS:  block_bytes =  98; break;
             case GGUF_TYPE_IQ1_S:    block_bytes = 110; break;
-            case GGUF_TYPE_IQ4_NL:   block_bytes =  50; break;
             case GGUF_TYPE_IQ3_S:    block_bytes = 110; break;
             case GGUF_TYPE_IQ2_S:    block_bytes =  82; break;
             case GGUF_TYPE_IQ4_XS:   block_bytes = 136; break;
@@ -1035,6 +1035,19 @@ static float neon_dot_q4_1_block(const u8 *data, const float *x) {
     float dot_nib = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
     float sum_x   = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));
     return d * dot_nib + m * sum_x;
+}
+
+/* IQ4_NL (block_size = 32, 18 bytes): 16 packed nibble pairs, a
+ * non-linear 16-value codebook shared with IQ4_XS. */
+static float neon_dot_iq4_nl_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)data);
+    const u8 *qs = data + 2;
+    float sum = 0.0f;
+    for (int j = 0; j < 16; j++) {
+        sum += iq4_nl_values[qs[j] & 0xF] * x[j];
+        sum += iq4_nl_values[qs[j] >> 4]  * x[16 + j];
+    }
+    return d * sum;
 }
 
 /* ---- K-quant types  (block_size = 256) ------------------------- */
@@ -1478,7 +1491,7 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
     u32 block_bytes;
     block_dot_fn dot_fn = NULL;
 
-    if (type <= GGUF_TYPE_Q8_1) {
+    if (type <= GGUF_TYPE_Q8_1 || type == GGUF_TYPE_IQ4_NL) {
         block_elems = BLOCK_SIMPLE;
         switch (type) {
             case GGUF_TYPE_Q4_0: block_bytes = 18; dot_fn = neon_dot_q4_0_block; break;
@@ -1487,6 +1500,7 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
             case GGUF_TYPE_Q5_1: block_bytes = 24; break;
             case GGUF_TYPE_Q8_0: block_bytes = 34; dot_fn = neon_dot_q8_0_block; break;
             case GGUF_TYPE_Q8_1: block_bytes = 40; break;
+            case GGUF_TYPE_IQ4_NL: block_bytes = 18; dot_fn = neon_dot_iq4_nl_block; break;
             default: goto fallback_dot;
         }
     } else {
@@ -1502,7 +1516,6 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
             case GGUF_TYPE_IQ2_XS:   block_bytes =  74; break;
             case GGUF_TYPE_IQ3_XXS:  block_bytes =  98; break;
             case GGUF_TYPE_IQ1_S:    block_bytes = 110; break;
-            case GGUF_TYPE_IQ4_NL:   block_bytes =  50; break;
             case GGUF_TYPE_IQ3_S:    block_bytes = 110; break;
             case GGUF_TYPE_IQ2_S:    block_bytes =  82; break;
             case GGUF_TYPE_IQ4_XS:   block_bytes = 136; break;

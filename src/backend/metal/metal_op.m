@@ -501,6 +501,32 @@ static bool metal_op_rope_neox(OpCtx *c) {
     return true;
 }
 
+/* OP_ROPE_NORM */
+static bool metal_op_rope_norm(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float theta;
+    memcpy(&theta, &bits, sizeof(theta));
+    u32 heads = op_param(c, 1);
+    u32 hdim  = op_param(c, 2);
+    u32 rdim  = op_param(c, 3);
+    if (c->od != heads * hdim || hdim == 0) return false;
+    id<MTLBuffer> src, dst;
+    NSUInteger soff, doff;
+    if (!bind_ptr(op_src(c, 0), &src, &soff) || !bind_ptr(c->dst, &dst, &doff))
+        return false;
+    NSUInteger aoff = args_alloc(9 * sizeof(uint32_t));
+    if (aoff == (NSUInteger)-1) return false;
+    uint32_t *p = args_ptr(aoff);
+    memcpy(&p[0], &theta, sizeof(theta));
+    p[1] = heads; p[2] = hdim; p[3] = rdim; p[4] = c->od; p[5] = c->base; p[6] = c->pos;
+    u64 total = (u64)c->r * heads * (hdim / 2);
+    put_u64(p, 7, total);
+    id<MTLBuffer> bufs[3] = { src, dst, g_args };
+    NSUInteger    offs[3] = { soff, doff, aoff };
+    dispatch("op_rope_norm", bufs, offs, 3, op_blocks(total));
+    return true;
+}
+
 /* OP_SIGMOID_GATE */
 static bool metal_op_sigmoid_gate(OpCtx *c) {
     u32 nh = op_param(c, 0), hd = op_param(c, 1);
@@ -671,6 +697,7 @@ bool metal_graph_op(OpCtx *c) {
         case OP_SOFTCAP:        return metal_op_softcap(c);
         case OP_SOFTMAX:        return metal_op_softmax(c);
         case OP_ROPE_NEOX:      return metal_op_rope_neox(c);
+        case OP_ROPE_NORM:      return metal_op_rope_norm(c);
         case OP_SIGMOID_GATE:   return metal_op_sigmoid_gate(c);
         case OP_SSM_CONV:       return metal_op_ssm_conv(c);
         case OP_SSM_DELTA:      return metal_op_ssm_delta(c);

@@ -57,7 +57,7 @@ using namespace metal;
 /* ================================================================
  * Combined table buffer (float element offsets) — must match
  * metal_tables_init() in metal.m: iq2_xxs (256), iq2_xs (512),
- * iq3_xxs (256), iq1_s (256), iq4_nl (256), iq3_s (512) floats.
+ * iq3_xxs (256), iq1_s (256), iq4_nl (16), iq3_s (512) floats.
  * ================================================================ */
 
 #define IQ2_XXS_TAB 0
@@ -65,7 +65,7 @@ using namespace metal;
 #define IQ3_XXS_TAB 768
 #define IQ1_S_TAB   1024
 #define IQ4_NL_TAB  1280
-#define IQ3_S_TAB   1536
+#define IQ3_S_TAB   1296
 
 /* ================================================================
  * Params structs — layout must match the host definitions in
@@ -430,11 +430,11 @@ static inline float dequant_IQ1_S(device const uint8_t *data, uint64_t i, device
 }
 
 static inline float dequant_IQ4_NL(device const uint8_t *data, uint64_t i, device const float *tables) {
-    uint64_t bi = i >> 8; uint32_t o = i & 255;
-    device const uint8_t *blk = data + bi * 50;
+    uint64_t bi = i >> 5; uint32_t o = i & 31;
+    device const uint8_t *blk = data + bi * 18;
     float d = f16_to_f32(ld_u16(blk));
-    uint32_t q = (blk[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-    return d * tables[IQ4_NL_TAB + (q | ((o & 0xF) << 4))];
+    uint32_t q = (o < 16) ? (blk[2 + o] & 0xF) : (blk[2 + o - 16] >> 4);
+    return d * tables[IQ4_NL_TAB + q];
 }
 
 static inline float dequant_IQ1_M(device const uint8_t *data, uint64_t i, device const float *tables) {
@@ -1405,6 +1405,40 @@ kernel void op_rope_neox(device const float *src [[buffer(0)]],
         } else {
             dp[i] = a0;
             dp[i + hh] = b0;
+        }
+    }
+}
+
+/* OP_ROPE_NORM: args [theta(f32), nh, hdim, rdim, od, base, pos, total(2)];
+ * one thread per (row, head, i < hdim/2) rotating consecutive pairs. */
+kernel void op_rope_norm(device const float *src [[buffer(0)]],
+                         device float *dst [[buffer(1)]],
+                         device const uint32_t *a [[buffer(2)]],
+                         uint gid [[thread_position_in_grid]],
+                         uint tptg [[threads_per_threadgroup]],
+                         uint ntg [[threadgroups_per_grid]]) {
+    float theta_base = op_f32(a, 0);
+    uint nh = a[1], hdim = a[2], rdim = a[3], od = a[4], base = a[5], pos = a[6];
+    uint64_t total = op_u64(a, 7);
+    uint64_t stride = (uint64_t)ntg * tptg;
+    uint hh = hdim / 2, npair = rdim / 2;
+    for (uint64_t idx = gid; idx < total; idx += stride) {
+        uint p = (uint)(idx / (nh * hh));
+        uint rem = (uint)(idx % (nh * hh));
+        uint h = rem / hh, i = rem % hh;
+        uint abspos = pos + base + p;
+        device const float *sp = src + ((uint64_t)base + p) * od + (uint64_t)h * hdim;
+        device float *dp = dst + (uint64_t)p * od + (uint64_t)h * hdim;
+        if (i < npair) {
+            float t = 1.0f / pow(theta_base, (float)(2 * i) / (float)rdim);
+            float c = cos((float)abspos * t);
+            float s = sin((float)abspos * t);
+            float a0 = sp[2 * i], b0 = sp[2 * i + 1];
+            dp[2 * i]     = a0 * c - b0 * s;
+            dp[2 * i + 1] = a0 * s + b0 * c;
+        } else {
+            dp[2 * i]     = sp[2 * i];
+            dp[2 * i + 1] = sp[2 * i + 1];
         }
     }
 }

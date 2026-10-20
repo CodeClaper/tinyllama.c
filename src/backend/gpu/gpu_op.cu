@@ -324,6 +324,36 @@ __global__ void k_rope_neox(const float *__restrict__ src, float *__restrict__ d
     }
 }
 
+/* ---- OP_ROPE_NORM ----------------------------------------------
+ * Consecutive-pair RoPE (GGML_ROPE_TYPE_NORM): thread per (row, head,
+ * i < rope_dim/2) rotating the (2i, 2i+1) pair.  Used by Llama. */
+__global__ void k_rope_norm(const float *__restrict__ src, float *__restrict__ dst,
+                            float theta_base, u32 nh, u32 hdim, u32 rdim,
+                            u32 od, u32 base, u32 pos, u64 total) {
+    u64 idx     = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 gstride = (u64)gridDim.x * blockDim.x;
+    const u32 half = hdim / 2, npair = rdim / 2;
+    for (; idx < total; idx += gstride) {
+        u32 p = (u32)(idx / (nh * half));
+        u32 rem = (u32)(idx % (nh * half));
+        u32 h = rem / half, i = rem % half;
+        u32 abspos = pos + base + p;
+        const float *sp = src + ((u64)base + p) * od + (u64)h * hdim;
+        float *dp       = dst + (u64)p * od + (u64)h * hdim;
+        if (i < npair) {
+            float t = 1.0f / powf(theta_base, (float)(2 * i) / (float)rdim);
+            float c = cosf((float)abspos * t);
+            float s = sinf((float)abspos * t);
+            float a = sp[2 * i], b = sp[2 * i + 1];
+            dp[2 * i]     = a * c - b * s;
+            dp[2 * i + 1] = a * s + b * c;
+        } else {
+            dp[2 * i]     = sp[2 * i];
+            dp[2 * i + 1] = sp[2 * i + 1];
+        }
+    }
+}
+
 /* ---- OP_SIGMOID_GATE -------------------------------------------
  * out = a * sigmoid(gate), gate from the second half of each
  * 2*head_dim block of the fused source. */
@@ -651,6 +681,21 @@ static bool gpu_op_rope_neox(OpCtx *c) {
     return true;
 }
 
+static bool gpu_op_rope_norm(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float theta;
+    memcpy(&theta, &bits, sizeof(theta));
+    u32 heads = op_param(c, 1);
+    u32 hdim  = op_param(c, 2);
+    u32 rdim  = op_param(c, 3);
+    if (c->od != heads * hdim) return false;
+    k_rope_norm<<<op_block_count((u64)c->r * heads * (hdim / 2)), GPU_OP_THREADS>>>(
+        op_src(c, 0), c->dst, theta, heads, hdim, rdim, c->od, c->base, c->pos,
+        (u64)c->r * heads * (hdim / 2));
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 static bool gpu_op_sigmoid_gate(OpCtx *c) {
     u32 nh = op_param(c, 0), hd = op_param(c, 1);
     if (c->od != nh * hd) return false;
@@ -767,6 +812,7 @@ bool gpu_graph_op(OpCtx *c) {
         case OP_SOFTCAP:        return gpu_op_softcap(c);
         case OP_SOFTMAX:        return gpu_op_softmax(c);
         case OP_ROPE_NEOX:      return gpu_op_rope_neox(c);
+        case OP_ROPE_NORM:      return gpu_op_rope_norm(c);
         case OP_SIGMOID_GATE:   return gpu_op_sigmoid_gate(c);
         case OP_SSM_CONV:       return gpu_op_ssm_conv(c);
         case OP_SSM_DELTA:      return gpu_op_ssm_delta(c);

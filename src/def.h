@@ -391,7 +391,8 @@ typedef enum {
     OP_RMS_NORM,        /* out = rms(x) * w                               */
     OP_RMS_NORM_HEADS,  /* per-head rms(x)*w over [n_heads, head_dim]     */
     OP_SIGMOID_GATE,    /* out = a * sigmoid(gate half of b)              */
-    OP_ROPE_NEOX,       /* out = rope(in)                                 */
+    OP_ROPE_NEOX,       /* out = rope(in), split-half pairs (Qwen)        */
+    OP_ROPE_NORM,       /* out = rope(in), consecutive pairs (Llama)      */
     OP_SOFTMAX,         /* out = softmax(x)  (per-row over last dim)      */
     OP_SILU,            /* out = silu(x)                                  */
     OP_GELU,            /* out = gelu(x)                                  */

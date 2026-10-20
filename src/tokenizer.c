@@ -376,6 +376,96 @@ int chatml_continuation(Session *s, const char *user_msg,
     return n;
 }
 
+/* Look up the Llama 3 header markers.  Returns false when the
+ * vocabulary does not carry the Llama 3 chat special tokens. */
+static bool llama3_markers(Vocab *v, i32 *start, i32 *end, i32 *eot) {
+    *start = vocab_lookup(v, "<|start_header_id|>");
+    *end   = vocab_lookup(v, "<|end_header_id|>");
+    *eot   = vocab_lookup(v, "<|eot_id|>");
+    return *start != (i32)VOCAB_ID_NONE && *end != (i32)VOCAB_ID_NONE &&
+           *eot   != (i32)VOCAB_ID_NONE;
+}
+
+/* Llama 3 chat template.  First turn:
+ *   <bos><|start_header_id|>system<|end_header_id|>\n\n{sys}<|eot_id|>
+ *        <|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|>
+ *        <|start_header_id|>assistant<|end_header_id|>\n\n
+ * Returns 0 when the vocabulary lacks the header markers. */
+int llama3_chat_prompt(Session *s, const char *user_msg, const char *sys_msg,
+                       u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 start, end, eot;
+    if (!llama3_markers(v, &start, &end, &eot)) return 0;
+
+    int n = 0;
+    i32 nl = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
+    } while (0)
+
+    if (v->bos_id != (i32)VOCAB_ID_NONE) ADD(v->bos_id);
+
+    ADD(start); ADD_TEXT("system"); ADD(end);
+    ADD(nl); ADD(nl);
+    if (sys_msg && sys_msg[0]) ADD_TEXT(sys_msg);
+    ADD(eot);
+
+    ADD(start); ADD_TEXT("user"); ADD(end);
+    ADD(nl); ADD(nl);
+    ADD_TEXT(user_msg);
+    ADD(eot);
+
+    ADD(start); ADD_TEXT("assistant"); ADD(end);
+    ADD(nl); ADD(nl);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
+/* Llama 3 continuation: closes the previous assistant turn and opens a
+ * new user→assistant round. */
+int llama3_chat_continuation(Session *s, const char *user_msg,
+                             u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 start, end, eot;
+    if (!llama3_markers(v, &start, &end, &eot)) return 0;
+
+    int n = 0;
+    i32 nl = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
+    } while (0)
+
+    ADD(eot);
+
+    ADD(start); ADD_TEXT("user"); ADD(end);
+    ADD(nl); ADD(nl);
+    ADD_TEXT(user_msg);
+    ADD(eot);
+
+    ADD(start); ADD_TEXT("assistant"); ADD(end);
+    ADD(nl); ADD(nl);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
 /* Encode one Gemma template fragment.  SPM text that follows a special
  * token gets the word-boundary marker, matching llama.cpp. */
 static int gemma_text(Vocab *v, const char *txt, u32 *out, int max_out, bool prefix_space) {

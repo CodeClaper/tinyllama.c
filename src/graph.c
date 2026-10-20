@@ -47,7 +47,8 @@ static int op_stat_class(GraphOp op) {
         case OP_MATMULARRY:     return ST_MM;
         case OP_MATMUL_T:       return ST_MM_T;
         case OP_ATTN:           return ST_ATTN;
-        case OP_ROPE_NEOX:      return ST_ROPE;
+        case OP_ROPE_NEOX:
+        case OP_ROPE_NORM:      return ST_ROPE;
         case OP_SILU:           return ST_SILU;
         case OP_BIAS:           return ST_BIAS;
         case OP_ADD:
@@ -333,6 +334,18 @@ GraphNode *graph_rope(Graph *g, GraphNode *src, float theta,
     memcpy(&bits, &theta, sizeof(bits));   /* float bits in params[0] */
     u32 params[] = { bits, n_heads, head_dim, rope_dim };
     return node_add(g, OP_ROPE_NEOX, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 4);
+}
+
+/* Consecutive-pair RoPE (GGML_ROPE_TYPE_NORM): rotates (x[i], x[i+1])
+ * pairs, the convention used by Llama-family GGUF weights. */
+GraphNode *graph_rope_norm(Graph *g, GraphNode *src, float theta,
+                           u32 n_heads, u32 head_dim, u32 rope_dim) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    if (head_dim == 0 || rope_dim == 0 || rope_dim > head_dim) return GRAPH_NODE_NONE;
+    u32 bits;
+    memcpy(&bits, &theta, sizeof(bits));   /* float bits in params[0] */
+    u32 params[] = { bits, n_heads, head_dim, rope_dim };
+    return node_add(g, OP_ROPE_NORM, (GraphNode *[]){ src, NULL, NULL, NULL }, NULL, params, 4);
 }
 
 GraphNode *graph_embed(Graph *g, GraphNode *src, TensorInfo *weight, u32 n_tokens) {
@@ -883,6 +896,7 @@ static const char *op_name(GraphOp op) {
         case OP_RMS_NORM_HEADS: return "rms_heads";
         case OP_SIGMOID_GATE:   return "sigmoid_gate";
         case OP_ROPE_NEOX:      return "rope_neox";
+        case OP_ROPE_NORM:      return "rope_norm";
         case OP_SOFTMAX:        return "softmax";
         case OP_SILU:           return "silu";
         case OP_GELU:           return "gelu";

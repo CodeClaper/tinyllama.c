@@ -50,7 +50,7 @@ extern const float iq3_s_grid[];
 #define IQ2_XS_SIZE  512
 #define IQ3_XXS_SIZE 256
 #define IQ1_S_SIZE   256
-#define IQ4_NL_SIZE  256
+#define IQ4_NL_SIZE  16
 #define IQ3_S_SIZE   512
 #define IQ_TABLES_SIZE (IQ2_XXS_SIZE + IQ2_XS_SIZE + IQ3_XXS_SIZE + \
                         IQ1_S_SIZE + IQ4_NL_SIZE + IQ3_S_SIZE)
@@ -144,7 +144,7 @@ static int metal_geom(u32 type, u64 *block_elems, u64 *block_bytes) {
         case GGUF_TYPE_IQ2_XS:  *block_elems = 256; *block_bytes = 74;  return 0;
         case GGUF_TYPE_IQ3_XXS: *block_elems = 256; *block_bytes = 98;  return 0;
         case GGUF_TYPE_IQ1_S:   *block_elems = 256; *block_bytes = 110; return 0;
-        case GGUF_TYPE_IQ4_NL:  *block_elems = 256; *block_bytes = 50;  return 0;
+        case GGUF_TYPE_IQ4_NL:  *block_elems = 32;  *block_bytes = 18;  return 0;
         case GGUF_TYPE_IQ3_S:   *block_elems = 256; *block_bytes = 110; return 0;
         case GGUF_TYPE_IQ2_S:   *block_elems = 256; *block_bytes = 82;  return 0;
         case GGUF_TYPE_IQ4_XS:  *block_elems = 256; *block_bytes = 136; return 0;

@@ -55,6 +55,7 @@ GraphNode *graph_rms_norm_heads(Graph *g, GraphNode *src, TensorInfo *weight, u3
 GraphNode *graph_mul_mat(Graph *g, GraphNode *src, TensorInfo *weight, bool trans);
 GraphNode *graph_binary(Graph *g, GraphOp op, GraphNode *a, GraphNode *b);
 GraphNode *graph_rope(Graph *g, GraphNode *src, float theta, u32 n_heads, u32 head_dim, u32 rope_dim);
+GraphNode *graph_rope_norm(Graph *g, GraphNode *src, float theta, u32 n_heads, u32 head_dim, u32 rope_dim);
 GraphNode *graph_silu(Graph *g, GraphNode *src);
 GraphNode *graph_gelu(Graph *g, GraphNode *src);
 GraphNode *graph_softmax(Graph *g, GraphNode *src);

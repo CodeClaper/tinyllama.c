@@ -668,6 +668,36 @@ static bool op_rope_neox(OpCtx *c) {
     return true;
 }
 
+/* Consecutive-pair RoPE (GGML_ROPE_TYPE_NORM), used by Llama-family
+ * models.  Rotates (x[i], x[i+1]) pairs; dims past rope_dim are copied. */
+static bool op_rope_norm(OpCtx *c) {
+    u32 bits = op_param(c, 0);
+    float theta;
+    memcpy(&theta, &bits, sizeof(theta));
+    u32 heads = op_param(c, 1);
+    u32 hdim  = op_param(c, 2);
+    u32 rdim  = op_param(c, 3);
+    float *src = op_src(c, 0);
+
+    for (u32 p = 0; p < c->r; p++) {
+        u32 abspos = c->pos + c->base + p;
+        float *dp  = c->dst + (u64)p * c->od;
+        memcpy(dp, src + (u64)(c->base + p) * c->od, (size_t)c->od * sizeof(float));
+        for (u32 h = 0; h < heads; h++) {
+            float *bh = dp + (u64)h * hdim;
+            for (u32 i = 0; i < rdim; i += 2) {
+                float t = 1.0f / powf(theta, (float)i / (float)rdim);
+                float cs = cosf((float)abspos * t);
+                float sn = sinf((float)abspos * t);
+                float a = bh[i], b = bh[i + 1];
+                bh[i]     = a * cs - b * sn;
+                bh[i + 1] = a * sn + b * cs;
+            }
+        }
+    }
+    return true;
+}
+
 static bool op_rms_norm_heads(OpCtx *c) {
     /* Per-head RMS norm over [n_heads] slices of head_dim, read at
      * in_stride and written at out_stride.  Q-norm over a fused
@@ -896,6 +926,7 @@ bool cpu_graph_op(OpCtx *c) {
         case OP_SOFTCAP:        return op_softcap(c);
         case OP_SOFTMAX:        return op_softmax(c);
         case OP_ROPE_NEOX:      return op_rope_neox(c);
+        case OP_ROPE_NORM:      return op_rope_norm(c);
         case OP_SIGMOID_GATE:   return op_sigmoid_gate(c);
         case OP_SSM_CONV:       return op_ssm_conv(c);
         case OP_SSM_DELTA:      return op_ssm_delta(c);
