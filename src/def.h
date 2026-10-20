@@ -95,6 +95,7 @@ typedef struct {
     float frequency_penalty;
     float presence_penalty;
     bool inspect;
+    bool show_graph;
 } ServerOptions;
 
 typedef struct {

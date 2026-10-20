@@ -312,6 +312,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -fp | --frequency-penalty <float>   Frequency penalty, default 0.0 (0.0=disabled)\n");
     fprintf(file, "  -pp | --presence-penalty  <float>   Presence penalty, default 0.0 (0.0=disabled)\n");
     fprintf(file, "  -i  | --inspect           <none>    Inspect the engine/model\n");
+    fprintf(file, "  -g  | --graph             <none>    Draw the graph workflow and exit\n");
     exit(exit_code);
 }
 
@@ -359,6 +360,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) so.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) so.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-i")  || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
+        else if (!strcmp(arg, "-g")  || !strcmp(arg, "--graph")) so.show_graph = true;
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
             usage(stderr, 2);
@@ -462,6 +464,16 @@ int main(int argc, char *argv[]) {
      * the device backend so the first request only pays compute. */
     if (!graph_prepare(session))
         slog(WARN, "Graph warmup failed; first request will be slower");
+
+    /* Draw the workflow and exit (diagnostic, like --inspect). */
+    if (so.show_graph) {
+        graph_drawer(session->graph);
+        graph_free(session->graph);
+        session->graph = NULL;
+        session_free(session);
+        engine_close(engine);
+        return 0;
+    }
 
     /* 4. Set up server & signal handling. */
     Server server;

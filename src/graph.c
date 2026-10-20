@@ -870,6 +870,103 @@ static const char *backend_name(BackendType backend) {
     }
 }
 
+static const char *op_name(GraphOp op) {
+    switch (op) {
+        case OP_INPUT:          return "input";
+        case OP_ADD:            return "add";
+        case OP_MUL:            return "mul";
+        case OP_MATMUL:         return "matmul";
+        case OP_MATMULARRY:     return "matmul_arr";
+        case OP_MATMUL_T:       return "matmul_t";
+        case OP_SCALE:          return "scale";
+        case OP_RMS_NORM:       return "rms_norm";
+        case OP_RMS_NORM_HEADS: return "rms_heads";
+        case OP_SIGMOID_GATE:   return "sigmoid_gate";
+        case OP_ROPE_NEOX:      return "rope_neox";
+        case OP_SOFTMAX:        return "softmax";
+        case OP_SILU:           return "silu";
+        case OP_GELU:           return "gelu";
+        case OP_EMBED:          return "embed";
+        case OP_BIAS:           return "bias";
+        case OP_ATTN:           return "attn";
+        case OP_SSM_CONV:       return "ssm_conv";
+        case OP_SSM_DELTA:      return "ssm_delta";
+        case OP_SOFTCAP:        return "softcap";
+        case OP_H2D:            return "h2d";
+        case OP_D2H:            return "d2h";
+        default:                return "?";
+    }
+}
+
+/* Render the static graph as a linear workflow.  Nodes are listed in
+ * build order (== topo / execution order), and every edge is shown as
+ * the index of its source, so a split plan's H2D/D2H boundaries and
+ * each op's weights are visible at a glance. */
+void graph_drawer(const Graph *g) {
+    if (!g) {
+        slog(WARN, "graph_drawer: no graph to draw");
+        return;
+    }
+
+    u32 n_sink = 0;
+    for (const GraphNode *n = g->head; n; n = n->next) {
+        bool used = false;
+        for (const GraphNode *m = g->head; m && !used; m = m->next)
+            for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
+                if (m->src[k] == n) { used = true; break; }
+        if (!used) n_sink++;
+    }
+
+    printf("\n");
+    printf("Graph workflow: %u nodes, %u states, %u sinks\n",
+           g->n_node, g->n_state, n_sink);
+    printf("  +-------+-------+-------+--------------+--------------------------+------------------------------------------------+\n");
+    printf("  | %5s | %5s | %-5s | %-12s | %-24s | %-46s |\n",
+           "idx", "layer", "bkd", "op", "inputs", "weights");
+    printf("  +-------+-------+-------+--------------+--------------------------+------------------------------------------------+\n");
+
+    char src[64];
+    char wts[512];
+    for (const GraphNode *n = g->head; n; n = n->next) {
+        int so = 0;
+        src[0] = '\0';
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
+            if (!n->src[k]) continue;
+            so += snprintf(src + so, sizeof(src) - (size_t)so, "%s%u",
+                           so ? "," : "", n->src[k]->idx);
+            if ((size_t)so >= sizeof(src)) break;
+        }
+        if (!src[0]) snprintf(src, sizeof(src), "-");
+
+        int wo = 0;
+        wts[0] = '\0';
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
+            TensorInfo *w = n->weights[k];
+            if (!w) continue;
+            wo += snprintf(wts + wo, sizeof(wts) - (size_t)wo, "%s%.*s",
+                           wo ? "," : "",
+                           (int)w->key.len, w->key.content ? w->key.content : "?");
+            if ((size_t)wo >= sizeof(wts)) break;
+        }
+        if (!wts[0]) snprintf(wts, sizeof(wts), "-");
+
+        printf("  | %5u | %5u | %-5s | %-12s | %-24s | %-46s |\n",
+               n->idx, n->layer, backend_name(n->backend),
+               op_name(n->op), src, wts);
+    }
+    printf("  +-------+-------+-------+--------------+--------------------------+------------------------------------------------+\n");
+
+    printf("Sinks:");
+    for (const GraphNode *n = g->head; n; n = n->next) {
+        bool used = false;
+        for (const GraphNode *m = g->head; m && !used; m = m->next)
+            for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++)
+                if (m->src[k] == n) { used = true; break; }
+        if (!used) printf(" %u(%s)", n->idx, op_name(n->op));
+    }
+    printf("\n\n");
+}
+
 /* Dump the static execution plan: node count and the sizes of the three
  * big allocations (weights, activation arena, KV cache) per backend. */
 static void graph_plan_print(const Graph *g, const Session *s) {

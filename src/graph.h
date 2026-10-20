@@ -24,6 +24,11 @@ typedef struct {
 Graph *graph_new(void);
 void graph_free(Graph *g);
 
+/* Print an ASCII rendering of the built graph workflow: every node in
+ * build (= execution) order with its op, layer, backend, inputs and
+ * attached weights, followed by a summary of the sink nodes. */
+void graph_drawer(const Graph *g);
+
 /* Tag every node appended after this call with `layer`.  Builders call
  * it once per transformer layer; layer == cfg.n_layer marks the final
  * norm / LM head so it stays on the CPU side of an offload split. */
