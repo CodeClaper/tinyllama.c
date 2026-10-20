@@ -83,7 +83,7 @@ static const TypeGeom type_geoms[] = {
     GEOM(Q2_K, 256, 84), GEOM(Q3_K, 256, 110), GEOM(Q4_K, 256, 144),
     GEOM(Q5_K, 256, 176), GEOM(Q6_K, 256, 210), GEOM(Q8_K, 256, 292),
     GEOM(IQ2_XXS, 256, 66), GEOM(IQ2_XS, 256, 74), GEOM(IQ3_XXS, 256, 98),
-    GEOM(IQ1_S, 256, 110), GEOM(IQ4_NL, 256, 50), GEOM(IQ3_S, 256, 110),
+    GEOM(IQ1_S, 256, 110), GEOM(IQ4_NL, 32, 18),  GEOM(IQ3_S, 256, 110),
     GEOM(IQ2_S, 256, 82), GEOM(IQ4_XS, 256, 136), GEOM(IQ1_M, 256, 56),
 };
 #define N_TYPES (sizeof(type_geoms) / sizeof(type_geoms[0]))

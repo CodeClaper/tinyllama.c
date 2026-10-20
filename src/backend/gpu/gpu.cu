@@ -47,7 +47,7 @@ __device__ __constant__ float d_iq2_xxs_grid[IQ2_XXS_SIZE];
 __device__ __constant__ float d_iq2_xs_grid[IQ2_XS_SIZE];
 __device__ __constant__ float d_iq3_xxs_grid[IQ3_XXS_SIZE];
 __device__ __constant__ float d_iq1_s_grid[IQ1_S_SIZE];
-__device__ __constant__ float d_iq4_nl_values[IQ4_NL_SIZE];
+__device__ float d_iq4_nl_values[IQ4_NL_SIZE];
 __device__ __constant__ float d_iq3_s_grid[IQ3_S_SIZE];
 
 /* ================================================================
@@ -507,6 +507,58 @@ __global__ void gemv_block_kernel(const u8 *__restrict__ w,
     }
 }
 
+/* IQ4_NL GEMV: four output rows per warp, eight lanes per row.
+ *
+ * Each lane owns two qs bytes (four elements: both nibbles of two
+ * bytes), so a warp's 8-lane row group covers all 32 elements of a
+ * block.  The non-linear 16-value codebook is staged in shared memory
+ * once per block: indexing it by a per-lane value is cheap there,
+ * unlike divergent __constant__ loads.  Four rows share each x load,
+ * which is the main win over the generic one-row-per-warp kernel. */
+__global__ void gemv_iq4_nl_kernel(const u8 *__restrict__ w,
+                                   const float *__restrict__ x,
+                                   float *__restrict__ y,
+                                   u64 rows, u64 cols) {
+    __shared__ float tbl[16];
+    if (threadIdx.x < 16)
+        tbl[threadIdx.x] = __ldg(&d_iq4_nl_values[threadIdx.x]);
+    __syncthreads();
+
+    const u32 lane = threadIdx.x & 31u;
+    const u32 sub  = lane >> 3;        /* row within this warp: 0..3 */
+    const u32 l    = lane & 7u;        /* 2 qs bytes / 4 elements    */
+    const u64 bpr  = cols >> 5;        /* 32-element blocks per row  */
+    const float *xb = x + (u64)blockIdx.y * cols;
+    float *yb       = y + (u64)blockIdx.y * rows;
+
+    u64 r0 = (u64)blockIdx.x * 32u + (u64)(threadIdx.x >> 5) * 4u;
+    u64 rstep = (u64)gridDim.x * 32u;
+    for (; r0 < rows; r0 += rstep) {
+        u64 r = r0 + sub;
+        float sum = 0.0f;
+        /* Tail lanes skip the weight reads but still join the reduction. */
+        if (r < rows) {
+            u64 blk0 = (r * cols) >> 5;
+            for (u64 b = 0; b < bpr; b++) {
+                const u8 *bp = w + (blk0 + b) * 18;
+                float d = f16_to_f32(ld_u16(bp));
+                u32 qa = bp[2 + 2u * l];
+                u32 qb = bp[2 + 2u * l + 1u];
+                const float *xbk = xb + b * 32u;
+                sum += d * (tbl[qa & 0xFu]       * xbk[2u * l] +
+                            tbl[qa >> 4]         * xbk[16u + 2u * l] +
+                            tbl[qb & 0xFu]       * xbk[2u * l + 1u] +
+                            tbl[qb >> 4]         * xbk[16u + 2u * l + 1u]);
+            }
+        }
+        #pragma unroll
+        for (int o = 4; o > 0; o >>= 1)
+            sum += __shfl_down_sync(0xffffffffu, sum, o, 8);
+        if (l == 0 && r < rows)
+            yb[r] = sum;
+    }
+}
+
 /* ================================================================
  * IQ (importance-matrix-aware) types
  * ================================================================ */
@@ -560,7 +612,7 @@ __device__ static inline float dequant_iq4_nl(const u8 *data, u64 i) {
     const u8 *blk = data + bi * 18;
     float d = f16_to_f32(ld_u16(blk));
     u32 q = (o < 16) ? (blk[2 + o] & 0xF) : (blk[2 + o - 16] >> 4);
-    return d * d_iq4_nl_values[q];
+    return d * __ldg(&d_iq4_nl_values[q]);
 }
 
 __device__ static inline float dequant_iq1_m(const u8 *data, u64 i) {
@@ -613,7 +665,7 @@ __device__ static inline float dequant_iq4_xs(const u8 *data, u64 i) {
     i8  sc_l = (i8)blk[2 + 8 + 128 + (o >> 4)];
     i8  sc_h = (i8)blk[2 + 8 + 128 + 16 + (o >> 4)];
     float sc = (float)(i32)sc_l + ((float)(i32)sc_h / 127.0f);
-    return d * sc * d_iq4_nl_values[q];
+    return d * sc * __ldg(&d_iq4_nl_values[q]);
 }
 
 /* ================================================================
@@ -1084,6 +1136,16 @@ static void matmul_launch(const u8 *w, const float *x, float *y,
             dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
             matmul_kernel_q8_0_dp4a<<<grid, 256, q8_smem>>>(
                 w, x, y, rows, cols, batch);
+            CHECK(cudaGetLastError());
+            return;
+        }
+    }
+    if constexpr (TYPE == GGUF_TYPE_IQ4_NL) {
+        if (!trans && cols % 32 == 0) {
+            u64 groups = (rows + 31) / 32;   /* 8 warps * 4 rows */
+            dim3 grid((unsigned)(groups < GPU_MAX_BLOCKS ? groups : GPU_MAX_BLOCKS),
+                      (unsigned)batch);
+            gemv_iq4_nl_kernel<<<grid, 256>>>(w, x, y, rows, cols);
             CHECK(cudaGetLastError());
             return;
         }
