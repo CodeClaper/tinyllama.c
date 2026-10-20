@@ -33,4 +33,8 @@
 
 11. **Only Qwen2 has a working forward pass** — Llama, DeepSeek (MLA), Falcon are stubs. Llama is the most popular family and should be prioritized.
 
-12. **No GPU backend** — `src/gpu/quants_gpu.c` / `.h` are both empty. Even a simple CUDA mat_mul kernel would transform prefill speed.
+## Implemented
+
+- **GPU backend (CUDA / Metal)** — graph ops dispatch per node (`graph_op_compute()`), with weights, activations and the KV cache placed on the device backend (see `src/backend/gpu`, `src/backend/metal`). Build with `GPU=1 make` (CUDA) or `METAL=1 make` (macOS).
+- **Partial GPU offload** — `-ngl | --n-gpu-layers <int>` puts the first N transformer layers on the GPU and keeps the rest on the CPU (`-1` = auto, `0` = all CPU). A split plan inserts `OP_H2D` / `OP_D2H` boundary copies and keeps per-backend activation arenas and KV caches separate; `-ngl` >= `n_layer` runs everything on the device.
+- **Graph workflow drawer** — `-g | --graph` builds the graph, prints every node in execution order (idx, layer, backend, op, inputs, weights) plus the sink summary, then exits. Useful for inspecting a partial-offload split.

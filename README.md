@@ -25,6 +25,8 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - epoll-based event loop for HTTP serving
 - Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
 - Optional Metal GPU acceleration on macOS with automatic CPU fallback (`METAL=1 make`)
+- Partial GPU offload: `-ngl N` keeps the first `N` transformer layers on the GPU and the rest on the CPU, with only the hidden state crossing the bus at the split
+- Graph workflow visualization: `--graph` prints every node (op, layer, backend, inputs, weights) before exiting
 - CPU backends with x86 and ARM optimizations
 
 ## Supported Models
@@ -94,9 +96,13 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
              -ngl -1                          # GPU layers (-1=auto, 0=CPU, default: -1)
              --topp 0.9                       # Top-p sampling (default: 0.9)
              -i                               # Inspect model metadata only
+             -g                               # Draw the graph workflow and exit
 
 # Inspect a model without running the server
 ./src/server -m model.gguf -i
+
+# Print the graph workflow (nodes, layers, backends, edges) and exit
+./src/server -m model.gguf -ngl 12 --graph
 ```
 
 Send requests to the server:
@@ -165,7 +171,15 @@ The benchmark runs the prompt through prefill and generation phases, repeating `
 
 ### Partial GPU offload (`-ngl`)
 
-`-ngl N` places the first `N` transformer layers on the GPU and runs the rest on the CPU, so a model whose weights exceed VRAM can still use the card. The default `-ngl -1` auto-fits `N` from the free device memory; `-ngl 0` forces CPU-only. Weights of CPU layers stay in the mmap'd file, and only the hidden state at the split layer crosses the bus once per forward pass. For example, a 27B Q4 model on an 8 GB card keeps roughly 25 of 65 layers on the GPU.
+`-ngl N` places the first `N` transformer layers on the GPU and runs the rest on the CPU, so a model whose weights exceed VRAM can still use the card. The default `-ngl -1` auto-fits `N` from the free device memory; `-ngl 0` forces CPU-only; `N >= n_layer` runs the whole model on the device. Weights of CPU layers stay in the mmap'd file, and only the hidden state at the split layer crosses the bus once per forward pass (`OP_D2H`), with the reverse copy (`OP_H2D`) when a later layer returns to the device. Each backend has its own activation arena and KV cache, and the runtime rejects a split that does not fit rather than silently falling back.
+
+Use `--graph` to inspect the resolved split — every node's `bkd` column shows `cpu`/`cuda`/`metal` and the `h2d`/`d2h` nodes mark the boundaries:
+
+```bash
+./src/server -m model.gguf -ngl 12 --graph
+```
+
+For example, a 27B Q4 model on an 8 GB card keeps roughly 25 of 65 layers on the GPU.
 
 ## Benchmark
 
