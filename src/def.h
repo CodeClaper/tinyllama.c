@@ -71,6 +71,8 @@ typedef enum {
     BACKEND_METAL,
 } BackendType;
 
+#define BACKEND_COUNT 3   /* one slot per BackendType */
+
 typedef struct {
     const char *model_path;
     bool inspect;
@@ -83,6 +85,7 @@ typedef struct {
     int ctx_size;
     int default_tokens;
     int nthread;
+    int n_gpu_layers;
     float temperature;
     u32 top_k;
     float top_p;
@@ -356,6 +359,12 @@ struct Session {
     
     /* --- Graph --- */
     Graph       *graph;
+
+    /* Number of leading transformer layers placed on the GPU.  0 = all
+     * CPU, n_layer (or more) = all GPU, anything between = layer-split
+     * offload.  Resolved before ops.init() so state buffers can be
+     * allocated on the right backend. */
+    int          n_gpu_layers;
 };
 
 #define GRAPH_NODE_NONE  ((GraphNode *)0) /* invalid node handle (builder return) */
@@ -389,13 +398,18 @@ typedef enum {
     OP_BIAS,            /* out = x + bias      (per-row over weight)      */
     OP_ATTN,            /* out = attn(q, k, v) (causal multi-head, GQA)   */
     OP_SSM_CONV,        /* depthwise causal conv1d (Gated DeltaNet)       */
-    OP_SSM_DELTA,       /* gated delta recurrence (Gated DeltaNet)        */
+    OP_SSM_DELTA,       /* gated delta recurrence (Gated DeltaNet)       */
     OP_SOFTCAP,         /* out = tanh(x / cap) * cap  (Gemma logit cap)   */
+    OP_H2D,             /* copy a host activation slot to the device      */
+    OP_D2H,             /* copy a device activation slot to the host      */
 } GraphOp;
 
 typedef struct GraphNode {
     GraphOp     op;
     u32         idx;                            /* build order index; 0..n_node-1 */
+    u32         layer;                          /* owning transformer layer,     *
+                                                 * n_layer == final norm / head   */
+    BackendType backend;                        /* where this node executes      */
     GraphNode   *src[GRAPH_NODE_MAX_SRC];       /* source nodes; NULL = unused */
     TensorInfo  *weights[GRAPH_NODE_MAX_SRC];
     u32         params[64 / sizeof(u32)];
@@ -411,16 +425,18 @@ typedef struct GraphNode {
 
 
 typedef struct GraphPlan {
-    BackendType backend;
-    /* Static peak-size execution arena (graph.c).  Every node->data
-     * aliases a slot inside it; slot offsets are assigned once by a
-     * lifetime analysis on the first execution. */
-    void        *arena;
-    size_t      arena_size;
-    size_t      weights_size;
-    KvCache     *cache;         /* KV cache descriptors (host)      */
-    void        *cache_arena;   /* cache float storage on `backend` */
-    size_t      kvcache_size;
+    BackendType backend;        /* primary backend (all-GPU / all-CPU)  */
+    /* Static peak-size execution arenas (graph.c), one per backend used
+     * by the plan.  Every node->data aliases a slot inside the arena of
+     * its own backend; slot offsets are assigned once by a lifetime
+     * analysis on the first execution. */
+    void        *arena[BACKEND_COUNT];
+    size_t      arena_size[BACKEND_COUNT];
+    size_t      weights_size[BACKEND_COUNT];
+    KvCache     *cache;         /* KV cache descriptors (host)          */
+    void        *cache_arena[BACKEND_COUNT]; /* KV float storage      */
+    size_t      kvcache_size[BACKEND_COUNT];
+    bool        ready;          /* plan + arenas + KV + warmup done     */
 } GraphPlan;
 
 
@@ -430,6 +446,7 @@ typedef struct Graph {
     GraphNode   *head;
     GraphNode   *tail;
     u32         n_node;
+    u32         cur_layer;      /* layer tag applied by node_add()      */
     GraphPlan   *plan;
     /* Buffers borrowed from the arch workspace by stateful ops (e.g.
      * the Gated DeltaNet conv ring + recurrent state).  Indexed by the

@@ -886,6 +886,19 @@ int gpu_available(void) {
     return 1;
 }
 
+void gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
+    if (free_bytes)  *free_bytes  = 0;
+    if (total_bytes) *total_bytes = 0;
+    if (!gpu_available()) return;
+    size_t f = 0, t = 0;
+    if (cudaMemGetInfo(&f, &t) == cudaSuccess) {
+        if (free_bytes)  *free_bytes  = f;
+        if (total_bytes) *total_bytes = t;
+    } else {
+        (void)cudaGetLastError();
+    }
+}
+
 static void gpu_load_tables(void) {
     if (g_tables_loaded) return;
     CHECK(cudaMemcpyToSymbol(d_iq2_xxs_grid,  iq2_xxs_grid,  IQ2_XXS_SIZE * sizeof(float), 0, cudaMemcpyHostToDevice));
@@ -1151,8 +1164,19 @@ static int         g_cache_n = 0;
 
 static u8 *gpu_cache_upload(TensorInfo *ti) {
     u8 *d = NULL;
-    CHECK(cudaMalloc(&d, ti->bytes));
-    CHECK(cudaMemcpy(d, ti->data, ti->bytes, cudaMemcpyHostToDevice));
+    /* Upload failure (typically OOM on a partial-offload plan) is a
+     * normal, recoverable condition: report NULL so the planner can
+     * retry with fewer layers. */
+    if (cudaMalloc(&d, ti->bytes) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return NULL;
+    }
+    if (cudaMemcpy(d, ti->data, ti->bytes, cudaMemcpyHostToDevice)
+        != cudaSuccess) {
+        (void)cudaGetLastError();
+        cudaFree(d);
+        return NULL;
+    }
     return d;
 }
 

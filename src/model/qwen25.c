@@ -196,6 +196,7 @@ static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
     if (cur == GRAPH_NODE_NONE) goto fail;
 
     for (u32 l = 0; l < c->n_layer; l++) {
+        graph_set_layer(g, l);
         LayerWeights *lw = &w->layers[l];
 
         TensorInfo *t_q = lw->tensors[TENSOR_ATTN_Q];
@@ -263,9 +264,13 @@ static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
 
         cur = graph_binary(g, OP_ADD, h, down);
         if (cur == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_layer_boundary(g, cur, s, l);
+        if (cur == GRAPH_NODE_NONE) goto fail;
     }
 
     /* ---- Final norm ---- */
+    graph_set_layer(g, c->n_layer);
     TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
     if (!t_norm) t_norm = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
     GraphNode *fn = graph_rms_norm(g, cur, t_norm);

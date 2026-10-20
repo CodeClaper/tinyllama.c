@@ -27,6 +27,7 @@ typedef struct {
     float           frequency_penalty;
     float           presence_penalty;
     int             nthread;
+    int             n_gpu_layers;
     const char      *system;
 } ChatOptions;
 
@@ -39,6 +40,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
+    fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -s  | --system            <string>  System input\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
@@ -98,6 +100,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
         .presence_penalty = DEFAULT_PRESENCE_PENALTY,
         .nthread = -1,
+        .n_gpu_layers = -1,
         .system = NULL
     };
     for (int i = 1; i < argc; i++) {
@@ -107,6 +110,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-c")  || !strcmp(arg, "--ctx")) co.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) co.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) co.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
@@ -211,7 +215,8 @@ int main(int argc, char *argv[]) {
     if (!engine) fatal("Failed to load model");
 
     /* Create session. */
-    Session *session = session_create(engine, (u32)co.ctx_size, co.nthread);
+    Session *session = session_create(engine, (u32)co.ctx_size, co.nthread,
+                                      co.n_gpu_layers);
     if (!session) fatal("Failed to create session");
     session->temperature = co.temperature;
     session->top_k = co.top_k;

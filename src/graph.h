@@ -24,6 +24,25 @@ typedef struct {
 Graph *graph_new(void);
 void graph_free(Graph *g);
 
+/* Tag every node appended after this call with `layer`.  Builders call
+ * it once per transformer layer; layer == cfg.n_layer marks the final
+ * norm / LM head so it stays on the CPU side of an offload split. */
+void graph_set_layer(Graph *g, u32 layer);
+
+/* Backend a given transformer layer should use under the session's
+ * -ngl setting.  Also used by arch code to place recurrent state. */
+BackendType graph_layer_backend(const Session *s, u32 layer);
+
+/* Insert a device->host copy after a layer when it is the last GPU
+ * layer of a split plan; returns `src` unchanged otherwise. */
+GraphNode *graph_layer_boundary(Graph *g, GraphNode *src, Session *s, u32 layer);
+
+/* Backend-aware recurrent-state allocation (CPU host memory or CUDA
+ * device memory; Metal keeps a host mirror). */
+void *graph_state_alloc(size_t bytes, BackendType backend);
+void  graph_state_free(void *ptr, BackendType backend);
+void  graph_state_zero(void *ptr, size_t bytes, BackendType backend);
+
 GraphNode *graph_input(Graph *g, u32 n_tokens);
 GraphNode *graph_embed(Graph *g, GraphNode *token_id, TensorInfo *weight, u32 n_tokens);
 GraphNode *graph_rms_norm(Graph *g, GraphNode *src, TensorInfo *weight);

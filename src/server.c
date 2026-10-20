@@ -303,6 +303,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
+    fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
     fprintf(file, "  -P  | --minp              <float>   Min-p threshold, default 0.05\n");
@@ -336,7 +337,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .repeat_last_n = DEFAULT_REPEAT_LAST_N,
         .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
         .presence_penalty = DEFAULT_PRESENCE_PENALTY,
-        .nthread = DEFAULT_N_THREAD
+        .nthread = DEFAULT_N_THREAD,
+        .n_gpu_layers = -1
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -348,6 +350,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) so.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
@@ -439,7 +442,8 @@ int main(int argc, char *argv[]) {
     }
 
     /* 3. Create session & configure sampling. */
-    Session *session = session_create(engine, (u32)so.ctx_size, so.nthread);
+    Session *session = session_create(engine, (u32)so.ctx_size, so.nthread,
+                                      so.n_gpu_layers);
     if (!session) {
         engine_close(engine);
         slog(ERROR, "Failed to create session.");

@@ -237,8 +237,12 @@ static bool qwen35_init(Session *s) {
         u32 n_ssm     = 0;
         for (u32 i = 0; i < c->n_layer; i++) {
             if (w->layers[i].tensors[TENSOR_SSM_CONV1D]) {
-                ws->ssm_state[i]  = scalloc(state_sz, sizeof(float));
-                ws->conv_state[i] = scalloc(conv_sz, sizeof(float));
+                BackendType sb = graph_layer_backend(s, i);
+                ws->ssm_state[i]  = graph_state_alloc(state_sz * sizeof(float), sb);
+                ws->conv_state[i] = graph_state_alloc(conv_sz * sizeof(float), sb);
+                if (!ws->ssm_state[i] || !ws->conv_state[i]) {
+                    slog(ERROR, "Qwen3 SSM: state allocation failed for layer %u", i);
+                }
                 n_ssm++;
             }
         }
@@ -268,10 +272,11 @@ static void qwen35_reset(Session *s) {
         u64 state_sz = (u64)ws->ssm_n_v * ws->ssm_head_v * ws->ssm_head_v;
         u64 conv_sz  = (u64)(ws->conv_kernel - 1) * ws->ssm_fused;
         for (u32 i = 0; i < s->cfg.n_layer; i++) {
+            BackendType sb = graph_layer_backend(s, i);
             if (ws->ssm_state[i])
-                memset(ws->ssm_state[i], 0, state_sz * sizeof(float));
+                graph_state_zero(ws->ssm_state[i], state_sz * sizeof(float), sb);
             if (ws->conv_state[i])
-                memset(ws->conv_state[i], 0, conv_sz * sizeof(float));
+                graph_state_zero(ws->conv_state[i], conv_sz * sizeof(float), sb);
         }
     }
 }
@@ -290,8 +295,9 @@ static void qwen35_free(Session *s) {
         sfree(ws->hb); sfree(ws->hb2);
         if (ws->ssm_state) {
             for (u32 i = 0; i < s->cfg.n_layer; i++) {
-                sfree(ws->ssm_state[i]);
-                sfree(ws->conv_state[i]);
+                BackendType sb = graph_layer_backend(s, i);
+                graph_state_free(ws->ssm_state[i], sb);
+                graph_state_free(ws->conv_state[i], sb);
             }
             sfree(ws->ssm_state);
             sfree(ws->conv_state);
@@ -406,6 +412,7 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
     if (cur == GRAPH_NODE_NONE) goto fail;
 
     for (u32 l = 0; l < c->n_layer; l++) {
+        graph_set_layer(g, l);
         LayerWeights *lw = &w->layers[l];
 
         TensorInfo *t_qkv = lw->tensors[TENSOR_ATTN_QKV];
@@ -605,9 +612,13 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
 
         cur = graph_binary(g, OP_ADD, cur, down);
         if (cur == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_layer_boundary(g, cur, s, l);
+        if (cur == GRAPH_NODE_NONE) goto fail;
     }
 
     /* ---- Final norm ---- */
+    graph_set_layer(g, c->n_layer);
     TensorInfo *t_norm = w->tensors[TENSOR_OUTPUT_NORM];
     if (!t_norm) t_norm = w->layers[c->n_layer - 1].tensors[TENSOR_POST_ATTN_NORM];
     GraphNode *fn = graph_rms_norm(g, cur, t_norm);

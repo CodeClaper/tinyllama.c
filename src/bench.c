@@ -33,6 +33,7 @@ typedef struct {
     const char *output;
     int repeat;
     int nthread;
+    int n_gpu_layers;
 } BenchOptions;
 
 /* Usage. */
@@ -44,6 +45,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
     fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
     fprintf(file, "  -T  | --threads <int>     Number of threads, default CPU cores\n");
+    fprintf(file, "  -ngl| --n-gpu-layers <int> Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -t  | --temp    <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -tp | --topp    <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk    <int>     Top-k sampling, default 40\n");
@@ -74,6 +76,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         .output = NULL,
         .repeat = 1,
         .nthread = -1,
+        .n_gpu_layers = -1,
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -82,6 +85,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) bo.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) bo.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) bo.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) bo.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t") || !strcmp(arg, "--temp")) bo.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) bo.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) bo.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
@@ -150,7 +154,8 @@ int main(int argc, char *argv[]) {
     slog(INFO, "Loaded model (%s)", engine->model->arch_name);
 
     /* Create session. */
-    Session *session = session_create(engine, (u32)opts.ctx_size, opts.nthread);
+    Session *session = session_create(engine, (u32)opts.ctx_size, opts.nthread,
+                                      opts.n_gpu_layers);
     if (!session) slog(ERROR, "Failed to create session");
     session->temperature = opts.temperature;
     session->top_k = opts.top_k;

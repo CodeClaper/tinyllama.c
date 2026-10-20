@@ -52,6 +52,9 @@ extern "C" {
 /* Returns nonzero if a usable CUDA device is present. */
 int gpu_available(void);
 
+/* Current free / total device memory in bytes (0 when unavailable). */
+void gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
+
 /* Dequantize nb elements starting at i0 from tensor ti into out[0..nb-1].
  * out must have room for nb floats. Returns 0 on success, -1 on error. */
 int gpu_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out);

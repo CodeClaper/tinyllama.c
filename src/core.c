@@ -1564,14 +1564,110 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 }
 
 
+#if defined(GPU_BUILD)
+/* Approximate how many leading layers fit in the available device
+ * memory: per-layer weights + (attention layers only) KV + a share of
+ * the activation arena, leaving headroom for the CUDA context. */
+static int session_auto_gpu_layers(Session *s) {
+    size_t free_b = 0, total_b = 0;
+    gpu_mem_info(&free_b, &total_b);
+    (void)total_b;
+    if (free_b == 0) return 0;
+
+    Weights *w = s->en ? s->en->weights : NULL;
+    u32 L = s->cfg.n_layer;
+    if (!w || !w->layers || L == 0) return 0;
+
+    size_t reserve = (size_t)384 << 20;          /* CUDA context + slack */
+    size_t budget  = free_b > reserve ? free_b - reserve : 0;
+    budget = budget / 10 * 9;                     /* keep 10% headroom */
+
+    size_t used = 0;
+    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+    if (te) used += (size_t)te->bytes;
+
+    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim
+                * sizeof(float) * 2;
+    double arena_full = (double)s->ctx_size * s->cfg.n_embd
+                        * sizeof(float) * 36.0;
+    size_t arena_layer = (size_t)(arena_full / (double)L);
+
+    int n = 0;
+    for (u32 l = 0; l < L; l++) {
+        size_t lw = 0;
+        for (int t = 0; t < TENSOR_COUNT; t++) {
+            TensorInfo *ti = w->layers[l].tensors[t];
+            if (!ti) continue;
+            bool dup = false;
+            for (int u = 0; u < t; u++)
+                if (w->layers[l].tensors[u] == ti) { dup = true; break; }
+            if (!dup) lw += (size_t)ti->bytes;
+        }
+        bool attn = w->layers[l].tensors[TENSOR_ATTN_K] != NULL;
+        size_t add = lw + (attn ? kv : 0) + arena_layer;
+        if (used + add > budget) break;
+        used += add;
+        n++;
+    }
+    if (n == (int)L) {
+        TensorInfo *tout = w->tensors[TENSOR_OUTPUT];
+        size_t extra = tout ? (size_t)tout->bytes : 0;
+        if (used + extra > budget) n--;
+    }
+    slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB -> n_gpu_layers=%d/%u",
+         (double)free_b / 1048576.0, (double)budget / 1048576.0, n, L);
+    return n;
+}
+#endif /* GPU_BUILD */
+
+static void session_resolve_gpu_layers(Session *s, int requested) {
+#if defined(GPU_BUILD)
+    if (!gpu_available()) {
+        if (requested > 0)
+            slog(WARN, "GPU requested but no usable CUDA device; using CPU");
+        s->n_gpu_layers = 0;
+        return;
+    }
+    int L   = (int)s->cfg.n_layer;
+    int fit = session_auto_gpu_layers(s);
+    if (requested < 0) {
+        s->n_gpu_layers = fit;
+    } else {
+        int want = requested > L ? L : requested;
+        if (want > fit)
+            slog(WARN, "-ngl %d exceeds the estimated budget (%d) at ctx=%u; "
+                 "planning may fail", want, fit, s->ctx_size);
+        s->n_gpu_layers = want;
+    }
+#elif defined(METAL_BUILD)
+    if (!metal_available()) { s->n_gpu_layers = 0; return; }
+    int L = (int)s->cfg.n_layer;
+    if (requested < 0) {
+        s->n_gpu_layers = L;
+    } else if (requested > 0 && requested < L) {
+        slog(WARN, "Metal partial offload is not supported; using full GPU");
+        s->n_gpu_layers = L;
+    } else {
+        s->n_gpu_layers = requested > 0 ? L : 0;
+    }
+#else
+    (void)requested;
+    s->n_gpu_layers = 0;
+#endif
+}
+
 /* Create a session: sampling parameters, thread pool, architecture
- * config, and the ops table for the detected architecture. */
-Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
+ * config, and the ops table for the detected architecture.
+ * n_gpu_layers: <0 auto-fit, 0 CPU-only, >0 number of leading layers
+ * to place on the GPU. */
+Session *session_create(Engine *en, u32 ctx_size, int nthreads,
+                        int n_gpu_layers) {
     if (!en || ctx_size == 0) return NULL;
 
     Session *s = smalloc(sizeof(*s));
     s->en                = en;
     s->ctx_size          = ctx_size;
+    s->n_gpu_layers      = n_gpu_layers;
     s->temperature       = DEFAULT_TEMPERATURE;
     s->top_p             = DEFAULT_TOP_P ;
     s->top_k             = DEFAULT_TOP_K ;
@@ -1585,6 +1681,10 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads) {
 
     /* Fill architecture config from model metadata. */
     arch_config_init(en, &s->cfg);
+
+    /* Resolve -ngl before ops.init(): recurrent state buffers are
+     * allocated on the backend their layer will execute on. */
+    session_resolve_gpu_layers(s, n_gpu_layers);
 
     /* Bind the right ops table. */
     switch (en->model->arch) {

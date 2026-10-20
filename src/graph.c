@@ -104,8 +104,10 @@ static GraphNode *node_add(Graph *g, GraphOp op, GraphNode *const *src,
     GraphNode *n = scalloc(1, sizeof(GraphNode));
     if (!n) return GRAPH_NODE_NONE;
 
-    n->op  = op;
-    n->idx = g->n_node;
+    n->op      = op;
+    n->idx     = g->n_node;
+    n->layer   = g->cur_layer;
+    n->backend = BACKEND_CPU;
     for (int i = 0; i < GRAPH_NODE_MAX_SRC; i++) {
         n->src[i]     = src ? src[i] : NULL;
         n->weights[i] = weights ? weights[i] : NULL;
@@ -113,6 +115,86 @@ static GraphNode *node_add(Graph *g, GraphOp op, GraphNode *const *src,
     if (params && n_params) 
         memcpy(n->params, params, n_params * sizeof(u32));
     return node_add_extern(g, n);
+}
+
+void graph_set_layer(Graph *g, u32 layer) {
+    if (g) g->cur_layer = layer;
+}
+
+#if defined(GPU_BUILD)
+/* True when `layer` is on the GPU side of the split.  A negative
+ * n_gpu_layers is treated as "all" here; session_create() resolves it
+ * to a concrete count before the model is initialised. */
+static bool layer_on_gpu(const Session *s, u32 layer) {
+    if (!s || s->n_gpu_layers <= 0) return false;
+    return (u32)s->n_gpu_layers >= s->cfg.n_layer
+           || layer < (u32)s->n_gpu_layers;
+}
+#endif
+
+BackendType graph_layer_backend(const Session *s, u32 layer) {
+#if defined(GPU_BUILD)
+    if (layer_on_gpu(s, layer)) return BACKEND_CUDA;
+#else
+    /* CPU build, or Metal (whose op backend mirrors host state). */
+    (void)s; (void)layer;
+#endif
+    return BACKEND_CPU;
+}
+
+static GraphNode *graph_copy(Graph *g, GraphNode *src, BackendType dst) {
+    if (!g || !src) return GRAPH_NODE_NONE;
+    GraphOp op = (dst == BACKEND_CPU) ? OP_D2H : OP_H2D;
+    u32 params[] = { (u32)dst };
+    return node_add(g, op, (GraphNode *[]){ src, NULL, NULL, NULL },
+                    NULL, params, 1);
+}
+
+GraphNode *graph_layer_boundary(Graph *g, GraphNode *src, Session *s, u32 layer) {
+    if (!g || !src || !s) return src;
+    /* Only a split plan needs a boundary copy. */
+    if (s->n_gpu_layers <= 0 || (u32)s->n_gpu_layers >= s->cfg.n_layer)
+        return src;
+    if (layer + 1 != (u32)s->n_gpu_layers) return src;
+    return graph_copy(g, src, BACKEND_CPU);
+}
+
+void *graph_state_alloc(size_t bytes, BackendType backend) {
+    if (bytes == 0) bytes = 1;
+#if defined(GPU_BUILD)
+    if (backend == BACKEND_CUDA) {
+        void *d = NULL;
+        if (cudaMalloc(&d, bytes) != cudaSuccess) {
+            (void)cudaGetLastError();
+            return NULL;
+        }
+        cudaMemset(d, 0, bytes);
+        return d;
+    }
+#else
+    (void)backend;
+#endif
+    return scalloc(bytes, 1);
+}
+
+void graph_state_free(void *ptr, BackendType backend) {
+    if (!ptr) return;
+#if defined(GPU_BUILD)
+    if (backend == BACKEND_CUDA) { cudaFree(ptr); return; }
+#else
+    (void)backend;
+#endif
+    sfree(ptr);
+}
+
+void graph_state_zero(void *ptr, size_t bytes, BackendType backend) {
+    if (!ptr || bytes == 0) return;
+#if defined(GPU_BUILD)
+    if (backend == BACKEND_CUDA) { cudaMemset(ptr, 0, bytes); return; }
+#else
+    (void)backend;
+#endif
+    memset(ptr, 0, bytes);
 }
 
 /* Leaf input: carries a run of token ids.  Shape (ne[0] = capacity,
@@ -268,6 +350,8 @@ GraphNode *graph_embed(Graph *g, GraphNode *src, TensorInfo *weight, u32 n_token
 static void *arena_alloc(BackendType backend, size_t bytes);
 static void arena_free(BackendType backend, void *arena);
 static void cache_destroy(GraphPlan *p);
+static void plan_reset(Graph *g);
+static const char *backend_name(BackendType backend);
 
 Graph *graph_new(void) {
     return scalloc(1, sizeof(Graph));
@@ -301,17 +385,20 @@ void graph_free(Graph *g) {
         }
         fprintf(stderr, "  +-----------+----------+-------+-------------------------------+\n");
     }
-    if (g->plan)
-        fprintf(stderr, "graph arena: %.1f MB\n",
-                (double)g->plan->arena_size / 1048576.0);
+    if (g->plan) {
+        for (u32 b = 0; b < BACKEND_COUNT; b++)
+            if (g->plan->arena_size[b])
+                fprintf(stderr, "graph arena[%s]: %.1f MB\n",
+                        backend_name((BackendType)b),
+                        (double)g->plan->arena_size[b] / 1048576.0);
+    }
     memset(op_stat_secs, 0, sizeof(op_stat_secs));
     memset(op_stat_calls, 0, sizeof(op_stat_calls));
 
-    /* Every node->data aliases a slot inside the plan's arena; its
-     * placement (host vs VRAM) follows the plan's backend. */
+    /* Every node->data aliases a slot inside the plan's per-backend
+     * arena; release all of them plus the KV caches. */
     if (g->plan) {
-        cache_destroy(g->plan);
-        arena_free(g->plan->backend, g->plan->arena);
+        plan_reset(g);
         sfree(g->plan);
         g->plan = NULL;
     }
@@ -404,7 +491,10 @@ static void *arena_alloc(BackendType backend, size_t bytes) {
 #ifdef GPU_BUILD
         case BACKEND_CUDA: {
             void *d = NULL;
-            if (cudaMalloc(&d, bytes) != cudaSuccess) return NULL;
+            if (cudaMalloc(&d, bytes) != cudaSuccess) {
+                (void)cudaGetLastError();
+                return NULL;
+            }
             return d;
         }
 #endif
@@ -478,48 +568,53 @@ static bool arena_plan(Graph *g, Session *s) {
             }
 
     /* Sweep: reclaim slots whose last consumer already ran, then give
-     * the next node the smallest free chunk that fits (else extend). */
+     * the next node the smallest free chunk that fits (else extend).
+     * Each backend has its own free list and bump pointer, because a
+     * split plan keeps GPU and host activations in separate arenas.
+     * Slot lifetimes are still computed globally: only the explicit
+     * H2D/D2H copy nodes straddle the split. */
     u64  node_off[n_node];
-    u64  foff[n_node];
-    u64  fsz[n_node];
-    u32  fcnt = 0;
-    u64  bump = 0;
+    u64  foff[BACKEND_COUNT][n_node];
+    u64  fsz[BACKEND_COUNT][n_node];
+    u32  fcnt[BACKEND_COUNT] = {0};
+    u64  bump[BACKEND_COUNT] = {0};
 
     for (u32 i = 0; i < n_node; i++) {
         /* Node j's slot becomes free exactly at step release[j] + 1. */
         if (i > 0) {
             for (u32 j = 0; j < i; j++) {
                 if (release[j] + 1 != i) continue;
-                foff[fcnt] = node_off[j];
-                fsz[fcnt]  = (u64)need[j];
-                fcnt++;
+                u32 b = (u32)nodes[j]->backend;
+                foff[b][fcnt[b]] = node_off[j];
+                fsz[b][fcnt[b]]  = (u64)need[j];
+                fcnt[b]++;
             }
         }
 
+        u32 b = (u32)nodes[i]->backend;
         u64 off;
-        u32 best = fcnt;                 /* smallest chunk that fits */
+        u32 best = fcnt[b];              /* smallest chunk that fits */
         u64 best_sz = UINT64_MAX;
-        for (u32 f = 0; f < fcnt; f++) {
-            if (fsz[f] >= (u64)need[i] && fsz[f] < best_sz) {
+        for (u32 f = 0; f < fcnt[b]; f++) {
+            if (fsz[b][f] >= (u64)need[i] && fsz[b][f] < best_sz) {
                 best    = f;
-                best_sz = fsz[f];
+                best_sz = fsz[b][f];
             }
         }
-        if (best < fcnt) {
-            off = foff[best];
-            fsz[best]  = fsz[fcnt - 1];   /* swap-remove */
-            foff[best] = foff[fcnt - 1];
-            fcnt--;
+        if (best < fcnt[b]) {
+            off = foff[b][best];
+            fsz[b][best]  = fsz[b][fcnt[b] - 1];   /* swap-remove */
+            foff[b][best] = foff[b][fcnt[b] - 1];
+            fcnt[b]--;
         } else {
-            off = bump;
-            bump += need[i];
+            off = bump[b];
+            bump[b] += need[i];
         }
         node_off[i] = off;
     }
 
-    if (bump == 0) return true;
-    /* Reuse the plan shell created by backend_plan (backend already
-     * pinned); create one only when the caller skipped that step. */
+    /* Reuse the plan shell created by backend_plan; create one only
+     * when the caller skipped that step. */
     GraphPlan *p = g->plan;
     bool fresh = false;
     if (!p) {
@@ -528,39 +623,26 @@ static bool arena_plan(Graph *g, Session *s) {
         p->backend = BACKEND_CPU;
         fresh = true;
     }
-    p->arena      = arena_alloc(p->backend, (size_t)bump);
-    if (!p->arena) { if (fresh) sfree(p); return false; }
-    p->arena_size = (size_t)bump;
     g->plan = p;
+
+    for (u32 b = 0; b < BACKEND_COUNT; b++) {
+        if (bump[b] == 0) continue;
+        p->arena[b] = arena_alloc((BackendType)b, (size_t)bump[b]);
+        if (!p->arena[b]) {
+            plan_reset(g);
+            if (fresh) { sfree(p); g->plan = NULL; }
+            return false;
+        }
+        p->arena_size[b] = (size_t)bump[b];
+    }
 
     for (u32 i = 0; i < n_node; i++) {
         GraphNode *node = nodes[i];
-        node->data      = (u8 *)p->arena + node_off[i];
+        u32 b = (u32)node->backend;
+        node->data      = (u8 *)p->arena[b] + node_off[i];
         node->data_cap  = need[i];
     }
     return true;
-}
-
-/* Total bytes of every distinct weight tensor the graph references.
- * Weights are mmap-backed model tensors shared across nodes, so a
- * pointer first seen at a lower build index is counted only once. */
-static size_t graph_weights_bytes(const Graph *g) {
-    size_t total = 0;
-    for (GraphNode *n = g->head; n; n = n->next) {
-        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
-            TensorInfo *w = n->weights[k];
-            if (!w) continue;
-            bool seen = false;
-            for (GraphNode *m = g->head; m && !seen; m = m->next) {
-                if (m->idx > n->idx) break;
-                int lim = (m == n) ? k : GRAPH_NODE_MAX_SRC;
-                for (int t = 0; t < lim; t++)
-                    if (m->weights[t] == w) { seen = true; break; }
-            }
-            if (!seen) total += (size_t)w->bytes;
-        }
-    }
-    return total;
 }
 
 /* Build the KV cache inside the plan.  All float storage is carved from
@@ -583,21 +665,20 @@ static bool cache_build(Graph *g, Session *s) {
     bool mla = s->en && s->en->model && s->en->model->arch == ARCH_DEEPSEEK;
     kc->is_mla = mla;
 
-    size_t total;
     if (mla) {
         kc->head_dim = c->head_dim;
         u64 rank        = c->kv_lora_rank ? c->kv_lora_rank : 1;
         u64 raw_bytes   = (u64)s->ctx_size * c->head_dim * sizeof(float);
         u64 comp_bytes  = (u64)s->ctx_size * rank * sizeof(float);
         u64 score_bytes = (u64)s->ctx_size * sizeof(float);
-        total = (size_t)(raw_bytes + comp_bytes * 4 + score_bytes * 2) * c->n_layer;
+        size_t total = (size_t)(raw_bytes + comp_bytes * 4 + score_bytes * 2) * c->n_layer;
 
         kc->mla = scalloc((u64)c->n_layer, sizeof(MLAKvCache));
         if (!kc->mla) return false;
-        p->cache_arena = arena_alloc(p->backend, total);
-        if (!p->cache_arena) return false;
+        p->cache_arena[p->backend] = arena_alloc(p->backend, total);
+        if (!p->cache_arena[p->backend]) return false;
 
-        u8 *base = p->cache_arena;
+        u8 *base = p->cache_arena[p->backend];
         for (u32 i = 0; i < c->n_layer; i++) {
             MLAKvCache *mc = &kc->mla[i];
             mc->cap_raw        = s->ctx_size;
@@ -611,93 +692,173 @@ static bool cache_build(Graph *g, Session *s) {
             mc->index_state_kv    = (float *)base; base += comp_bytes;
             mc->index_state_score = (float *)base; base += score_bytes;
         }
-    } else {
-        kc->head_dim   = c->kv_head_dim;
-        size_t bytes   = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim
-                         * sizeof(float);
-        total = bytes * 2 * c->n_layer;
-
-        kc->std = scalloc((u64)c->n_layer, sizeof(AttnKvCache));
-        if (!kc->std) return false;
-        p->cache_arena = arena_alloc(p->backend, total);
-        if (!p->cache_arena) return false;
-
-        u8 *base = p->cache_arena;
-        for (u32 i = 0; i < c->n_layer; i++) {
-            kc->std[i].k   = (float *)base; base += bytes;
-            kc->std[i].v   = (float *)base; base += bytes;
-            kc->std[i].cap = s->ctx_size;
-        }
+        p->kvcache_size[p->backend] = total;
+        return true;
     }
-    p->kvcache_size = total;
+
+    /* Standard attention: allocate K/V only for layers that actually
+     * carry an OP_ATTN node (Qwen3.5 is hybrid, so most layers have no
+     * KV cache at all), and place each layer's cache on the backend
+     * that executes that layer. */
+    kc->head_dim = c->kv_head_dim;
+    size_t bytes = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim
+                   * sizeof(float);
+
+    u8 used[c->n_layer];
+    BackendType lb[c->n_layer];
+    memset(used, 0, sizeof(used));
+    memset(lb, 0, sizeof(lb));
+    for (GraphNode *n = g->head; n; n = n->next) {
+        if (n->op != OP_ATTN) continue;
+        u32 l = n->params[0];
+        if (l >= c->n_layer) continue;
+        used[l] = 1;
+        lb[l]   = n->backend;
+    }
+
+    kc->std = scalloc((u64)c->n_layer, sizeof(AttnKvCache));
+    if (!kc->std) return false;
+
+    /* Per-backend cache arena sizes. */
+    for (u32 l = 0; l < c->n_layer; l++)
+        if (used[l]) p->kvcache_size[lb[l]] += bytes * 2;
+
+    u8 *base[BACKEND_COUNT] = {0};
+    for (u32 b = 0; b < BACKEND_COUNT; b++) {
+        if (p->kvcache_size[b] == 0) continue;
+        p->cache_arena[b] = arena_alloc((BackendType)b, p->kvcache_size[b]);
+        if (!p->cache_arena[b]) return false;
+        base[b] = p->cache_arena[b];
+    }
+
+    for (u32 l = 0; l < c->n_layer; l++) {
+        if (!used[l]) continue;
+        u32 b = (u32)lb[l];
+        kc->std[l].k   = (float *)base[b]; base[b] += bytes;
+        kc->std[l].v   = (float *)base[b]; base[b] += bytes;
+        kc->std[l].cap = s->ctx_size;
+    }
     return true;
 }
 
-/* Release the plan's KV cache storage on the plan's backend. */
+/* Release the plan's KV cache storage on every backend it used. */
 static void cache_destroy(GraphPlan *p) {
     KvCache *kc = p->cache;
     if (!kc) return;
     if (kc->is_mla) sfree(kc->mla);
     else            sfree(kc->std);
     sfree(kc);
-    arena_free(p->backend, p->cache_arena);
-    p->cache_arena = NULL;
-    p->cache       = NULL;
+    for (u32 b = 0; b < BACKEND_COUNT; b++) {
+        arena_free((BackendType)b, p->cache_arena[b]);
+        p->cache_arena[b] = NULL;
+        p->kvcache_size[b] = 0;
+    }
+    p->cache = NULL;
 }
 
-/* Warmup: preload every weight tensor the graph references onto the
- * plan's device backend so the first forward pass never pays an H2D
- * cost mid-compute.  The device backend caches each upload for the
- * process lifetime, so this is a one-time cost.  CPU weights are the
- * mmap itself and host-resident already, so the CPU plan is a no-op. */
-static void graph_warmup(Graph *g) {
+/* Free every allocation held by the plan but keep the shell so the
+ * planner can report a clean failure and graph_free() can reuse it. */
+static void plan_reset(Graph *g) {
     GraphPlan *p = g ? g->plan : NULL;
     if (!p) return;
+    cache_destroy(p);
+    for (u32 b = 0; b < BACKEND_COUNT; b++) {
+        arena_free((BackendType)b, p->arena[b]);
+        p->arena[b] = NULL;
+        p->arena_size[b] = 0;
+        p->weights_size[b] = 0;
+    }
+    p->ready = false;
+}
+
+/* Warmup: preload the weights referenced by GPU-resident nodes so the
+ * first forward pass never pays an H2D cost mid-compute.  CPU weights
+ * are the mmap itself and host-resident already, so they are skipped.
+ * Returns false if a device upload fails (CUDA OOM). */
+static bool graph_warmup(Graph *g) {
+    GraphPlan *p = g ? g->plan : NULL;
+    if (!p) return false;
 
     for (GraphNode *n = g->head; n; n = n->next) {
         for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
             TensorInfo *w = n->weights[k];
             if (!w) continue;
 #if defined(GPU_BUILD)
-            if (p->backend == BACKEND_CUDA) { (void)gpu_weight_dev(w); continue; }
+            if (n->backend == BACKEND_CUDA && !gpu_weight_dev(w)) {
+                slog(WARN, "graph_warmup: CUDA upload failed for %.*s",
+                     (int)w->key.len, w->key.content ? w->key.content : "?");
+                return false;
+            }
 #endif
 #if defined(METAL_BUILD)
-            if (p->backend == BACKEND_METAL) { metal_weight_preload(w); continue; }
+            if (n->backend == BACKEND_METAL) metal_weight_preload(w);
 #endif
-            (void)w;
         }
     }
+    return true;
 }
 
-/* Auto-select the compute backend targeted by the graph's execution
- * plan; the selection must run BEFORE the arena sweep, because the
- * backend decides where the plan's arena is allocated (VRAM vs host).
- * A caller may pin the backend explicitly by pre-seeding the plan.
- * The weights size is tallied here and the KV cache is built on the
- * chosen backend; the activation arena size is filled in by
- * arena_plan(). */
-static bool backend_plan(Graph *g, Session *s) {
-    if (!g) return false;
+/* Assign a compute backend to every node from the session's -ngl
+ * setting.  Prefix layers go to the device, the rest to the host; the
+ * final norm / LM head use layer == n_layer and therefore stay on the
+ * host unless the whole model is offloaded. */
+static bool assign_backends(Graph *g, Session *s) {
+    if (!g || !s) return false;
+    int ngl = s->n_gpu_layers;
+    u32 L = s->cfg.n_layer;
+    if (ngl < 0) ngl = 0;
+    if ((u32)ngl > L) ngl = (int)L;
+    s->n_gpu_layers = ngl;
+
+    for (GraphNode *n = g->head; n; n = n->next) {
+        n->backend = BACKEND_CPU;
+#if defined(GPU_BUILD)
+        if (ngl > 0 && ((u32)ngl >= L || n->layer < (u32)ngl))
+            n->backend = BACKEND_CUDA;
+#elif defined(METAL_BUILD)
+        /* Metal keeps the historical all-or-nothing behaviour. */
+        if (ngl > 0) n->backend = BACKEND_METAL;
+#else
+        (void)L;
+#endif
+        if (n->op == OP_H2D || n->op == OP_D2H)
+            n->backend = (BackendType)n->params[0];
+    }
+
+    /* Primary backend, used by the MLA cache path and reporting. */
+    BackendType primary = BACKEND_CPU;
+#if defined(GPU_BUILD)
+    if (ngl > 0) primary = BACKEND_CUDA;
+#elif defined(METAL_BUILD)
+    if (ngl > 0) primary = BACKEND_METAL;
+#endif
     if (!g->plan) {
         g->plan = scalloc(1, sizeof(GraphPlan));
         if (!g->plan) return false;
-        g->plan->backend = BACKEND_CPU;
     }
-    /* Long-lived graphs keep their pinned backend; fresh plans take
-     * the detected one. */
-    if (!g->plan->arena) {
-        BackendType backend = g->plan->backend;
-#ifdef METAL_BUILD
-        if (metal_available() && backend == BACKEND_CPU) backend = BACKEND_METAL;
-#endif
-#ifdef GPU_BUILD
-        if (gpu_available() && backend == BACKEND_CPU) backend = BACKEND_CUDA;
-#endif
-        g->plan->backend = backend;
-    }
-    g->plan->weights_size = graph_weights_bytes(g);
-    if (s && !cache_build(g, s)) return false;   /* KV cache on the plan's backend */
+    g->plan->backend = primary;
     return true;
+}
+
+/* Tally each distinct weight tensor once per backend that uses it. */
+static void account_weights(Graph *g) {
+    GraphPlan *p = g->plan;
+    for (u32 b = 0; b < BACKEND_COUNT; b++) p->weights_size[b] = 0;
+    for (GraphNode *n = g->head; n; n = n->next) {
+        for (int k = 0; k < GRAPH_NODE_MAX_SRC; k++) {
+            TensorInfo *w = n->weights[k];
+            if (!w) continue;
+            bool seen = false;
+            for (GraphNode *m = g->head; m && !seen; m = m->next) {
+                if (m->idx > n->idx) break;
+                if (m->backend != n->backend) continue;
+                int lim = (m == n) ? k : GRAPH_NODE_MAX_SRC;
+                for (int t = 0; t < lim; t++)
+                    if (m->weights[t] == w) { seen = true; break; }
+            }
+            if (!seen) p->weights_size[n->backend] += (size_t)w->bytes;
+        }
+    }
 }
 
 static const char *backend_name(BackendType backend) {
@@ -709,48 +870,77 @@ static const char *backend_name(BackendType backend) {
     }
 }
 
-/* Dump the static execution plan: backend, node count, and the sizes of
- * the three big allocations (weights, activation arena, KV cache). */
+/* Dump the static execution plan: node count and the sizes of the three
+ * big allocations (weights, activation arena, KV cache) per backend. */
 static void graph_plan_print(const Graph *g, const Session *s) {
     if (!g || !g->plan) return;
     const GraphPlan *p = g->plan;
-    slog(INFO, "GraphPlan: backend=%s nodes=%u state=%u ctx_size=%u",
-         backend_name(p->backend), g->n_node, g->n_state,
-         s ? s->ctx_size : 0);
-    slog(INFO, "GraphPlan: weights=%.1f MB arena=%.1f MB kvcache=%.1f MB total=%.1f MB",
-         (double)p->weights_size / 1048576.0,
-         (double)p->arena_size / 1048576.0,
-         (double)p->kvcache_size / 1048576.0,
-         (double)(p->weights_size + p->arena_size + p->kvcache_size) / 1048576.0);
+    slog(INFO, "GraphPlan: backend=%s n_gpu_layers=%d nodes=%u state=%u ctx_size=%u",
+         backend_name(p->backend), s ? s->n_gpu_layers : 0,
+         g->n_node, g->n_state, s ? s->ctx_size : 0);
+    for (u32 b = 0; b < BACKEND_COUNT; b++) {
+        if (p->weights_size[b] == 0 && p->arena_size[b] == 0 &&
+            p->kvcache_size[b] == 0) continue;
+        slog(INFO, "GraphPlan[%s]: weights=%.1f MB arena=%.1f MB kvcache=%.1f MB total=%.1f MB",
+             backend_name((BackendType)b),
+             (double)p->weights_size[b] / 1048576.0,
+             (double)p->arena_size[b] / 1048576.0,
+             (double)p->kvcache_size[b] / 1048576.0,
+             (double)(p->weights_size[b] + p->arena_size[b] + p->kvcache_size[b]) / 1048576.0);
+    }
 }
 
 static bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
-    if (g->plan) return true;                  /* already planned */
-    if (!backend_plan(g, s)) return false;     /* backend first: arena placement */
-    if (!arena_plan(g, s)) return false;
-    graph_warmup(g);                           /* upload weights to the device */
+    if (g->plan && g->plan->ready) return true;
+
+    /* The offload split (and the recurrent-state placement it implies)
+     * is fixed when the graph is built, so planning is a single
+     * attempt: session_resolve_gpu_layers() has already clamped the
+     * requested layer count to what the device can hold. */
+    if (s->n_gpu_layers < 0) s->n_gpu_layers = 0;
+    if (!assign_backends(g, s)) return false;
+    account_weights(g);
+    if (!arena_plan(g, s) || !cache_build(g, s) || !graph_warmup(g)) {
+        plan_reset(g);
+        slog(WARN, "GraphPlan: allocation failed (try fewer -ngl layers or a smaller -c)");
+        return false;
+    }
+    g->plan->ready = true;
     graph_plan_print(g, s);
     return true;
 }
 
 static bool graph_op_compute(OpCtx ctx) {
-    /* Device backends own data in VRAM: the CUDA plan fully
-     * replaces the CPU op path, while the CPU path runs the
-     * operators in backend/cpu/cpu_op.c via cpu_graph_op(). */
+    /* Dispatch per node, so a split plan can run some layers on the
+     * device and the rest on the host. */
     bool ok;
 #ifdef METAL_BUILD
-    if (ctx.g->plan->backend == BACKEND_METAL)
+    if (ctx.node->backend == BACKEND_METAL)
         ok = metal_graph_op(&ctx);
     else
 #endif
 #ifdef GPU_BUILD
-    if (ctx.g->plan->backend == BACKEND_CUDA)
+    if (ctx.node->backend == BACKEND_CUDA)
         ok = gpu_graph_op(&ctx);
     else
 #endif
         ok = cpu_graph_op(&ctx);
     return ok;
+}
+
+/* Execute an explicit backend-boundary copy (OP_H2D / OP_D2H). */
+static bool graph_copy_op(const GraphNode *node, float *dst, u64 bytes) {
+    const float *src = (const float *)node->src[0]->data;
+    if (!src || !dst) return false;
+#if defined(GPU_BUILD)
+    if (node->op == OP_D2H)
+        return cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    if (node->op == OP_H2D)
+        return cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+#endif
+    memcpy(dst, src, bytes);
+    return true;
 }
 
 static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
@@ -769,7 +959,7 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
     }
 
     /* One-time static slot plan (generated by graph_plan()). */
-    if (!g->plan && !graph_plan(g, s)) {
+    if ((!g->plan || !g->plan->ready) && !graph_plan(g, s)) {
         slog(WARN, "graph_compute: arena plan failed");
         return false;
     }
@@ -783,9 +973,8 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         }
         if (b->tokens) {
 #ifdef GPU_BUILD
-            if (g->plan->backend == BACKEND_CUDA) {
-                /* The only H2D of a GPU-path batch: token ids into the
-                 * VRAM arena; every op reads them on-device. */
+            if (node->backend == BACKEND_CUDA) {
+                /* Token ids live in the same arena as the embedding op. */
                 CHECK(cudaMemcpy(node->data, b->tokens, (size_t)n * sizeof(u32),
                                  cudaMemcpyHostToDevice));
             } else
@@ -834,6 +1023,12 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         if ((size_t)r * od * sizeof(float) > node->data_cap) goto fail;
         float *dst = (float *)node->data;
 
+        /* Explicit backend boundary (split plan). */
+        if (node->op == OP_H2D || node->op == OP_D2H) {
+            if (!graph_copy_op(node, dst, (u64)r * od * sizeof(float))) goto fail;
+            continue;
+        }
+
         int    st_cls = op_stat_class(node->op);
         double st_t0  = graph_now();
         OpCtx ctx = {
@@ -862,7 +1057,7 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         if (!sink[i] || nodes[i]->op == OP_INPUT) continue;
         u32 n = dims[i] < c->n_vocab ? dims[i] : c->n_vocab;
 #ifdef GPU_BUILD
-        if (g->plan->backend == BACKEND_CUDA) {
+        if (nodes[i]->backend == BACKEND_CUDA) {
             CHECK(cudaMemcpy(s->logits, nodes[i]->data, (size_t)n * sizeof(float),
                              cudaMemcpyDeviceToHost));
         } else

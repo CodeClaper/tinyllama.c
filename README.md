@@ -91,6 +91,7 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
              -n 393216                        # Max tokens (default: 393216)
              -t 1.0                           # Temperature (default: 1.0)
              -T 1                             # Thread count (default: 1)
+             -ngl -1                          # GPU layers (-1=auto, 0=CPU, default: -1)
              --topp 0.9                       # Top-p sampling (default: 0.9)
              -i                               # Inspect model metadata only
 
@@ -123,6 +124,7 @@ curl http://localhost:8080/v1/chat/completions \
            -c 4096                            # Context size (default: 4096)
            -n 128                             # Max tokens per response (default: 128)
            -T 1                               # Thread count (default: 1)
+           -ngl -1                            # GPU layers (-1=auto, 0=CPU)
            -t 0.8                             # Temperature (default: 0.8)
            -tp 0.9                            # Top-p sampling (default: 0.9)
            -tk 40                             # Top-k sampling (default: 40)
@@ -146,6 +148,7 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
             -c 4096                           # Context size (default: 4096)
             -n 128                            # Tokens to generate per iteration (default: 128)
             -T 1                              # Thread count (default: 1)
+            -ngl -1                           # GPU layers (-1=auto, 0=CPU)
             -t 0.8                            # Temperature (default: 0.8)
             -tp 0.9                           # Top-p sampling (default: 0.9)
             -tk 40                            # Top-k sampling (default: 40)
@@ -159,6 +162,10 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 ```
 
 The benchmark runs the prompt through prefill and generation phases, repeating `-r` times, then prints timing statistics including average tokens/second for both phases and peak memory usage. A GPU build prints the active device (`CUDA`, `Metal`, or `CPU`).
+
+### Partial GPU offload (`-ngl`)
+
+`-ngl N` places the first `N` transformer layers on the GPU and runs the rest on the CPU, so a model whose weights exceed VRAM can still use the card. The default `-ngl -1` auto-fits `N` from the free device memory; `-ngl 0` forces CPU-only. Weights of CPU layers stay in the mmap'd file, and only the hidden state at the split layer crosses the bus once per forward pass. For example, a 27B Q4 model on an 8 GB card keeps roughly 25 of 65 layers on the GPU.
 
 ## Benchmark
 

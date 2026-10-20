@@ -203,6 +203,7 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
     if (cur == GRAPH_NODE_NONE) goto fail;
 
     for (u32 l = 0; l < c->n_layer; l++) {
+        graph_set_layer(g, l);
         LayerWeights *lw = &w->layers[l];
 
         /* Sliding-window pattern:
@@ -277,9 +278,13 @@ static Graph *gemma3_graph_build(Session *s, u32 n_tokens) {
 
         cur = graph_binary(g, OP_ADD, h, down);
         if (cur == GRAPH_NODE_NONE) goto fail;
+
+        cur = graph_layer_boundary(g, cur, s, l);
+        if (cur == GRAPH_NODE_NONE) goto fail;
     }
 
     /* ---- Final norm ---- */
+    graph_set_layer(g, c->n_layer);
     GraphNode *fn = graph_rms_norm(g, cur, w->tensors[TENSOR_OUTPUT_NORM]);
     if (fn == GRAPH_NODE_NONE) goto fail;
 
