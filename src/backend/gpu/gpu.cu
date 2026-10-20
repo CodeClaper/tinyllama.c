@@ -800,61 +800,6 @@ __global__ void matmul_kernel_trans(const u8 * __restrict__ w,
     y[(u64)blockIdx.y * rows + idx] = sum;
 }
 
-/* ---- Shared-memory variants -----------------------------------
- * Same arithmetic and index mapping as the two fallback kernels above,
- * but the input activation row x[b*cols .. b*cols+cols) is staged once
- * per block into dynamic shared memory.  All warps/threads in the block
- * then read it from SMEM instead of re-issuing the same global loads.
- *
- * The weight stream is deliberately unchanged: every weight element is
- * still consumed exactly once, so there is no tile reuse to exploit.
- * The host selects these kernels whenever cols*sizeof(float) fits the
- * static shared-memory budget; a larger activation row cannot be staged
- * and falls back to the fast-path (or global-memory) kernels.
- */
-#define GPU_SMEM_MAX_BYTES (48u * 1024u)
-
-template<int TYPE>
-__global__ void matmul_kernel_nontrans_share_memory(
-        const u8 *__restrict__ w, const float *__restrict__ x,
-        float *__restrict__ y, u64 rows, u64 cols, u64 batch) {
-    extern __shared__ float sx[];
-    const float *xr = x + (u64)blockIdx.y * cols;
-    for (u64 c = threadIdx.x; c < cols; c += blockDim.x)
-        sx[c] = xr[c];
-    __syncthreads();
-
-    u64 r = (u64)blockIdx.x * 8 + (threadIdx.x >> 5);
-    if (r >= rows) return;
-    float sum = 0.0f;
-    for (u64 c = threadIdx.x & 31; c < cols; c += 32)
-        sum += dequant_one_t<TYPE>(w, r * cols + c) * sx[c];
-    #pragma unroll
-    for (int o = 16; o > 0; o >>= 1)
-        sum += __shfl_down_sync(0xffffffffu, sum, o);
-    if ((threadIdx.x & 31) == 0) y[(u64)blockIdx.y * rows + r] = sum;
-    (void)batch;
-}
-
-template<int TYPE>
-__global__ void matmul_kernel_trans_share_memory(
-        const u8 *__restrict__ w, const float *__restrict__ x,
-        float *__restrict__ y, u64 rows, u64 cols, u64 batch) {
-    extern __shared__ float sx[];
-    const float *xr = x + (u64)blockIdx.y * cols;
-    for (u64 c = threadIdx.x; c < cols; c += blockDim.x)
-        sx[c] = xr[c];
-    __syncthreads();
-
-    u64 idx = (u64)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= rows) return;
-    float sum = 0.0f;
-    for (u64 c = 0; c < cols; c++)
-        sum += dequant_one_t<TYPE>(w, c * rows + idx) * sx[c];
-    y[(u64)blockIdx.y * rows + idx] = sum;
-    (void)batch;
-}
-
 /* ================================================================
  * Host-side plumbing
  * ================================================================ */
