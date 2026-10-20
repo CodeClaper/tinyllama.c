@@ -700,12 +700,37 @@ static bool backend_plan(Graph *g, Session *s) {
     return true;
 }
 
+static const char *backend_name(BackendType backend) {
+    switch (backend) {
+        case BACKEND_CPU:   return "cpu";
+        case BACKEND_CUDA:  return "cuda";
+        case BACKEND_METAL: return "metal";
+        default:            return "unknown";
+    }
+}
+
+/* Dump the static execution plan: backend, node count, and the sizes of
+ * the three big allocations (weights, activation arena, KV cache). */
+static void graph_plan_print(const Graph *g, const Session *s) {
+    if (!g || !g->plan) return;
+    const GraphPlan *p = g->plan;
+    slog(INFO, "GraphPlan: backend=%s nodes=%u state=%u ctx_size=%u",
+         backend_name(p->backend), g->n_node, g->n_state,
+         s ? s->ctx_size : 0);
+    slog(INFO, "GraphPlan: weights=%.1f MB arena=%.1f MB kvcache=%.1f MB total=%.1f MB",
+         (double)p->weights_size / 1048576.0,
+         (double)p->arena_size / 1048576.0,
+         (double)p->kvcache_size / 1048576.0,
+         (double)(p->weights_size + p->arena_size + p->kvcache_size) / 1048576.0);
+}
+
 static bool graph_plan(Graph *g, Session *s) {
     if (!g || !s) return false;
     if (g->plan) return true;                  /* already planned */
     if (!backend_plan(g, s)) return false;     /* backend first: arena placement */
     if (!arena_plan(g, s)) return false;
     graph_warmup(g);                           /* upload weights to the device */
+    graph_plan_print(g, s);
     return true;
 }
 

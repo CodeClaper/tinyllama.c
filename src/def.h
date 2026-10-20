@@ -312,20 +312,18 @@ typedef struct Graph Graph;
 typedef struct GraphNode GraphNode;
 
 typedef struct {
-    bool  (*init)          (Session *s);
-    void  (*free)          (Session *s);
-    void  (*reset)         (Session *s);
-    int   (*decode)        (const u8 *raw, int raw_len, char *out, int max_len);
+    bool   (*init)              (Session *s);
+    void   (*free)              (Session *s);
+    void   (*reset)             (Session *s);
+    int    (*decode)            (const u8 *raw, int raw_len, char *out, int max_len);
     /* Builds the static graph at ctx_size capacity (see graph_build). */
-    Graph* (*graph_build)  (Session *s, u32 n_tokens);
+    Graph* (*graph_build)       (Session *s, u32 n_tokens);
     /* Chat prompt formatting.  chat_prompt lays out the first turn
      * (system + user + assistant header); chat_continuation appends a
      * user→assistant round after a previous reply.  Either may be NULL,
      * in which case callers fall back to tokenizing the raw input. */
-    int   (*chat_prompt)      (Session *s, const char *user, const char *sys,
-                               u32 *out, int max);
-    int   (*chat_continuation)(Session *s, const char *user,
-                               u32 *out, int max);
+    int    (*chat_prompt)       (Session *s, const char *user, const char *sys, u32 *out, int max);
+    int    (*chat_continuation) (Session *s, const char *user, u32 *out, int max);
 } ArchOps;
 
 struct Session {
