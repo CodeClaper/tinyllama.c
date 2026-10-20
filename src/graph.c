@@ -911,7 +911,26 @@ static bool graph_plan(Graph *g, Session *s) {
     return true;
 }
 
+/* Execute an explicit backend-boundary copy (OP_H2D / OP_D2H). */
+static bool graph_copy_op(const GraphNode *node, float *dst, u64 bytes) {
+    const float *src = (const float *)node->src[0]->data;
+    if (!src || !dst) return false;
+#if defined(GPU_BUILD)
+    if (node->op == OP_D2H)
+        return cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    if (node->op == OP_H2D)
+        return cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+#endif
+    memcpy(dst, src, bytes);
+    return true;
+}
+
 static bool graph_op_compute(OpCtx ctx) {
+    /* Explicit backend boundary (split plan). */
+    if (ctx.node->op == OP_H2D || ctx.node->op == OP_D2H)
+        return graph_copy_op(ctx.node, ctx.dst,
+                             (u64)ctx.r * ctx.od * sizeof(float));
+
     /* Dispatch per node, so a split plan can run some layers on the
      * device and the rest on the host. */
     bool ok;
@@ -927,20 +946,6 @@ static bool graph_op_compute(OpCtx ctx) {
 #endif
         ok = cpu_graph_op(&ctx);
     return ok;
-}
-
-/* Execute an explicit backend-boundary copy (OP_H2D / OP_D2H). */
-static bool graph_copy_op(const GraphNode *node, float *dst, u64 bytes) {
-    const float *src = (const float *)node->src[0]->data;
-    if (!src || !dst) return false;
-#if defined(GPU_BUILD)
-    if (node->op == OP_D2H)
-        return cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
-    if (node->op == OP_H2D)
-        return cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
-#endif
-    memcpy(dst, src, bytes);
-    return true;
 }
 
 static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
@@ -1022,12 +1027,6 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
         if (od == 0 || r == 0) goto fail;
         if ((size_t)r * od * sizeof(float) > node->data_cap) goto fail;
         float *dst = (float *)node->data;
-
-        /* Explicit backend boundary (split plan). */
-        if (node->op == OP_H2D || node->op == OP_D2H) {
-            if (!graph_copy_op(node, dst, (u64)r * od * sizeof(float))) goto fail;
-            continue;
-        }
 
         int    st_cls = op_stat_class(node->op);
         double st_t0  = graph_now();
