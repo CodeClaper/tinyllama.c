@@ -1261,7 +1261,7 @@ bool graph_prepare(Session *s) {
     if (!s) return false;
     if (!s->graph) {
         if (!s->ops.graph_build) {
-            slog(WARN, "graph_prepare: no graph builder for this architecture");
+            slog(ERROR, "graph_prepare: no graph builder for this architecture");
             return false;
         }
         s->graph = s->ops.graph_build(s, s->n_ubatch);
