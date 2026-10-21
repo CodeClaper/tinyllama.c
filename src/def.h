@@ -168,6 +168,7 @@ typedef enum {
     ARCH_QWEN3,
     ARCH_DEEPSEEK,
     ARCH_FALCON,
+    ARCH_FALCON_H1,
     ARCH_GEMMA3,
 } ModelArch;
 
@@ -199,6 +200,8 @@ typedef enum {
     TENSOR_SSM_DT_BIAS,
     TENSOR_SSM_OUT,
     TENSOR_SSM_NORM,
+    TENSOR_SSM_D,
+    TENSOR_SSM_CONV1D_BIAS,
     TENSOR_ATTN_Q_NORM,
     TENSOR_ATTN_K_NORM,
     TENSOR_OUTPUT_HC_BASE,
@@ -403,6 +406,8 @@ typedef enum {
     OP_ATTN,            /* out = attn(q, k, v) (causal multi-head, GQA)   */
     OP_SSM_CONV,        /* depthwise causal conv1d (Gated DeltaNet)       */
     OP_SSM_DELTA,       /* gated delta recurrence (Gated DeltaNet)       */
+    OP_MAMBA2_CONV,     /* Mamba2 conv over the xBC slice of ssm_in      */
+    OP_MAMBA2_SCAN,     /* Mamba2 selective scan + D + z gate            */
     OP_SOFTCAP,         /* out = tanh(x / cap) * cap  (Gemma logit cap)   */
     OP_H2D,             /* copy a host activation slot to the device      */
     OP_D2H,             /* copy a device activation slot to the host      */

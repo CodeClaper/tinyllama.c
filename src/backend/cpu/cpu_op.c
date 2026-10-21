@@ -832,6 +832,134 @@ static bool op_ssm_delta(OpCtx *c) {
     return true;
 }
 
+static bool op_mamba2_conv(OpCtx *c) {
+    /* Mamba2 conv stage.  Convolve the xBC slice of the fused ssm_in
+     * projection with the per-channel kernel, add the bias, apply SiLU
+     * and advance the per-layer (kernel-1) ring buffer.  The input and
+     * output live in different slots, so this is an ordinary (non
+     * in-place) depthwise convolution. */
+    u32 st = op_param(c, 0), ck = op_param(c, 1);
+    u32 d_inner = op_param(c, 2), ng = op_param(c, 3);
+    u32 ds = op_param(c, 4), nh = op_param(c, 5);
+    if (st >= c->g->n_state || ck == 0 || d_inner == 0 || ng == 0 || ds == 0)
+        return false;
+
+    u32 conv_dim = d_inner + 2 * ng * ds;
+    u32 proj_w   = conv_dim + d_inner + nh;   /* z | xBC | dt */
+    if (c->od != conv_dim) return false;
+
+    float *state = (float *)c->g->state[st];
+    float *src   = op_src(c, 0);
+    float *cw    = smalloc((u64)ck * conv_dim * sizeof(float));
+    float *bias  = NULL;
+    if (!cw) return false;
+    tensor_get_f32_batch(c->node->weights[0], 0, (u64)ck * conv_dim, cw);
+    if (c->node->weights[1]) {
+        bias = smalloc((u64)conv_dim * sizeof(float));
+        if (!bias) { sfree(cw); return false; }
+        tensor_get_f32_batch(c->node->weights[1], 0, conv_dim, bias);
+    }
+
+    for (u32 p = 0; p < c->r; p++) {
+        const float *raw = src + ((u64)c->base + p) * proj_w + d_inner;
+        float *dp = c->dst + (u64)p * c->od;
+
+        for (u32 ch = 0; ch < conv_dim; ch++) {
+            float sum = 0.0f;
+            for (u32 k = 0; k < ck; k++) {
+                float x = (k == ck - 1) ? raw[ch]
+                                        : state[k * conv_dim + ch];
+                sum += x * cw[ch * ck + k];
+            }
+            if (bias) sum += bias[ch];
+            dp[ch] = sum / (1.0f + expf(-sum));
+        }
+
+        if (ck > 1) {
+            u32 shift_len = (ck - 2) * conv_dim;
+            if (shift_len > 0)
+                memmove(state, state + conv_dim, (size_t)shift_len * sizeof(float));
+            memcpy(state + shift_len, raw, (size_t)conv_dim * sizeof(float));
+        }
+    }
+    sfree(cw);
+    sfree(bias);
+    return true;
+}
+
+static bool op_mamba2_scan(OpCtx *c) {
+    /* Mamba2 selective scan.  x/B/C come from the conv output, z/dt
+     * from the fused ssm_in projection.  Each row advances the
+     * recurrent state, then the D skip and the SiLU z gate are applied
+     * (optionally followed by the grouped output RMS norm). */
+    u32 st = op_param(c, 0), nh = op_param(c, 1), hd = op_param(c, 2);
+    u32 ds = op_param(c, 3), ng = op_param(c, 4), d_inner = op_param(c, 5);
+    if (st >= c->g->n_state || nh == 0 || hd == 0 || ds == 0 || ng == 0)
+        return false;
+    if (nh % ng != 0 || nh * hd != d_inner || c->od != d_inner) return false;
+
+    u32 conv_dim = d_inner + 2 * ng * ds;
+    u32 proj_w   = conv_dim + d_inner + nh;   /* z | xBC | dt */
+    u32 gsize    = d_inner / ng;
+    u32 heads_per_group = nh / ng;
+
+    float *state = (float *)c->g->state[st];
+    float *xbc   = op_src(c, 0);
+    float *proj  = op_src(c, 1);
+
+    float *avec = smalloc((u64)nh * sizeof(float));
+    float *dvec = smalloc((u64)nh * sizeof(float));
+    float *dtb  = smalloc((u64)nh * sizeof(float));
+    float *nw   = c->node->weights[3] ? smalloc((u64)d_inner * sizeof(float)) : NULL;
+    if (!avec || !dvec || !dtb || (c->node->weights[3] && !nw)) {
+        sfree(avec); sfree(dvec); sfree(dtb); sfree(nw);
+        return false;
+    }
+    tensor_get_f32_batch(c->node->weights[0], 0, nh, avec);
+    tensor_get_f32_batch(c->node->weights[1], 0, nh, dvec);
+    tensor_get_f32_batch(c->node->weights[2], 0, nh, dtb);
+    if (nw) tensor_get_f32_batch(c->node->weights[3], 0, d_inner, nw);
+
+    for (u32 p = 0; p < c->r; p++) {
+        const float *xr = xbc  + ((u64)c->base + p) * conv_dim;
+        const float *pr = proj + ((u64)c->base + p) * proj_w;
+        const float *B  = xr + d_inner;
+        const float *C  = B + ng * ds;
+        const float *dt = pr + d_inner + conv_dim;
+        float *dp = c->dst + (u64)p * c->od;
+
+        for (u32 h = 0; h < nh; h++) {
+            float dtv = softplus(dt[h] + dtb[h]);
+            float dA  = expf(dtv * avec[h]);
+            u32 g     = h / heads_per_group;
+            const float *bg = B + (u64)g * ds;
+            const float *cg = C + (u64)g * ds;
+
+            for (u32 d = 0; d < hd; d++) {
+                u32 ii = h * hd + d;
+                float xv  = xr[ii];
+                float xdt = xv * dtv;
+                float sum = 0.0f;
+                float *sp = state + (u64)ii * ds;
+                for (u32 i = 0; i < ds; i++) {
+                    float sv = sp[i] * dA + bg[i] * xdt;
+                    sp[i] = sv;
+                    sum += sv * cg[i];
+                }
+                float y = sum + xv * dvec[h];
+                float z = pr[ii];
+                dp[ii] = y * (z / (1.0f + expf(-z)));
+            }
+        }
+        if (nw)
+            for (u32 g = 0; g < ng; g++)
+                rms_norm_inplace(dp + (u64)g * gsize, nw + (u64)g * gsize,
+                                 gsize, DEFAULT_EPS);
+    }
+    sfree(avec); sfree(dvec); sfree(dtb); sfree(nw);
+    return true;
+}
+
 static bool op_attn(OpCtx *c) {
     /* Write the batch's K/V into the plan's cache at positions
      * pos..pos+n-1, then attend causally over the cached keys (rows
@@ -930,6 +1058,8 @@ bool cpu_graph_op(OpCtx *c) {
         case OP_SIGMOID_GATE:   return op_sigmoid_gate(c);
         case OP_SSM_CONV:       return op_ssm_conv(c);
         case OP_SSM_DELTA:      return op_ssm_delta(c);
+        case OP_MAMBA2_CONV:    return op_mamba2_conv(c);
+        case OP_MAMBA2_SCAN:    return op_mamba2_scan(c);
         case OP_ATTN:           return op_attn(c);
         /* OP_INPUT has nothing to compute; OP_H2D / OP_D2H stay with
          * the executor. */

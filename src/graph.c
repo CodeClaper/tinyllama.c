@@ -55,7 +55,9 @@ static int op_stat_class(GraphOp op) {
         case OP_MUL:            return ST_BIN;
         case OP_SIGMOID_GATE:   return ST_GATE;
         case OP_SSM_CONV:
-        case OP_SSM_DELTA:      return ST_SSM;
+        case OP_SSM_DELTA:
+        case OP_MAMBA2_CONV:
+        case OP_MAMBA2_SCAN:    return ST_SSM;
         default:                return ST_OTHER;
     }
 }
@@ -309,6 +311,43 @@ GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args) {
                     params, 4);
 }
 
+/* Mamba2 conv stage: slice the xBC part out of the fused ssm_in
+ * projection, run the depthwise causal conv + bias + SiLU, and advance
+ * the per-layer conv ring. */
+GraphNode *graph_mamba2_conv(Graph *g, GraphNode *src, TensorInfo *weight,
+                             TensorInfo *bias, u32 state, u32 kernel,
+                             u32 d_inner, u32 n_group, u32 d_state,
+                             u32 n_head) {
+    if (!g || !src || !weight || kernel == 0) return GRAPH_NODE_NONE;
+    if (d_inner == 0 || n_group == 0 || d_state == 0 || n_head == 0)
+        return GRAPH_NODE_NONE;
+    if (state >= g->n_state) return GRAPH_NODE_NONE;
+    u32 params[] = { state, kernel, d_inner, n_group, d_state, n_head };
+    return node_add(g, OP_MAMBA2_CONV, (GraphNode *[]){ src, NULL, NULL, NULL },
+                    (TensorInfo *[]){ weight, bias, NULL, NULL }, params, 6);
+}
+
+/* Mamba2 selective scan.  Reads x/B/C from the conv output, z/dt from
+ * the fused ssm_in projection, advances the recurrent state and emits
+ * the gated [d_inner] result ready for ssm_out. */
+GraphNode *graph_mamba2_scan(Graph *g, GraphNode *conv, GraphNode *proj,
+                             TensorInfo *ssm_a, TensorInfo *ssm_d,
+                             TensorInfo *dt_bias, TensorInfo *norm,
+                             u32 state, u32 n_head, u32 head_dim,
+                             u32 d_state, u32 n_group, u32 d_inner) {
+    if (!g || !conv || !proj) return GRAPH_NODE_NONE;
+    if (!ssm_a || !ssm_d || !dt_bias) return GRAPH_NODE_NONE;
+    if (n_head == 0 || head_dim == 0 || d_state == 0 || n_group == 0 || d_inner == 0)
+        return GRAPH_NODE_NONE;
+    if (n_head % n_group != 0 || n_head * head_dim != d_inner) return GRAPH_NODE_NONE;
+    if (state >= g->n_state) return GRAPH_NODE_NONE;
+    u32 params[] = { state, n_head, head_dim, d_state, n_group, d_inner };
+    return node_add(g, OP_MAMBA2_SCAN,
+                    (GraphNode *[]){ conv, proj, NULL, NULL },
+                    (TensorInfo *[]){ ssm_a, ssm_d, dt_bias, norm },
+                    params, 6);
+}
+
 /* Caller-owned state buffers.  The graph only borrows the pointer, so the
  * owner (the arch workspace) keeps control of allocation and reset. */
 u32 graph_state(Graph *g, void *ptr) {
@@ -491,6 +530,10 @@ static u32 node_out_dim(const GraphNode *node, const u32 *dims, const ArchConfig
             return node->params[0] * node->params[1];   /* n_heads * head_dim    */
         case OP_SSM_DELTA:
             return node->params[1] * node->params[3];   /* n_v_heads * head_dim  */
+        case OP_MAMBA2_CONV:
+            return node->params[2] + 2 * node->params[3] * node->params[4];
+        case OP_MAMBA2_SCAN:
+            return node->params[5];                     /* d_inner               */
         case OP_ATTN:
             return c->n_head * c->head_dim;
         default:
@@ -907,6 +950,8 @@ static const char *op_name(GraphOp op) {
         case OP_ATTN:           return "attn";
         case OP_SSM_CONV:       return "ssm_conv";
         case OP_SSM_DELTA:      return "ssm_delta";
+        case OP_MAMBA2_CONV:    return "mamba2_conv";
+        case OP_MAMBA2_SCAN:    return "mamba2_scan";
         case OP_SOFTCAP:        return "softcap";
         case OP_H2D:            return "h2d";
         case OP_D2H:            return "d2h";

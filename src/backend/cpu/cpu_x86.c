@@ -1534,6 +1534,10 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
     if (dot_fn) return result;
 
 fallback_dot:
+    /* The type-specific switches jump here before `result` is
+     * initialised, so reset it explicitly (a label bypasses the
+     * declaration's initialiser). */
+    result = 0.0f;
     for (u64 j = i; j < i + n; j++)
         result += gguf_dequant(ti, j) * x[j - i];
     return result;

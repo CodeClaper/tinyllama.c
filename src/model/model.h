@@ -8,6 +8,7 @@ extern const ArchOps qwen25_ops;
 extern const ArchOps qwen35_ops;
 extern const ArchOps deepseek_ops;
 extern const ArchOps falcon_ops;
+extern const ArchOps falcon_h1_ops;
 extern const ArchOps gemma3_ops;
 
 #endif

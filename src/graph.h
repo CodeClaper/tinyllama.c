@@ -65,6 +65,15 @@ GraphNode *graph_bias(Graph *g, GraphNode *src, TensorInfo *bias);
 GraphNode *graph_sigmoid_gate(Graph *g, GraphNode *a, GraphNode *gate, u32 n_heads, u32 head_dim);
 GraphNode *graph_ssm_conv(Graph *g, GraphNode *src, TensorInfo *weight, u32 state, u32 kernel);
 GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args);
+GraphNode *graph_mamba2_conv(Graph *g, GraphNode *src, TensorInfo *weight,
+                             TensorInfo *bias, u32 state, u32 kernel,
+                             u32 d_inner, u32 n_group, u32 d_state,
+                             u32 n_head);
+GraphNode *graph_mamba2_scan(Graph *g, GraphNode *conv, GraphNode *proj,
+                             TensorInfo *ssm_a, TensorInfo *ssm_d,
+                             TensorInfo *dt_bias, TensorInfo *norm,
+                             u32 state, u32 n_head, u32 head_dim,
+                             u32 d_state, u32 n_group, u32 d_inner);
 GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer, u32 window);
 u32 graph_state(Graph *g, void *ptr);
 

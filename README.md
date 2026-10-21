@@ -21,6 +21,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
   - Qwen3 / Qwen3.5
   - DeepSeek (including MLA)
   - Falcon
+  - Falcon-H1 (attention + Mamba2 hybrid)
   - Gemma 3
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
 - epoll-based event loop for HTTP serving
@@ -39,6 +40,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 | LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | Supported |
 | DeepSeek-V2 | `deepseek2` | WIP |
 | Falcon | `falcon` | WIP |
+| Falcon-H1 | `falcon-h1` | Supported |
 | Gemma 3 | `gemma3` | Supported |
 
 ## Dependencies
@@ -241,6 +243,7 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
     - qwen35.c        — Qwen3.5 architecture
     - deepseek.c      — DeepSeek architecture
     - falcon.c        — Falcon architecture
+    - falcon_h1.c     — Falcon-H1 architecture (attention + Mamba2)
     - gemma3.c        — Gemma 3 architecture
   - backend/          — Hardware backends
     - cpu/            — CPU-optimized kernels
