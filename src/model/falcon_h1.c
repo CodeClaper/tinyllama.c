@@ -82,6 +82,13 @@ static bool falcon_h1_init(Session *s) {
         slog(WARN, "Falcon-H1: Mamba2 is CPU-only; ignoring -ngl and using the CPU");
     s->n_gpu_layers = 0;
 
+    /* Falcon-H1 Instruct is ChatML: <|im_end|> terminates an assistant
+     * reply even though the GGUF's generic eos id is <|endoftext|>.
+     * Without this the model runs past its answer and starts writing the
+     * next user turn, which corrupts every following chat round. */
+    if (s->en->vocab && s->en->vocab->im_end_id != VOCAB_ID_NONE)
+        s->en->vocab->eos_id = s->en->vocab->im_end_id;
+
     u32 q_dim       = c->n_head * c->head_dim;
     u32 kv_head_dim = c->kv_head_dim ? c->kv_head_dim : c->head_dim;
     u32 kv_dim      = c->n_kv_head * kv_head_dim;
