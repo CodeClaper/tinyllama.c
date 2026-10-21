@@ -36,7 +36,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 |---|---|---|
 | Qwen2 / Qwen2.5 | `qwen2` | Supported |
 | Qwen3 / Qwen3.5 | `qwen35` | Supported |
-| LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | WIP |
+| LLaMA / Llama 2 / Llama 3 / Llama 3.1 / Llama 3.2 | `llama` | Supported |
 | DeepSeek-V2 | `deepseek2` | WIP |
 | Falcon | `falcon` | WIP |
 | Gemma 3 | `gemma3` | Supported |
