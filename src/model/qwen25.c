@@ -161,9 +161,9 @@ static int qwen25_decode(const u8 *raw, int raw_len, char *out, int max_len) {
 /* Build a static execution graph for a fresh batch of n_tokens tokens:
  * token embedding, per-layer RMS norm, Q/K/V projections (+bias, RoPE),
  * causal GQA attention, output projection and residuals, SwiGLU FFN,
- * final norm and LM head.  Built once at ctx_size capacity and reused for
- * every batch; OP_ATTN extends the session KV cache, so decoding one row
- * at a time never recomputes the history. */
+ * final norm and LM head.  Built once at n_ubatch capacity and reused for
+ * every forward pass; OP_ATTN extends the session KV cache, so decoding
+ * one row at a time never recomputes the history. */
 static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
     ArchConfig *c       = &s->cfg;
     Weights    *w       = s->en->weights;

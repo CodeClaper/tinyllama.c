@@ -17,6 +17,7 @@
 typedef struct {
     EngineOptons    engine;
     int             ctx_size;
+    u32             n_ubatch;
     u32             n_tokens;
     float           temperature;
     u32             top_k;
@@ -38,6 +39,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, default 4096\n");
+    fprintf(file, "  -ub | --ubatch            <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
@@ -90,6 +92,7 @@ static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
 static ChatOptions parse_options(int argc, char *argv[]) {
     ChatOptions co = {
         .ctx_size = 4096,
+        .n_ubatch = DEFAULT_N_UBATCH,
         .n_tokens = 393216,
         .temperature = 0.8f,
         .top_k = DEFAULT_TOP_K,
@@ -108,6 +111,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) usage(stdout, EXIT_SUCCESS);
         else if (!strcmp(arg, "-m")  || !strcmp(arg, "--model")) co.engine.model_path = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-c")  || !strcmp(arg, "--ctx")) co.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ub") || !strcmp(arg, "--ubatch")) co.n_ubatch = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) co.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
@@ -215,8 +219,8 @@ int main(int argc, char *argv[]) {
     if (!engine) fatal("Failed to load model");
 
     /* Create session. */
-    Session *session = session_create(engine, (u32)co.ctx_size, co.nthread,
-                                      co.n_gpu_layers);
+    Session *session = session_create(engine, (u32)co.ctx_size, co.n_ubatch,
+                                      co.nthread, co.n_gpu_layers);
     if (!session) fatal("Failed to create session");
     session->temperature = co.temperature;
     session->top_k = co.top_k;

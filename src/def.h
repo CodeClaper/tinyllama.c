@@ -83,6 +83,7 @@ typedef struct {
     char *host;
     int port;
     int ctx_size;
+    int n_ubatch;
     int default_tokens;
     int nthread;
     int n_gpu_layers;
@@ -340,6 +341,7 @@ struct Session {
     u32        n_tokens;     /* current position in ring buffer    */
     float     *logits;       /* [n_vocab] output buffer            */
     u32        ctx_size;
+    u32        n_ubatch;     /* max tokens per forward pass        */
 
     /* ---- Arch-specific workspace ---- */
     void       *arch_data;

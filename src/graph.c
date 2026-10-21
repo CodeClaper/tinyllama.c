@@ -457,10 +457,12 @@ void graph_free(Graph *g) {
 
 static size_t align16(size_t x) { return (x + 15) & ~(size_t)15; }
 
-/* Capacity rows a node can ever be asked to produce. */
-static u32 node_cap_rows(const GraphNode *node, bool sink, u32 ctx_size) {
+/* Capacity rows a node can ever be asked to produce.  Non-sink
+ * activations only need to cover one ubatch (forward pass), never the
+ * whole context. */
+static u32 node_cap_rows(const GraphNode *node, bool sink, u32 n_ubatch) {
     if (node->op == OP_INPUT) return (u32)node->ne[0];
-    return sink ? 1u : ctx_size;
+    return sink ? 1u : n_ubatch;
 }
 
 /* Elements per row of a node's output (float count).  dims[] must hold the
@@ -564,7 +566,7 @@ static bool arena_plan(Graph *g, Session *s) {
     size_t need[n_node];
     for (u32 i = 0; i < n_node; i++) {
         const GraphNode *node = nodes[i];
-        u32 rows = node_cap_rows(node, sink[i] != 0, s->ctx_size);
+        u32 rows = node_cap_rows(node, sink[i] != 0, s->n_ubatch);
         need[i] = align16((node->op == OP_INPUT)
                               ? (size_t)node->ne[0] * sizeof(u32)
                               : (size_t)rows * dims[i] * sizeof(float));
@@ -986,9 +988,11 @@ void graph_drawer(const Graph *g) {
 static void graph_plan_print(const Graph *g, const Session *s) {
     if (!g || !g->plan) return;
     const GraphPlan *p = g->plan;
-    slog(INFO, "GraphPlan: backend=%s n_gpu_layers=%d nodes=%u state=%u ctx_size=%u",
+    slog(INFO, "GraphPlan: backend=%s n_gpu_layers=%d nodes=%u state=%u "
+         "ctx_size=%u n_ubatch=%u",
          backend_name(p->backend), s ? s->n_gpu_layers : 0,
-         g->n_node, g->n_state, s ? s->ctx_size : 0);
+         g->n_node, g->n_state, s ? s->ctx_size : 0,
+         s ? s->n_ubatch : 0);
     for (u32 b = 0; b < BACKEND_COUNT; b++) {
         if (p->weights_size[b] == 0 && p->arena_size[b] == 0 &&
             p->kvcache_size[b] == 0) continue;
@@ -1187,11 +1191,14 @@ fail:
     return false;
 }
 
-/* One forward step through the graph: it is built on first use (at ctx_size
- * capacity, so any later batch fits), the batch is appended to the session
- * ring buffer at s->n_tokens and executed, and the last row's logits are
- * published.  Replaces the old prefill / generate arch hooks — callers pass
- * the prompt ids for prefill and a single id for decode. */
+/* Append tokens to the session and run them through the graph in
+ * n_ubatch-sized chunks.  The graph is built once at n_ubatch capacity,
+ * so activation slots cover one forward pass rather than the whole
+ * context; prompt prefill is split the same way llama.cpp splits a
+ * logical batch into micro-batches.  KV/recurrent state accumulates
+ * across chunks, and the final chunk's last row publishes the logits.
+ * Replaces the old prefill / generate arch hooks — callers pass the
+ * prompt ids for prefill and a single id for decode. */
 bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
     if (!s || !tokens || n_tokens == 0) {
         slog(WARN, "graph_execute: missing session / tokens");
@@ -1203,7 +1210,7 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
             slog(WARN, "graph_execute: no graph builder for this architecture");
             return false;
         }
-        s->graph = s->ops.graph_build(s, s->ctx_size);
+        s->graph = s->ops.graph_build(s, s->n_ubatch);
         if (!s->graph) {
             slog(WARN, "graph_execute: graph build failed");
             return false;
@@ -1221,13 +1228,21 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
         return false;
     }
 
-    memcpy(s->tokens + pos, tokens, (size_t)n_tokens * sizeof(u32));
-    GraphBatch batch = {
-        .tokens = s->tokens + pos,
-        .pos    = pos,
-        .n      = n_tokens
-    };
-    if (!graph_compute(s->graph, &batch, s)) return false;
+    u32 done = 0;
+    while (done < n_tokens) {
+        u32 chunk = n_tokens - done;
+        if (chunk > s->n_ubatch) chunk = s->n_ubatch;
+
+        memcpy(s->tokens + pos + done, tokens + done,
+               (size_t)chunk * sizeof(u32));
+        GraphBatch batch = {
+            .tokens = s->tokens + pos + done,
+            .pos    = pos + done,
+            .n      = chunk
+        };
+        if (!graph_compute(s->graph, &batch, s)) return false;
+        done += chunk;
+    }
     s->n_tokens = pos + n_tokens;
 
     /* graph_compute() leaves the logits in s->logits; mirror them out when
@@ -1249,7 +1264,7 @@ bool graph_prepare(Session *s) {
             slog(WARN, "graph_prepare: no graph builder for this architecture");
             return false;
         }
-        s->graph = s->ops.graph_build(s, s->ctx_size);
+        s->graph = s->ops.graph_build(s, s->n_ubatch);
         if (!s->graph) {
             slog(WARN, "graph_prepare: graph build failed");
             return false;

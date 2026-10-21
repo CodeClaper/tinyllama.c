@@ -1589,7 +1589,8 @@ static int session_auto_gpu_layers(Session *s) {
 
     size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim
                 * sizeof(float) * 2;
-    double arena_full = (double)s->ctx_size * s->cfg.n_embd
+    u32 arena_rows = s->n_ubatch ? s->n_ubatch : s->ctx_size;
+    double arena_full = (double)arena_rows * s->cfg.n_embd
                         * sizeof(float) * 36.0;
     size_t arena_layer = (size_t)(arena_full / (double)L);
 
@@ -1661,13 +1662,15 @@ static void session_resolve_gpu_layers(Session *s, int requested) {
  * config, and the ops table for the detected architecture.
  * n_gpu_layers: <0 auto-fit, 0 CPU-only, >0 number of leading layers
  * to place on the GPU. */
-Session *session_create(Engine *en, u32 ctx_size, int nthreads,
-                        int n_gpu_layers) {
+Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
+                        int nthreads, int n_gpu_layers) {
     if (!en || ctx_size == 0) return NULL;
 
     Session *s = smalloc(sizeof(*s));
     s->en                = en;
     s->ctx_size          = ctx_size;
+    if (n_ubatch == 0 || n_ubatch > ctx_size) n_ubatch = ctx_size;
+    s->n_ubatch          = n_ubatch;
     s->n_gpu_layers      = n_gpu_layers;
     s->temperature       = DEFAULT_TEMPERATURE;
     s->top_p             = DEFAULT_TOP_P ;
@@ -1709,9 +1712,9 @@ Session *session_create(Engine *en, u32 ctx_size, int nthreads,
         return NULL;
     }
 
-    slog(INFO, "Session created: ctx_size=%u n_layer=%u n_embd=%u "
+    slog(INFO, "Session created: ctx_size=%u n_ubatch=%u n_layer=%u n_embd=%u "
          "n_head=%u head_dim=%u",
-         s->ctx_size, s->cfg.n_layer, s->cfg.n_embd,
+         s->ctx_size, s->n_ubatch, s->cfg.n_layer, s->cfg.n_embd,
          s->cfg.n_head, s->cfg.head_dim);
 
     return s;

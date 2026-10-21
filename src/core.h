@@ -12,6 +12,7 @@
 #define DEFAULT_FREQUENCY_PENALTY 0.0f
 #define DEFAULT_PRESENCE_PENALTY 0.0f
 #define DEFAULT_N_THREAD -1
+#define DEFAULT_N_UBATCH 512
 
 /* ---- Tensor dequant accessors ---- */
 float tensor_get_f32(TensorInfo *ti, u64 i);
@@ -28,7 +29,8 @@ void engine_close(Engine *en);
 void engine_summary(Engine *en);
 
 /* ---- Session (inference context) lifecycle ---- */
-Session *session_create(Engine *en, u32 ctx_size, int nthreads, int n_gpu_layers);
+Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
+                        int nthreads, int n_gpu_layers);
 void session_free(Session *s);
 
 /* ---- Vocab / BPE lookups ---- */

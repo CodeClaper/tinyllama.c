@@ -300,6 +300,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -h  | --host              <string>  The server host, defalt 127.0.0.1\n");
     fprintf(file, "  -p  | --port              <int>     The Port to listening, default 9987\n");
     fprintf(file, "  -c  | --ctx               <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -ub | --ubatch            <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
@@ -329,6 +330,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         .host = "127.0.0.1",
         .port = 8080,
         .ctx_size = 4096,
+        .n_ubatch = DEFAULT_N_UBATCH,
         .default_tokens = 393216,
         .temperature = 0.8f,
         .top_k = DEFAULT_TOP_K,
@@ -348,6 +350,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-h")  || !strcmp(arg, "--host")) so.host = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-p")  || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-c")  || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ub") || !strcmp(arg, "--ubatch")) so.n_ubatch = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
@@ -444,7 +447,8 @@ int main(int argc, char *argv[]) {
     }
 
     /* 3. Create session & configure sampling. */
-    Session *session = session_create(engine, (u32)so.ctx_size, so.nthread,
+    Session *session = session_create(engine, (u32)so.ctx_size,
+                                      (u32)so.n_ubatch, so.nthread,
                                       so.n_gpu_layers);
     if (!session) {
         engine_close(engine);

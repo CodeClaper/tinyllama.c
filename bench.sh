@@ -16,9 +16,10 @@ Examples:
   ./bench.sh model.gguf -i "Explain quantum computing." -r 10 -n 256 -T 8
 
 Options are forwarded to src/bench, so any bench option works:
-  -c  context size     -n  tokens to generate    -T  threads
-  -t  temperature      -tp top-p                 -tk top-k    -P  min-p
-  -r  repeat count     -i  input prompt          -o  output text file
+  -c  context size     -ub micro-batch           -n  tokens to generate
+  -T  threads          -t  temperature            -tp top-p
+  -tk top-k            -P  min-p                  -r  repeat count
+  -i  input prompt     -o  output text file
 EOF
 }
 

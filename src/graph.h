@@ -68,9 +68,10 @@ GraphNode *graph_ssm_delta(Graph *g, const GraphSsmDelta *args);
 GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer, u32 window);
 u32 graph_state(Graph *g, void *ptr);
 
-/* Generates the execution plan (arena slot layout) once: node->data
- * pointers are baked into the graph and any n <= cfg-sized batch
- * reuses the slots.  graph_compute() calls this lazily on first run. */
+/* Runs tokens through the graph, splitting batches larger than
+ * Session.n_ubatch into micro-batches.  Generates the execution plan
+ * (arena slot layout) once: node->data pointers are baked into the graph
+ * and any n <= n_ubatch reuses the slots. */
 bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits);
 
 /* Build the graph (if needed), generate the execution plan and preload

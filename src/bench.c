@@ -22,6 +22,7 @@
 typedef struct {
     EngineOptons engine;
     int ctx_size;
+    u32 n_ubatch;
     u32 n_tokens;
     float temperature;
     u32 top_k;
@@ -43,6 +44,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
     fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
+    fprintf(file, "  -ub | --ubatch  <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
     fprintf(file, "  -T  | --threads <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -ngl| --n-gpu-layers <int> Layers on GPU (-1=auto, 0=CPU, default -1)\n");
@@ -67,6 +69,7 @@ static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
 static BenchOptions parse_options(int argc, char *argv[]) {
     BenchOptions bo = {
         .ctx_size = 4096,
+        .n_ubatch = DEFAULT_N_UBATCH,
         .n_tokens = 128,
         .temperature = 0.8f,
         .top_k = DEFAULT_TOP_K,
@@ -83,6 +86,7 @@ static BenchOptions parse_options(int argc, char *argv[]) {
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) usage(stdout, EXIT_SUCCESS);
         else if (!strcmp(arg, "-m") || !strcmp(arg, "--model")) bo.engine.model_path = parse_arg(argc, argv, &i, arg);
         else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) bo.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ub") || !strcmp(arg, "--ubatch")) bo.n_ubatch = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) bo.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T") || !strcmp(arg, "--threads")) bo.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) bo.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
@@ -154,7 +158,8 @@ int main(int argc, char *argv[]) {
     slog(INFO, "Loaded model (%s)", engine->model->arch_name);
 
     /* Create session. */
-    Session *session = session_create(engine, (u32)opts.ctx_size, opts.nthread,
+    Session *session = session_create(engine, (u32)opts.ctx_size,
+                                      opts.n_ubatch, opts.nthread,
                                       opts.n_gpu_layers);
     if (!session) slog(ERROR, "Failed to create session");
     session->temperature = opts.temperature;
@@ -294,6 +299,7 @@ int main(int argc, char *argv[]) {
     printf("Device:             CPU\n");
 #endif
     printf("Context Size:       %d\n", opts.ctx_size);
+    printf("Micro-batch:        %u\n", session->n_ubatch);
     printf("Threads:            %d\n", opts.nthread);
     printf("Prompt Tokens:      %d\n", n_prompt);
     printf("Target Tokens:      %u\n", opts.n_tokens);

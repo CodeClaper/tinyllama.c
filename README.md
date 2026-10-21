@@ -14,6 +14,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - Interactive CLI chat with conversation history
 - Inference benchmark with time and throughput statistics
 - Multi-threaded inference via thread pool
+- Micro-batching (`-ub`): prefill is split into bounded forward passes so activation memory scales with the micro-batch, not the context size
 - Supports multiple model architectures:
   - LLaMA
   - Qwen2
@@ -90,6 +91,7 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
              -p 8080                          # Port (default: 8080)
              -h 127.0.0.1                     # Host (default: 127.0.0.1)
              -c 4096                          # Context size (default: 4096)
+             -ub 512                          # Max tokens per forward pass (default: 512)
              -n 393216                        # Max tokens (default: 393216)
              -t 1.0                           # Temperature (default: 1.0)
              -T 1                             # Thread count (default: 1)
@@ -128,6 +130,7 @@ curl http://localhost:8080/v1/chat/completions \
 # Full options
 ./src/chat -m model.gguf                      # Model file (required)
            -c 4096                            # Context size (default: 4096)
+           -ub 512                            # Max tokens per forward pass (default: 512)
            -n 128                             # Max tokens per response (default: 128)
            -T 1                               # Thread count (default: 1)
            -ngl -1                            # GPU layers (-1=auto, 0=CPU)
@@ -152,6 +155,7 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 # Full options
 ./src/bench -m model.gguf                     # Model file (required)
             -c 4096                           # Context size (default: 4096)
+            -ub 512                           # Max tokens per forward pass (default: 512)
             -n 128                            # Tokens to generate per iteration (default: 128)
             -T 1                              # Thread count (default: 1)
             -ngl -1                           # GPU layers (-1=auto, 0=CPU)
