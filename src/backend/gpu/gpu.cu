@@ -560,6 +560,182 @@ __global__ void gemv_iq4_nl_kernel(const u8 *__restrict__ w,
 }
 
 /* ================================================================
+ * Q4_K dp4a GEMV
+ * ================================================================
+ * The generic gemv_block_kernel decodes every Q4_K element to f32 and
+ * runs an FP32 FMA, so it reads one byte per element even though a
+ * Q4_K byte holds two elements and it pays a nibble decode per
+ * element.  This path instead quantises the activation row to int8
+ * once (one warp per 32-element group) and runs the weight dot as
+ * packed int8 MACs:
+ *
+ *   w[c] = d * sc[sb] * q4[c] - dmin * mn[sb]
+ *   dot  = sum_c w[c] * (dx[sb] * q8[c])
+ *        = dx[sb] * (d * sc[sb] * sum(q4*q8)
+ *                    - dmin * mn[sb] * sum(q8))
+ *
+ * A Q4_K block holds 256 elements in four groups of 64.  Within a
+ * group the 32 qs bytes hold the low nibbles (one sub-block) and the
+ * high nibbles (the next sub-block).  Eight lanes cover a group: lane
+ * l owns four consecutive bytes, i.e. four elements of each nibble
+ * half, so a warp covers all eight sub-blocks of a 256-element block
+ * and every weight byte is loaded exactly once.
+ */
+
+#define GPU_Q4K_THREADS 256
+
+/* Quantise one activation row to int8, one 32-element group per warp.
+ * dx[] holds the group scale and bs[] the signed int8 sum, both needed
+ * because the Q4_K min term is constant over a whole group. */
+__global__ void quantize_q8_32_kernel(const float *__restrict__ x,
+                                      i8 *__restrict__ qx,
+                                      float *__restrict__ dx,
+                                      int *__restrict__ bs,
+                                      u32 nblk) {
+    const u32 lane  = threadIdx.x & 31u;
+    const u32 nwarp = blockDim.x >> 5;
+    for (u32 blk = blockIdx.x * nwarp + (threadIdx.x >> 5);
+         blk < nblk;
+         blk += gridDim.x * nwarp) {
+        const float v = x[(u64)blk * 32u + lane];
+        float amax = fabsf(v);
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+
+        const float d  = amax / 127.0f;
+        const float id = d > 0.0f ? 1.0f / d : 0.0f;
+        int q = __float2int_rn(v * id);
+        q = max(-127, min(127, q));
+        qx[(u64)blk * 32u + lane] = (i8)q;
+
+        int sum = q;
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+            sum += __shfl_xor_sync(0xffffffffu, sum, o);
+
+        if (lane == 0) {
+            dx[blk] = d;
+            bs[blk] = sum;
+        }
+    }
+}
+
+/* One warp per output row.  Each group of eight lanes owns one 64-byte
+ * qs group (two 32-element sub-blocks); after the intra-group
+ * reduction only the group leader applies the scales and accumulates,
+ * and a final full-warp reduction sums the eight sub-blocks. */
+__global__ void gemv_q4k_dp4a_kernel(const u8 *__restrict__ w,
+                                     const i8 *__restrict__ qx,
+                                     const float *__restrict__ dx,
+                                     const int *__restrict__ bs,
+                                     float *__restrict__ y,
+                                     u64 rows, u64 cols) {
+    const u32 lane = threadIdx.x & 31u;
+    const u32 g    = lane >> 3;        /* qs group: 0..3               */
+    const u32 l    = lane & 7u;        /* 4-byte slice within a group  */
+    const u64 bpr  = cols >> 8;        /* 256-element Q4_K blocks/row  */
+
+    const i8    *xr = qx + (u64)blockIdx.y * cols;
+    const float *dr = dx + (u64)blockIdx.y * (cols >> 5);
+    const int   *br = bs + (u64)blockIdx.y * (cols >> 5);
+    float       *yr = y  + (u64)blockIdx.y * rows;
+
+    for (u64 r = (u64)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+         r < rows;
+         r += (u64)gridDim.x * (blockDim.x >> 5)) {
+        const u64 blk0 = (r * cols) >> 8;
+        float acc = 0.0f;
+
+        for (u64 b = 0; b < bpr; b++) {
+            const u8 *bp = w + (blk0 + b) * 144u;
+            const float d    = f16_to_f32(ld_u16(bp));
+            const float dmin = f16_to_f32(ld_u16(bp + 2));
+
+            const u32 sb_lo = 2u * g;
+            const u32 sb_hi = sb_lo + 1u;
+            u8 sc_lo, mn_lo, sc_hi, mn_hi;
+            q4k_scale_min(bp + 4, sb_lo, &sc_lo, &mn_lo);
+            q4k_scale_min(bp + 4, sb_hi, &sc_hi, &mn_hi);
+
+            const u32 raw = *(const u32 *)(bp + 16u + g * 32u + 4u * l);
+            const u32 w_lo =  raw        & 0x0F0F0F0Fu;
+            const u32 w_hi = (raw >> 4)  & 0x0F0F0F0Fu;
+
+            const u64 xb = b << 8;
+            const u32 x_lo = *(const u32 *)(xr + xb + sb_lo * 32u + 4u * l);
+            const u32 x_hi = *(const u32 *)(xr + xb + sb_hi * 32u + 4u * l);
+
+            int ip_lo = __dp4a((int)w_lo, (int)x_lo, 0);
+            int ip_hi = __dp4a((int)w_hi, (int)x_hi, 0);
+            #pragma unroll
+            for (int o = 4; o > 0; o >>= 1) {
+                ip_lo += __shfl_down_sync(0xffffffffu, ip_lo, o, 8);
+                ip_hi += __shfl_down_sync(0xffffffffu, ip_hi, o, 8);
+            }
+
+            if (l == 0) {
+                const u64 gb = (b << 3) + sb_lo;
+                acc += dr[gb]     * (d * (float)sc_lo * (float)ip_lo
+                                     - dmin * (float)mn_lo * (float)br[gb]);
+                acc += dr[gb + 1] * (d * (float)sc_hi * (float)ip_hi
+                                     - dmin * (float)mn_hi * (float)br[gb + 1]);
+            }
+        }
+
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+            acc += __shfl_down_sync(0xffffffffu, acc, o);
+        if (lane == 0) yr[r] = acc;
+    }
+}
+
+/* Persistent scratch for the activation quantisation.  cols is the
+ * activation width (a few thousand), so these buffers are tiny and are
+ * grown once per distinct width. */
+static i8    *g_q4k_qx = NULL; static u64 g_q4k_qx_n = 0;
+static float *g_q4k_dx = NULL; static u64 g_q4k_dx_n = 0;
+static int   *g_q4k_bs = NULL;
+
+static void q4k_scratch_free(void) {
+    if (g_q4k_qx) { cudaFree(g_q4k_qx); g_q4k_qx = NULL; }
+    if (g_q4k_dx) { cudaFree(g_q4k_dx); g_q4k_dx = NULL; }
+    if (g_q4k_bs) { cudaFree(g_q4k_bs); g_q4k_bs = NULL; }
+    g_q4k_qx_n = g_q4k_dx_n = 0;
+}
+
+static void gpu_q4k_dp4a(const u8 *w, const float *x, float *y,
+                         u64 rows, u64 cols, u64 batch) {
+    const u64 nblk_row = cols / 32u;
+    const u64 nblk     = batch * nblk_row;
+    const u64 nx       = batch * cols;
+    if (nx > g_q4k_qx_n) {
+        q4k_scratch_free();
+        CHECK(cudaMalloc(&g_q4k_qx, nx));
+        g_q4k_qx_n = nx;
+    }
+    if (nblk > g_q4k_dx_n) {
+        if (g_q4k_dx) cudaFree(g_q4k_dx);
+        if (g_q4k_bs) cudaFree(g_q4k_bs);
+        CHECK(cudaMalloc(&g_q4k_dx, nblk * sizeof(float)));
+        CHECK(cudaMalloc(&g_q4k_bs, nblk * sizeof(int)));
+        g_q4k_dx_n = nblk;
+    }
+
+    const u32 warps_per_block = GPU_Q4K_THREADS / 32u;
+    u64 qwant = (nblk + warps_per_block - 1) / warps_per_block;
+    u32 qgrid = (u32)(qwant < 65535u ? qwant : 65535u);
+    quantize_q8_32_kernel<<<qgrid, GPU_Q4K_THREADS>>>(
+        x, g_q4k_qx, g_q4k_dx, g_q4k_bs, (u32)nblk);
+    CHECK(cudaGetLastError());
+
+    dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
+    gemv_q4k_dp4a_kernel<<<grid, GPU_Q4K_THREADS>>>(
+        w, g_q4k_qx, g_q4k_dx, g_q4k_bs, y, rows, cols);
+    CHECK(cudaGetLastError());
+}
+
+/* ================================================================
  * IQ (importance-matrix-aware) types
  * ================================================================ */
 
@@ -1150,6 +1326,16 @@ static void matmul_launch(const u8 *w, const float *x, float *y,
             return;
         }
     }
+    if constexpr (TYPE == GGUF_TYPE_Q4_K) {
+        /* Quantise each activation row once, then run packed int8 MACs.
+         * Q4_K blocks are 256 elements, so cols must be block-aligned
+         * or a block would straddle rows.  The transposed orientation
+         * gathers columns, so it keeps the generic kernel. */
+        if (!trans && cols % 256 == 0) {
+            gpu_q4k_dp4a(w, x, y, rows, cols, batch);
+            return;
+        }
+    }
     /* Fast path — one warp per output row, with each quant block's
      * header decoded once per lane instead of once per element.  Used
      * only when the activation row exceeds the shared-memory budget.
@@ -1438,4 +1624,5 @@ void gpu_shutdown(void) {
     g_cache_n = 0;
     if (g_sx) { cudaFree(g_sx); g_sx = NULL; g_sx_n = 0; }
     if (g_sy) { cudaFree(g_sy); g_sy = NULL; g_sy_n = 0; }
+    q4k_scratch_free();
 }

@@ -167,10 +167,14 @@ static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
     return sum;
 }
 
-/* Whether the non-transposed matvec takes the Q8_0 __dp4a path for this
- * column count (mirrors matmul_launch in gpu.cu). */
+/* Whether the non-transposed matvec takes an int8 __dp4a path for this
+ * type/column count (mirrors matmul_launch in gpu.cu). */
 static bool uses_dp4a(u32 type, u64 cols) {
-    return type == GGUF_TYPE_Q8_0 && cols % 128 == 0;
+    if (type == GGUF_TYPE_Q8_0)
+        return cols % 128 == 0;
+    if (type == GGUF_TYPE_Q4_K)
+        return cols % 256 == 0;
+    return false;
 }
 
 /* Part B: matvec (both orientations) and matmat (batch=3).  Tolerance
@@ -260,9 +264,9 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
     for (u64 i = 0; i < cols; i++)
         x[i] = (float)((int32_t)rng_next() % 2000001 - 1000000) / 1000000.0f;
 
-    /* Q8_0's dp4a matvec quantizes the activation to int8 first;
-     * reproduce that here so the comparison isolates mapping/decode
-     * errors rather than the intentional rounding. */
+    /* The Q8_0 / Q4_K dp4a matvec quantizes the activation to int8
+     * first; reproduce that here so the comparison isolates
+     * mapping/decode errors rather than the intentional rounding. */
     const float *xe = x;
     float *xq = NULL;
     if (uses_dp4a(ti->type, cols)) {
