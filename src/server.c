@@ -277,7 +277,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
 
     for (u32 i = 0; i < max_tokens; i++) {
-        fputc('.', stdout); fflush(stdout);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
@@ -322,7 +321,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                                     s->frequency_penalty, s->presence_penalty,
                                     s->tokens, s->n_tokens);
     }
-    fputc('\n', stdout);
 
     bool hit_eos = next_token == (u32)v->eos_id;
 
