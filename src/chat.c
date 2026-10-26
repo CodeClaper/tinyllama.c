@@ -19,14 +19,7 @@ typedef struct {
     int             ctx_size;
     u32             n_ubatch;
     u32             n_tokens;
-    float           temperature;
-    u32             top_k;
-    float           top_p;
-    float           min_p;
-    float           repeat_penalty;
-    u32             repeat_last_n;
-    float           frequency_penalty;
-    float           presence_penalty;
+    SampleParam     sample;
     int             nthread;
     int             n_gpu_layers;
     const char      *system;
@@ -94,14 +87,16 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         .ctx_size = 4096,
         .n_ubatch = DEFAULT_N_UBATCH,
         .n_tokens = 393216,
-        .temperature = 0.8f,
-        .top_k = DEFAULT_TOP_K,
-        .top_p = 0.9f,
-        .min_p = DEFAULT_MIN_P,
-        .repeat_penalty = DEFAULT_REPEAT_PENALTY,
-        .repeat_last_n = DEFAULT_REPEAT_LAST_N,
-        .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
-        .presence_penalty = DEFAULT_PRESENCE_PENALTY,
+        .sample = {
+            .temperature = 0.8f,
+            .top_k = DEFAULT_TOP_K,
+            .top_p = 0.9f,
+            .min_p = DEFAULT_MIN_P,
+            .repeat_penalty = DEFAULT_REPEAT_PENALTY,
+            .repeat_last_n = DEFAULT_REPEAT_LAST_N,
+            .frequency_penalty = DEFAULT_FREQUENCY_PENALTY,
+            .presence_penalty = DEFAULT_PRESENCE_PENALTY,
+        },
         .nthread = -1,
         .n_gpu_layers = -1,
         .system = NULL
@@ -115,14 +110,14 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) co.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) co.temperature = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.top_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) co.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) co.min_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeat-penalty")) co.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) co.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) co.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) co.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) co.sample.temperature = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.sample.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) co.sample.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) co.sample.min_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeat-penalty")) co.sample.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) co.sample.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) co.sample.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) co.sample.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-s")  || !strcmp(arg, "--system")) co.system = parse_arg(argc, argv, &i, arg);
         else {
             fprintf(stderr, "Unknown option: %s.\n", arg);
@@ -138,16 +133,16 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         fprintf(stderr, "Model path is required (-m / --model)");
         usage(stderr, 2);
     }
-    if (co.temperature < 0.0f) {
-        fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", co.temperature);
+    if (co.sample.temperature < 0.0f) {
+        fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", co.sample.temperature);
         usage(stderr, 2);
     }
-    if (co.top_p <= 0.0f || co.top_p > 1.0f) {
-        fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", co.top_p);
+    if (co.sample.top_p <= 0.0f || co.sample.top_p > 1.0f) {
+        fprintf(stderr, "Top-p must be in (0.0, 1.0], got %.2f\n", co.sample.top_p);
         usage(stderr, 2);
     }
-    if (co.min_p < 0.0f || co.min_p > 1.0f) {
-        fprintf(stderr, "Min-p must be in [0.0, 1.0], got %.2f\n", co.min_p);
+    if (co.sample.min_p < 0.0f || co.sample.min_p > 1.0f) {
+        fprintf(stderr, "Min-p must be in [0.0, 1.0], got %.2f\n", co.sample.min_p);
         usage(stderr, 2);
     }
     return co;
@@ -222,15 +217,8 @@ int main(int argc, char *argv[]) {
     Session *session = session_create(engine, (u32)co.ctx_size, co.n_ubatch,
                                       co.nthread, co.n_gpu_layers);
     if (!session) fatal("Failed to create session");
-    session->temperature = co.temperature;
-    session->top_k = co.top_k;
-    session->top_p = co.top_p;
-    session->min_p = co.min_p;
+    session->sample = co.sample;
     session->max_tokens       = co.n_tokens;
-    session->repeat_penalty   = co.repeat_penalty;
-    session->repeat_last_n    = co.repeat_last_n;
-    session->frequency_penalty = co.frequency_penalty;
-    session->presence_penalty  = co.presence_penalty;
 
     /* Warmup: build the graph, plan the arena and preload weights onto
      * the device backend so the first turn only pays compute. */
@@ -301,13 +289,8 @@ int main(int argc, char *argv[]) {
         if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
-        u32 next_token = (co.temperature > 0.0f) 
-            ? sample_token(session->logits, session->cfg.n_vocab, 
-                    co.temperature, co.top_k, co.top_p, co.min_p, 
-                    co.repeat_penalty, co.repeat_last_n, 
-                    co.frequency_penalty, co.presence_penalty, 
-                    session->tokens, session->n_tokens)
-            : sample_greedy(session->logits, session->cfg.n_vocab);
+        u32 next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
+                    session->tokens, session->n_tokens);
         double ttft_ms = (time_sec() - t_prefill) * 1000.0;
 
         /* Generate. */
@@ -332,14 +315,8 @@ int main(int argc, char *argv[]) {
             if (!graph_execute(session, &next_token, 1,
                                session->logits))
                 break;
-            if (co.temperature > 0.0f)
-                next_token = sample_token(session->logits, session->cfg.n_vocab,
-                                           co.temperature, co.top_k, co.top_p, co.min_p,
-                                           co.repeat_penalty, co.repeat_last_n,
-                                           co.frequency_penalty, co.presence_penalty,
-                                           session->tokens, session->n_tokens);
-            else
-                next_token = sample_greedy(session->logits, session->cfg.n_vocab);
+            next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
+                                       session->tokens, session->n_tokens);
         }
         double dt = time_sec() - t0;
         double tok_s = dt > 0.0 ? (double)n_gen / dt : 0.0;

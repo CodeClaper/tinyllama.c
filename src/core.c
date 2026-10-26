@@ -1706,14 +1706,14 @@ Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
     if (n_ubatch == 0 || n_ubatch > ctx_size) n_ubatch = ctx_size;
     s->n_ubatch          = n_ubatch;
     s->n_gpu_layers      = n_gpu_layers;
-    s->temperature       = DEFAULT_TEMPERATURE;
-    s->top_p             = DEFAULT_TOP_P ;
-    s->top_k             = DEFAULT_TOP_K ;
-    s->min_p             = DEFAULT_MIN_P;
-    s->repeat_penalty    = DEFAULT_REPEAT_PENALTY;
-    s->repeat_last_n     = DEFAULT_REPEAT_LAST_N;
-    s->frequency_penalty = 0.0f;
-    s->presence_penalty  = 0.0f;
+    s->sample.temperature       = DEFAULT_TEMPERATURE;
+    s->sample.top_p             = DEFAULT_TOP_P;
+    s->sample.top_k             = DEFAULT_TOP_K;
+    s->sample.min_p             = DEFAULT_MIN_P;
+    s->sample.repeat_penalty    = DEFAULT_REPEAT_PENALTY;
+    s->sample.repeat_last_n     = DEFAULT_REPEAT_LAST_N;
+    s->sample.frequency_penalty = 0.0f;
+    s->sample.presence_penalty  = 0.0f;
     s->max_tokens        = 0;
     s->pthreads          = pthreads_create(nthreads);
 

@@ -79,6 +79,17 @@ typedef struct {
 } EngineOptons;
 
 typedef struct {
+    float temperature;
+    u32   top_k;
+    float top_p;
+    float min_p;
+    float repeat_penalty;
+    u32   repeat_last_n;
+    float frequency_penalty;
+    float presence_penalty;
+} SampleParam;
+
+typedef struct {
     EngineOptons engine;
     char *host;
     int port;
@@ -87,14 +98,7 @@ typedef struct {
     int default_tokens;
     int nthread;
     int n_gpu_layers;
-    float temperature;
-    u32 top_k;
-    float top_p;
-    float min_p;
-    float repeat_penalty;
-    u32 repeat_last_n;
-    float frequency_penalty;
-    float presence_penalty;
+    SampleParam sample;
     bool inspect;
     bool show_graph;
 } ServerOptions;
@@ -353,14 +357,7 @@ struct Session {
     struct pthreads *pthreads;
 
     /* ---- Sampling ---- */
-    float      temperature;
-    u32        top_k;
-    float      top_p;
-    float      min_p;
-    float      repeat_penalty;
-    u32        repeat_last_n;
-    float      frequency_penalty;
-    float      presence_penalty;
+    SampleParam sample;
     u32        max_tokens;
     
     /* --- Graph --- */

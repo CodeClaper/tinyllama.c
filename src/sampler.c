@@ -69,7 +69,7 @@ static void sort_desc(ProbIdx *a, u32 n) {
     }
 }
 
-u32 sample_greedy(float *logits, u32 n_vocab) {
+static u32 sample_greedy(float *logits, u32 n_vocab) {
     u32 best = 0;
     float best_val = logits[0];
     for (u32 i = 1; i < n_vocab; i++) {
@@ -84,10 +84,7 @@ u32 sample_greedy(float *logits, u32 n_vocab) {
 /* Temperature + top-k + top-p + min-p sampling.
  * Modifies logits in-place (caller re-fills before next use).
  * Falls back to greedy when no stochastic filter is active. */
-u32 sample_token(float *logits, u32 n_vocab,
-                  float temperature, u32 top_k, float top_p, float min_p,
-                  float repeat_penalty, u32 repeat_last_n,
-                  float frequency_penalty, float presence_penalty,
+u32 sample_token(float *logits, u32 n_vocab, const SampleParam *p,
                   u32 *history_tokens, u32 n_history) {
 
     /* ---- Repeat penalty: matches llama.cpp's token_count approach.
@@ -96,9 +93,9 @@ u32 sample_token(float *logits, u32 n_vocab,
      *   else:          logit /= repeat_penalty
      *   then:          logit -= count * frequency_penalty + (count > 0) * presence_penalty
      * Applied on logits before temperature scaling. ---- */
-    if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
-        if (repeat_last_n > 0 && history_tokens && n_history > 0) {
-            u32 start = (n_history > repeat_last_n) ? (n_history - repeat_last_n) : 0;
+    if (p->repeat_penalty != 1.0f || p->frequency_penalty != 0.0f || p->presence_penalty != 0.0f) {
+        if (p->repeat_last_n > 0 && history_tokens && n_history > 0) {
+            u32 start = (n_history > p->repeat_last_n) ? (n_history - p->repeat_last_n) : 0;
             for (u32 j = start; j < n_history; j++) {
                 u32 tid = history_tokens[j];
                 if (tid >= n_vocab) continue;
@@ -118,25 +115,25 @@ u32 sample_token(float *logits, u32 n_vocab,
                 }
                 /* Apply penalty (once per unique token) */
                 if (logits[tid] <= 0.0f)
-                    logits[tid] *= repeat_penalty;
+                    logits[tid] *= p->repeat_penalty;
                 else
-                    logits[tid] /= repeat_penalty;
-                logits[tid] -= (float)count * frequency_penalty + (float)(count > 0) * presence_penalty;
+                    logits[tid] /= p->repeat_penalty;
+                logits[tid] -= (float)count * p->frequency_penalty + (float)(count > 0) * p->presence_penalty;
             }
         }
     }
 
-    if (temperature <= DEFAULT_EPS)
+    if (p->temperature <= DEFAULT_EPS)
         return sample_greedy(logits, n_vocab);
 
-    bool no_filter = (top_k == 0) && (top_p >= 1.0f) && (min_p <= DEFAULT_EPS);
+    bool no_filter = (p->top_k == 0) && (p->top_p >= 1.0f) && (p->min_p <= DEFAULT_EPS);
     if (no_filter)
         return sample_greedy(logits, n_vocab);
 
     /* Temperature scaling + softmax.  expf() runs over the whole
      * vocabulary because top-p needs the true normaliser; the survivors
      * are divided by inv_sum afterwards, only for the cap entries. */
-    float inv_temp = 1.0f / temperature;
+    float inv_temp = 1.0f / p->temperature;
     float max_l = logits[0] * inv_temp;
     for (u32 i = 1; i < n_vocab; i++) {
         float v = logits[i] * inv_temp;
@@ -164,7 +161,7 @@ u32 sample_token(float *logits, u32 n_vocab,
      * is quadrupled until the filters are resolved inside it (or the
      * whole vocabulary has been selected) — exact, and still cheap
      * because a peaked distribution resolves at the first cap. */
-    u32 cap = top_k > 0 ? top_k : 64;
+    u32 cap = p->top_k > 0 ? p->top_k : 64;
     if (cap > n_vocab) cap = n_vocab;
     ProbIdx *pi = malloc((u64)cap * sizeof(ProbIdx));
     if (!pi) return sample_greedy(logits, n_vocab);
@@ -180,8 +177,8 @@ u32 sample_token(float *logits, u32 n_vocab,
         cutoff = filled;
 
         /* --- min-p: keep tokens with prob >= min_p * max_prob --- */
-        if (min_p > DEFAULT_EPS && cutoff > 0) {
-            float threshold = min_p * pi[0].prob;
+        if (p->min_p > DEFAULT_EPS && cutoff > 0) {
+            float threshold = p->min_p * pi[0].prob;
             u32 new_cutoff = 0;
             for (u32 i = 0; i < cutoff; i++) {
                 if (pi[i].prob >= threshold)
@@ -193,19 +190,19 @@ u32 sample_token(float *logits, u32 n_vocab,
         }
 
         /* --- top-p (nucleus): smallest set with cumulative prob >= top_p --- */
-        if (top_p < 1.0f) {
+        if (p->top_p < 1.0f) {
             float cum = 0.0f;
             u32 p_cutoff = cutoff;
             for (u32 i = 0; i < cutoff; i++) {
                 cum += pi[i].prob;
-                if (cum >= top_p) { p_cutoff = i + 1; break; }
+                if (cum >= p->top_p) { p_cutoff = i + 1; break; }
             }
             if (p_cutoff < cutoff) cutoff = p_cutoff;
         }
 
         /* top-k already bounds the prefix, so one pass is always enough.
          * Otherwise the filters may want more than `cap` provided. */
-        if (top_k > 0) break;
+        if (p->top_k > 0) break;
         if (cutoff < filled || cap >= n_vocab) break;
         u32 ncap = cap > n_vocab / 4 ? n_vocab : cap * 4;
         ProbIdx *np = realloc(pi, (u64)ncap * sizeof(ProbIdx));
