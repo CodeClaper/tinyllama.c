@@ -750,8 +750,7 @@ static bool cache_build_attn_kvcache(Graph *g, Session *s) {
     KvCache    *kc = p->cache;
 
     kc->head_dim = c->kv_head_dim;
-    size_t bytes = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim
-                   * sizeof(float);
+    size_t bytes = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim * sizeof(float);
 
     u8 used[c->n_layer];
     BackendType lb[c->n_layer];

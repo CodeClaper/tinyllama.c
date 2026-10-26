@@ -448,24 +448,24 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) usage(stdout, EXIT_SUCCESS);
-        else if (!strcmp(arg, "-m")  || !strcmp(arg, "--model")) so.engine.model_path = parse_arg(argc, argv, &i, arg);
-        else if (!strcmp(arg, "-h")  || !strcmp(arg, "--host")) so.host = parse_arg(argc, argv, &i, arg);
-        else if (!strcmp(arg, "-p")  || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-c")  || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-ub") || !strcmp(arg, "--ubatch")) so.n_ubatch = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-m")   || !strcmp(arg, "--model")) so.engine.model_path = parse_arg(argc, argv, &i, arg);
+        else if (!strcmp(arg, "-h")   || !strcmp(arg, "--host")) so.host = parse_arg(argc, argv, &i, arg);
+        else if (!strcmp(arg, "-p")   || !strcmp(arg, "--port")) so.port = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-c")   || !strcmp(arg, "--ctx")) so.ctx_size = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-ub")  || !strcmp(arg, "--ubatch")) so.n_ubatch = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-n")   || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-t")   || !strcmp(arg, "--temp")) so.temperature = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-T")   || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) so.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-tk") || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-P")  || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-rp") || !strcmp(arg, "--repeat-penalty")) so.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-rl") || !strcmp(arg, "--repeat-last-n")) so.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-fp") || !strcmp(arg, "--frequency-penalty")) so.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-pp") || !strcmp(arg, "--presence-penalty")) so.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
-        else if (!strcmp(arg, "-i")  || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
-        else if (!strcmp(arg, "-g")  || !strcmp(arg, "--graph")) so.show_graph = true;
+        else if (!strcmp(arg, "-tp")  || !strcmp(arg, "--topp")) so.top_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-tk")  || !strcmp(arg, "--topk")) so.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-P")   || !strcmp(arg, "--minp")) so.min_p = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rp")  || !strcmp(arg, "--repeat-penalty")) so.repeat_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-rl")  || !strcmp(arg, "--repeat-last-n")) so.repeat_last_n = (u32)parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-fp")  || !strcmp(arg, "--frequency-penalty")) so.frequency_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-pp")  || !strcmp(arg, "--presence-penalty")) so.presence_penalty = parse_float(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-i")   || !strcmp(arg, "--inspect")) { so.inspect = true; so.engine.inspect = true; }
+        else if (!strcmp(arg, "-g")   || !strcmp(arg, "--graph")) so.show_graph = true;
         else {
             fprintf(stderr, "Unkonow option: %s.\n", arg);
             usage(stderr, 2);
