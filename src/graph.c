@@ -703,61 +703,52 @@ static bool arena_plan(Graph *g, Session *s) {
     return true;
 }
 
-/* Build the KV cache inside the plan.  All float storage is carved from
- * one contiguous block allocated on the plan's backend (host for CPU,
- * VRAM for CUDA/Metal) — the same allocator as the activation arena.
- * The KvCache metadata and the per-layer descriptor arrays stay on the
- * host because the executor reads them there before dispatching each
- * OP_ATTN. */
-static bool cache_build(Graph *g, Session *s) {
+/* MLA (DeepSeek) cache: one raw KV ring plus the compressed/index state
+ * buffers, all carved from a single arena on the plan's backend. */
+static bool cache_build_mla_kvcache(Graph *g, Session *s) {
     ArchConfig *c = &s->cfg;
     GraphPlan  *p = g->plan;
-    if (p->cache) return true;              /* already built */
+    KvCache    *kc = p->cache;
 
-    KvCache *kc = scalloc(1, sizeof(KvCache));
-    if (!kc) return false;
-    kc->n_layer   = c->n_layer;
-    kc->n_kv_head = c->n_kv_head;
-    p->cache      = kc;
+    kc->head_dim = c->head_dim;
+    u64 rank        = c->kv_lora_rank ? c->kv_lora_rank : 1;
+    u64 raw_bytes   = (u64)s->ctx_size * c->head_dim * sizeof(float);
+    u64 comp_bytes  = (u64)s->ctx_size * rank * sizeof(float);
+    u64 score_bytes = (u64)s->ctx_size * sizeof(float);
+    size_t total = (size_t)(raw_bytes + comp_bytes * 4 + score_bytes * 2) * c->n_layer;
 
-    bool mla = s->en && s->en->model && s->en->model->arch == ARCH_DEEPSEEK;
-    kc->is_mla = mla;
+    kc->mla = scalloc((u64)c->n_layer, sizeof(MLAKvCache));
+    if (!kc->mla) return false;
+    p->cache_arena[p->backend] = arena_alloc(p->backend, total);
+    if (!p->cache_arena[p->backend]) return false;
 
-    if (mla) {
-        kc->head_dim = c->head_dim;
-        u64 rank        = c->kv_lora_rank ? c->kv_lora_rank : 1;
-        u64 raw_bytes   = (u64)s->ctx_size * c->head_dim * sizeof(float);
-        u64 comp_bytes  = (u64)s->ctx_size * rank * sizeof(float);
-        u64 score_bytes = (u64)s->ctx_size * sizeof(float);
-        size_t total = (size_t)(raw_bytes + comp_bytes * 4 + score_bytes * 2) * c->n_layer;
-
-        kc->mla = scalloc((u64)c->n_layer, sizeof(MLAKvCache));
-        if (!kc->mla) return false;
-        p->cache_arena[p->backend] = arena_alloc(p->backend, total);
-        if (!p->cache_arena[p->backend]) return false;
-
-        u8 *base = p->cache_arena[p->backend];
-        for (u32 i = 0; i < c->n_layer; i++) {
-            MLAKvCache *mc = &kc->mla[i];
-            mc->cap_raw        = s->ctx_size;
-            mc->compress_ratio = c->kv_lora_rank > 0 ? c->head_dim / c->kv_lora_rank : 2;
-            mc->comp_cap       = s->ctx_size;
-            mc->raw_kv            = (float *)base; base += raw_bytes;
-            mc->attn_comp_kv      = (float *)base; base += comp_bytes;
-            mc->attn_state_kv     = (float *)base; base += comp_bytes;
-            mc->attn_state_score  = (float *)base; base += score_bytes;
-            mc->index_comp_kv     = (float *)base; base += comp_bytes;
-            mc->index_state_kv    = (float *)base; base += comp_bytes;
-            mc->index_state_score = (float *)base; base += score_bytes;
-        }
-        p->kvcache_size[p->backend] = total;
-        return true;
+    u8 *base = p->cache_arena[p->backend];
+    for (u32 i = 0; i < c->n_layer; i++) {
+        MLAKvCache *mc = &kc->mla[i];
+        mc->cap_raw        = s->ctx_size;
+        mc->compress_ratio = c->kv_lora_rank > 0 ? c->head_dim / c->kv_lora_rank : 2;
+        mc->comp_cap       = s->ctx_size;
+        mc->raw_kv            = (float *)base; base += raw_bytes;
+        mc->attn_comp_kv      = (float *)base; base += comp_bytes;
+        mc->attn_state_kv     = (float *)base; base += comp_bytes;
+        mc->attn_state_score  = (float *)base; base += score_bytes;
+        mc->index_comp_kv     = (float *)base; base += comp_bytes;
+        mc->index_state_kv    = (float *)base; base += comp_bytes;
+        mc->index_state_score = (float *)base; base += score_bytes;
     }
+    p->kvcache_size[p->backend] = total;
+    return true;
+}
 
-    /* Standard attention: allocate K/V only for layers that actually
-     * carry an OP_ATTN node (Qwen3.5 is hybrid, so most layers have no
-     * KV cache at all), and place each layer's cache on the backend
-     * that executes that layer. */
+/* Standard attention: allocate K/V only for layers that actually
+ * carry an OP_ATTN node (Qwen3.5 is hybrid, so most layers have no
+ * KV cache at all), and place each layer's cache on the backend
+ * that executes that layer. */
+static bool cache_build_attn_kvcache(Graph *g, Session *s) {
+    ArchConfig *c = &s->cfg;
+    GraphPlan  *p = g->plan;
+    KvCache    *kc = p->cache;
+
     kc->head_dim = c->kv_head_dim;
     size_t bytes = (size_t)s->ctx_size * c->n_kv_head * c->kv_head_dim
                    * sizeof(float);
@@ -797,6 +788,30 @@ static bool cache_build(Graph *g, Session *s) {
         kc->std[l].cap = s->ctx_size;
     }
     return true;
+}
+
+/* Build the KV cache inside the plan.  All float storage is carved from
+ * one contiguous block allocated on the plan's backend (host for CPU,
+ * VRAM for CUDA/Metal) — the same allocator as the activation arena.
+ * The KvCache metadata and the per-layer descriptor arrays stay on the
+ * host because the executor reads them there before dispatching each
+ * OP_ATTN. */
+static bool cache_build(Graph *g, Session *s) {
+    ArchConfig *c = &s->cfg;
+    GraphPlan  *p = g->plan;
+    if (p->cache) return true;              /* already built */
+
+    KvCache *kc = scalloc(1, sizeof(KvCache));
+    if (!kc) return false;
+    kc->n_layer   = c->n_layer;
+    kc->n_kv_head = c->n_kv_head;
+    p->cache      = kc;
+
+    bool mla = s->en && s->en->model && s->en->model->arch == ARCH_DEEPSEEK;
+    kc->is_mla = mla;
+
+    return mla ? cache_build_mla_kvcache(g, s)
+               : cache_build_attn_kvcache(g, s);
 }
 
 /* Release the plan's KV cache storage on every backend it used. */
