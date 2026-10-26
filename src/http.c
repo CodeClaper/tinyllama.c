@@ -76,6 +76,26 @@ char *json_get_string(char *json, const char *key, int *len) {
     return NULL;
 }
 
+/* Return 1 if key exists with a literal true value, else 0. */
+int json_get_bool(char *json, const char *key) {
+    char search[128];
+    int slen = snprintf(search, sizeof(search), "\"%s\"", key);
+    if (slen < 0 || slen >= (int)sizeof(search)) return 0;
+
+    char *pos = json;
+    while ((pos = strstr(pos, search)) != NULL) {
+        pos += slen;
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        if (*pos != ':') continue;
+        pos++;
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        return strncmp(pos, "true", 4) == 0;
+    }
+    return 0;
+}
+
 /* Copy src[0..len] to dst, unescaping JSON escape sequences.
  * Returns the number of bytes written (excluding NUL). */
 int json_unescape(char *dst, const char *src, int len) {
@@ -125,6 +145,15 @@ int json_escape_str(char *out, int out_len, const char *in, int in_len) {
     return w;
 }
 
+static void write_all(int fd, const char *buf, int len) {
+    int off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, buf + off, (size_t)(len - off));
+        if (w <= 0) break;
+        off += (int)w;
+    }
+}
+
 /* Send a minimal HTTP response with a JSON body. */
 void http_respond(int fd, int status, const char *status_msg,
                   const char *body) {
@@ -137,7 +166,26 @@ void http_respond(int fd, int status, const char *status_msg,
                       "Connection: close\r\n"
                       "\r\n",
                       status, status_msg, body_len);
-    (void)write(fd, hdr, hl);
+    write_all(fd, hdr, hl);
     if (body && body_len > 0)
-        (void)write(fd, body, body_len);
+        write_all(fd, body, body_len);
+}
+
+/* Start an SSE (server-sent events) response.  The connection is closed
+ * when the stream ends, which delimits the body for the client. */
+void http_stream_start(int fd, int status, const char *status_msg) {
+    char hdr[256];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 %d %s\r\n"
+                      "Content-Type: text/event-stream\r\n"
+                      "Cache-Control: no-cache\r\n"
+                      "X-Accel-Buffering: no\r\n"
+                      "Connection: close\r\n"
+                      "\r\n",
+                      status, status_msg);
+    write_all(fd, hdr, hl);
+}
+
+void http_stream_write(int fd, const char *data, int len) {
+    write_all(fd, data, len);
 }

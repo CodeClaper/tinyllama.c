@@ -72,6 +72,64 @@ static void signal_callback(EventLoop *el, int fd, int mask, void *privdata) {
     el->stop = true;
 }
 
+/* Length of the longest prefix of buf[0..len] that ends on a complete
+ * UTF-8 code point.  Token pieces can split a multibyte character, so we
+ * hold back the trailing partial sequence until the next token arrives. */
+static int utf8_complete_prefix(const char *buf, int len) {
+    int i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)buf[i];
+        int need;
+        if (c < 0x80)                need = 1;
+        else if ((c & 0xE0) == 0xC0) need = 2;
+        else if ((c & 0xF0) == 0xE0) need = 3;
+        else if ((c & 0xF8) == 0xF0) need = 4;
+        else { i++; continue; }
+        if (i + need > len) break;
+        i += need;
+    }
+    return i;
+}
+
+static void sse_emit_role(int fd, long created) {
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"default\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"finish_reason\":null}]}\n\n",
+        created, created);
+    if (n > 0)
+        http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
+}
+
+static void sse_emit_content(int fd, long created, const char *text, int len) {
+    char esc[16384];
+    int el = json_escape_str(esc, (int)sizeof(esc) - 1, text, len);
+    esc[el] = '\0';
+
+    char buf[16384 + 512];
+    int n = snprintf(buf, sizeof(buf),
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"default\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"content\":\"%s\"},\"finish_reason\":null}]}\n\n",
+        created, created, esc);
+    if (n > 0)
+        http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
+}
+
+static void sse_emit_done(int fd, long created, const char *finish_reason) {
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf),
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"default\",\"choices\":[{\"index\":0,"
+        "\"delta\":{},\"finish_reason\":\"%s\"}]}\n\n"
+        "data: [DONE]\n\n",
+        created, created, finish_reason);
+    if (n > 0)
+        http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
+}
+
 static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
     Server *server = (Server *)privdata;
@@ -198,9 +256,13 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     }
 
     /* 5. Generate. */
+    bool stream = json_get_bool(body, "stream");
     u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
     char resp_body[65536];
     int  resp_used = 0;
+    char utf8_pending[8];
+    int  utf8_pending_len = 0;
+    time_t now = time(NULL);
 
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab,
                                     s->temperature, s->top_k, s->top_p, s->min_p,
@@ -209,17 +271,45 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                                     s->tokens, s->n_tokens);
     u32 n_gen = 0;
 
+    if (stream) {
+        http_stream_start(fd, 200, "OK");
+        sse_emit_role(fd, (long)now);
+    }
+
     for (u32 i = 0; i < max_tokens; i++) {
         fputc('.', stdout); fflush(stdout);
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
-            int remaining = (int)sizeof(resp_body) - resp_used - 1;
-            int added = s->ops.decode
-                ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
-                                resp_body + resp_used, remaining)
-                : 0;
-            if (added > 0) resp_used += added;
+            if (stream) {
+                char piece[2048];
+                int plen = s->ops.decode
+                    ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
+                                    piece, (int)sizeof(piece) - 1)
+                    : 0;
+                if (plen < 0) plen = 0;
+                if (plen > (int)sizeof(piece) - 1) plen = (int)sizeof(piece) - 1;
+
+                char merged[2048 + 8];
+                int mlen = utf8_pending_len;
+                memcpy(merged, utf8_pending, (size_t)utf8_pending_len);
+                if (plen > (int)sizeof(merged) - mlen)
+                    plen = (int)sizeof(merged) - mlen;
+                memcpy(merged + mlen, piece, (size_t)plen);
+                mlen += plen;
+
+                int emit = utf8_complete_prefix(merged, mlen);
+                if (emit > 0) sse_emit_content(fd, (long)now, merged, emit);
+                utf8_pending_len = mlen - emit;
+                memcpy(utf8_pending, merged + emit, (size_t)utf8_pending_len);
+            } else {
+                int remaining = (int)sizeof(resp_body) - resp_used - 1;
+                int added = s->ops.decode
+                    ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
+                                    resp_body + resp_used, remaining)
+                    : 0;
+                if (added > 0) resp_used += added;
+            }
         }
         n_gen++;
         /* Incremental decode: one new row at the current position;
@@ -233,9 +323,22 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                                     s->tokens, s->n_tokens);
     }
     fputc('\n', stdout);
+
+    bool hit_eos = next_token == (u32)v->eos_id;
+
+    /* 6a. Stream the response as SSE events. */
+    if (stream) {
+        if (utf8_pending_len > 0)
+            sse_emit_content(fd, (long)now, utf8_pending, utf8_pending_len);
+        sse_emit_done(fd, (long)now, hit_eos ? "stop" : "length");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
     resp_body[resp_used] = '\0';
 
-    /* 6. Build OpenAI-compatible JSON response. */
+    /* 6b. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
     /* JSON-escape the generated text.  Reserve 256 bytes for the
      * JSON wrapper so the final snprintf can't overflow json_buf. */
@@ -244,7 +347,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                                   resp_body, resp_used);
     escaped[esc_len] = '\0';
 
-    time_t now = time(NULL);
     (void)snprintf(json_buf, sizeof(json_buf),
                   "{"
                   "\"id\":\"chatcmpl-%ld\","
@@ -267,7 +369,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
                   "}",
                   (long)now, (long)now,
                   escaped,
-                  (next_token == (u32)v->eos_id) ? "stop" : "length",
+                  hit_eos ? "stop" : "length",
                   n_prompt, n_gen, n_prompt + (int)n_gen);
 
     http_respond(fd, 200, "OK", json_buf);
