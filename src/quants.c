@@ -280,32 +280,12 @@ const float iq3_s_grid[] = {
 
 /* ---- K-quant scale helpers ---------------------------------------- */
 
-/* Extract a 6-bit sub-block scale from K-quant packed scale bytes.
- * 12 bytes encode 16 × 6-bit values. Each group of 3 bytes encodes 4 scales. */
-i8 k_scale_6bit(const u8 *scales, u32 sb) {
-    u32 g  = sb / 4;          /* group of 4 sub-blocks → 3 bytes */
-    u32 p  = sb & 3;          /* position within group              */
-    const u8 *b = scales + g * 3;
-    u32 v = (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16);
-    return (i8)((i32)((v >> (6 * p)) & 0x3F) - 32);
-}
-
-/* Same as k_scale_6bit but returns unsigned 0..63 (used by Q3_K, Q4_K, Q6_K). */
-u8 k_scale_6bit_u(const u8 *scales, u32 sb) {
-    u32 g  = sb / 4;
-    u32 p  = sb & 3;
-    const u8 *b = scales + g * 3;
-    u32 v = (u32)b[0] | ((u32)b[1] << 8) | ((u32)b[2] << 16);
-    return (u8)((v >> (6 * p)) & 0x3F);
-}
-
 /* Q4_K / Q5_K scale-min unpacking: 12 bytes → 8 × 6-bit scales + 8 × 6-bit mins.
  * Layout (each letter is a 6-bit field, uppercase=scale, lowercase=min):
  *   0:  EE AAAAAA    1:  FF BBBBBB    2:  GG CCCCCC    3:  HH DDDDDD
  *   4:  ee aaaaaa    5:  ff bbbbbb    6:  gg cccccc    7:  hh dddddd
  *   8:  eeee EEEE    9:  ffff FFFF   10:  gggg GGGG   11:  hhhh HHHH   */
-void q4k_scale_min(const u8 *s, u32 sb,
-                                  u8 *scale, u8 *min) {
+void q4k_scale_min(const u8 *s, u32 sb, u8 *scale, u8 *min) {
     /* sb ∈ [0, 7] — super-block index                                       */
     u32 d_byte  = sb & 3;         /* byte 0-3  in the first 4-byte group   */
     u32 m_byte  = sb & 3;         /* byte 4-7  in the second group         */
