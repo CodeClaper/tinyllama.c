@@ -1154,8 +1154,7 @@ static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
 #ifdef GPU_BUILD
             if (node->backend == BACKEND_CUDA) {
                 /* Token ids live in the same arena as the embedding op. */
-                CHECK(cudaMemcpy(node->data, b->tokens, (size_t)n * sizeof(u32),
-                                 cudaMemcpyHostToDevice));
+                CHECK(cudaMemcpy(node->data, b->tokens, (size_t)n * sizeof(u32), cudaMemcpyHostToDevice));
             } else
 #endif
                 memcpy(node->data, b->tokens, (size_t)n * sizeof(u32));
@@ -1291,9 +1290,7 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
     while (done < n_tokens) {
         u32 chunk = n_tokens - done;
         if (chunk > s->n_ubatch) chunk = s->n_ubatch;
-
-        memcpy(s->tokens + pos + done, tokens + done,
-               (size_t)chunk * sizeof(u32));
+        memcpy(s->tokens + pos + done, tokens + done, (size_t)chunk * sizeof(u32));
         GraphBatch batch = {
             .tokens = s->tokens + pos + done,
             .pos    = pos + done,
