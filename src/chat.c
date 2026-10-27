@@ -9,7 +9,6 @@
 #include "mm.h"
 #include "core.h"
 #include "graph.h"
-#include "tokenizer.h"
 #include "sampler.h"
 #include "slog.h"
 #include "linenoise.h"
@@ -284,13 +283,12 @@ int main(int argc, char *argv[]) {
             if (n_prompt <= 0) fatal("Context full — use /clear to reset");
         }
         double t_prefill = time_sec();
-        bool ok = graph_execute(session, prompt_tokens,
-                                (u32)n_prompt, session->logits);
+        bool ok = graph_execute(session, prompt_tokens, (u32)n_prompt, session->logits);
         if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
-        u32 next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
-                    session->tokens, session->n_tokens);
+        u32 next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample, session->sample,
+                                      session->tokens, session->n_tokens);
         double ttft_ms = (time_sec() - t_prefill) * 1000.0;
 
         /* Generate. */
@@ -312,9 +310,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "\n[context full — /clear to continue]\n");
                 break;
             }
-            if (!graph_execute(session, &next_token, 1,
-                               session->logits))
-                break;
+            if (!graph_execute(session, &next_token, 1, session->logits)) break;
             next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
                                        session->tokens, session->n_tokens);
         }

@@ -245,8 +245,7 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
      * extends the session KV cache. */
     u32 room = s->ctx_size - s->n_tokens;
     if (n_prompt > (int)room) n_prompt = (int)room;
-    bool ok = n_prompt > 0 &&
-              graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
+    bool ok = n_prompt > 0 && graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
                      "{\"error\":\"Forward pass failed\"}");
