@@ -171,9 +171,9 @@ static Graph *qwen25_graph_build(Session *s, u32 n_tokens) {
 
     if (!s || !w || !ws|| n_tokens == 0 || n_tokens > s->ctx_size) return NULL;
 
-    /* Dims for the matmul direction flags.  Each trans below must mirror
-     * the expression used by qwen25_prefill / qwen25_generate for the
-     * same weight, otherwise the executor dequantises the wrong axis. */
+    /* Dims for the matmul direction flags.  Each trans below must match
+     * the weight's storage layout (dim[0] == input width means [out, in]),
+     * otherwise the executor dequantises the wrong axis. */
     u32 n_embd = c->n_embd;
     u32 q_dim  = c->n_head  * c->head_dim;
     u32 fh     = ws->ffn_hidden;

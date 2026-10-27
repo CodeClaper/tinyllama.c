@@ -477,11 +477,11 @@ void graph_free(Graph *g) {
  * the history is never recomputed, so per-token cost stays flat.
  *
  * Sink nodes (no consumers — the LM head in practice) are computed for
- * the batch's last row only, mirroring qwen25_prefill, which runs its
- * final norm + LM head on the last position only.
+ * the batch's last row only, so a prompt chunk and an incremental decode
+ * step both publish logits solely for their newest position.
  *
- * The graph is built once at capacity (ctx_size rows); batches of any
- * n <= capacity reuse it.                                              */
+ * The graph is built once at n_ubatch capacity; batches of any n <=
+ * n_ubatch reuse it.                                                   */
 
 /* ---------------------------------------------------------------- *
  * Static arena plan
