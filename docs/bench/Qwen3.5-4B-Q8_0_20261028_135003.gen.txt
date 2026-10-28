@@ -1,0 +1,5 @@
+<think>
+
+</think>
+
+I am **Qwen3.5**, the latest large language model developed by Tongyi Lab. I'm designed to assist with a wide range of tasks, from answering questions and writing stories or documents to analyzing data, coding, and logical reasoning. How can I help you today?

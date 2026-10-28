@@ -1,0 +1,61 @@
+[2026-10-28 13:50:03.833612][102661][WARN]:	No output.weight found, using tied embeddings (output = token_embd)
+[2026-10-28 13:50:03.811332][102661][INFO]:	Loading model: /home/zc/Work/model/Qwen3.5-4B-Q8_0.gguf
+[2026-10-28 13:50:03.833680][102661][INFO]:	Loaded model (qwen35)
+[2026-10-28 13:50:03.833862][102661][INFO]:	ArchConfig: arch=qwen3 n_embd=2560 n_head=16 n_kv_head=4 head_dim=256 kv_head_dim=256 rope_dim=64 n_layer=32 n_vocab=248320
+[2026-10-28 13:50:04.039250][102661][INFO]:	GPU auto: free=7333.1 MB budget=6254.2 MB -> n_gpu_layers=32/32
+[2026-10-28 13:50:04.040340][102661][INFO]:	Qwen3 SSM: n_k=16 n_v=32 head_k=128 head_v=128 key_dim=2048 val_dim=4096 fused=8192 conv_k=4 layers=24 (state_per_layer=2.1 MB)
+[2026-10-28 13:50:04.040346][102661][INFO]:	Qwen3 init: n_embd=2560 n_head=16 n_kv_head=4 head_dim=256 kv_head_dim=256 n_layer=32 n_vocab=248320 ctx_size=4096
+[2026-10-28 13:50:04.040349][102661][INFO]:	Qwen3 init: rope_theta=10000000.000000
+[2026-10-28 13:50:04.040350][102661][INFO]:	Session created: ctx_size=4096 n_ubatch=512 n_layer=32 n_embd=2560 n_head=16 head_dim=256
+[2026-10-28 13:50:04.040352][102661][INFO]:	Tokenizing input...
+[2026-10-28 13:50:04.040366][102661][INFO]:	Prompt tokens: 12
+[2026-10-28 13:50:04.486635][102661][INFO]:	GraphPlan: backend=cuda n_gpu_layers=32 nodes=612 state=48 ctx_size=4096 n_ubatch=512
+[2026-10-28 13:50:04.486653][102661][INFO]:	GraphPlan[cuda]: weights=4264.3 MB arena=220.1 MB kvcache=256.0 MB total=4740.4 MB
+[2026-10-28 13:50:04.486674][102661][INFO]:	Running benchmark: 1 iterations, 128 tokens each
+.............................................................[1/1] TTFT: 244.6 ms | Prefill: 244.6 ms | Generate: 1681.3 ms (61 tokens, 36.3 tok/s)    
+graph timing: total 0.064s over 37882 node execs
+  +-----------+----------+-------+-------------------------------+
+  | op        |    total |   pct | calls / avg                   |
+  +-----------+----------+-------+-------------------------------+
+  | embed     |   0.001s |  2.2% | 62 / 0.023 ms                 |
+  | rms_norm  |   0.012s | 17.9% | 5022 / 0.002 ms               |
+  | matmul    |   0.025s | 38.9% | 15438 / 0.002 ms              |
+  | attn      |   0.003s |  4.1% | 496 / 0.005 ms                |
+  | rope      |   0.001s |  2.1% | 992 / 0.001 ms                |
+  | silu      |   0.006s | 10.1% | 4960 / 0.001 ms               |
+  | add/mul   |   0.010s | 15.4% | 7440 / 0.001 ms               |
+  | gate      |   0.001s |  1.1% | 496 / 0.001 ms                |
+  | ssm       |   0.005s |  8.2% | 2976 / 0.002 ms               |
+  +-----------+----------+-------+-------------------------------+
+graph arena[cuda]: 220.1 MB
+
+
+===== TinyLLaMA Benchmark =====
+Model:              /home/zc/Work/model/Qwen3.5-4B-Q8_0.gguf
+Architecture:       qwen35
+Device:             CUDA
+Context Size:       4096
+Micro-batch:        512
+Threads:            12
+Prompt Tokens:      12
+Target Tokens:      128
+Repeats:            1
+Temperature:        0.80
+Top-k:              40
+Top-p:              0.90
+Min-p:              0.05
+Repeat Penalty:     1.10
+Repeat Last N:      64
+Frequency Penalty:  0.00
+Presence Penalty:   0.00
+────────────────────────────────────────────────────────────────────────────────────────────────
+[1/1] TTFT:    244.6 ms | Prefill:    244.6 ms (   49.1 tok/s) | Generate:   1681.3 ms (61 tok,    36.3 tok/s)
+────────────────────────────────────────────────────────────────────────────────────────────────
+Avg TTFT:          244.6 ms
+Avg Prefill:       244.6 ms (   49.1 tok/s)
+Avg Generate:     1681.3 ms (   36.3 tok/s)
+Min/Max TTFT:     244.6 / 244.6 ms
+Min/Max Generate: 1681.3 / 1681.3 ms
+Peak Memory:    4442 MB
+════════════════════════════════════════════════════════════════════════════════════════════════
+[2026-10-28 13:50:06.413120][102661][INFO]:	Output written to /home/zc/Work/c/tinyllama.c/docs/bench/Qwen3.5-4B-Q8_0_20261028_135003.gen.txt
