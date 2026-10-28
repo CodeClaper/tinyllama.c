@@ -1,7 +1,27 @@
 #include <stdlib.h>
 #include <math.h>
+#include <pthread.h>
 #include "def.h"
 #include "sampler.h"
+
+/* Per-thread xorshift state for stochastic sampling.  rand() keeps its
+ * state in a single global, which would make concurrent request workers
+ * race; a thread-local generator gives each worker an independent
+ * stream and needs no lock on the sampling hot path. */
+static _Thread_local u32 g_rng_state;
+
+static float rng_float(void) {
+    if (g_rng_state == 0) {
+        g_rng_state = (u32)(uintptr_t)pthread_self() ^ 0x9e3779b9u;
+        if (g_rng_state == 0) g_rng_state = 0x9e3779b9u;
+    }
+    u32 x = g_rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g_rng_state = x;
+    return (float)(x >> 8) * (1.0f / 16777216.0f);
+}
 
 typedef struct {
     float prob;
@@ -219,7 +239,7 @@ u32 sample_token(float *logits, u32 n_vocab, const SampleParam *p,
     float rn_inv = renorm > 0.0f ? 1.0f / renorm : 1.0f;
 
     /* Sample. */
-    float r = (float)rand() / (float)RAND_MAX;
+    float r = rng_float();
     float cdf = 0.0f;
     for (u32 i = 0; i < cutoff; i++) {
         cdf += pi[i].prob * rn_inv;

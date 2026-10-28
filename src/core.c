@@ -1478,6 +1478,7 @@ void model_close(Model *m) {
  * vocab (unless inspect-only) and weights. */
 Engine *engine_open(EngineOptons *opts) {
     Engine *en = smalloc(sizeof(*en));
+    en->auto_gpu_layers = -1;
     acquire_instance_lock();
     en->model = model_load(opts->model_path);
     if (!opts->inspect) en->vocab = vocab_load(en->model);
@@ -1602,8 +1603,26 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
 #if defined(GPU_BUILD)
 /* Approximate how many leading layers fit in the available device
  * memory: per-layer weights + (attention layers only) KV + a share of
- * the activation arena, leaving headroom for the CUDA context. */
-static int session_auto_gpu_layers(Session *s) {
+ * the activation arena, leaving headroom for the CUDA context.
+ *
+ * `n_parallel` is the number of request slots that will each own their
+ * own KV cache and activation arena.  Those two costs are therefore
+ * multiplied by n_parallel when budgeting; weights are shared through
+ * the global device weight cache and counted only once.
+ *
+ * The result is cached on the Engine: it must be computed before the
+ * first session allocates device memory, otherwise later slots would
+ * see a reduced free-memory figure and pick a different depth. */
+static int session_auto_gpu_layers(Session *s, int n_parallel) {
+    if (n_parallel < 1) n_parallel = 1;
+
+    Engine *en = s->en;
+    if (en->auto_gpu_layers >= 0 &&
+        en->auto_gpu_layers_ctx      == s->ctx_size &&
+        en->auto_gpu_layers_ubatch   == s->n_ubatch &&
+        en->auto_gpu_layers_parallel == n_parallel)
+        return en->auto_gpu_layers;
+
     size_t free_b = 0, total_b = 0;
     gpu_mem_info(&free_b, &total_b);
     (void)total_b;
@@ -1621,9 +1640,14 @@ static int session_auto_gpu_layers(Session *s) {
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (te) used += (size_t)te->bytes;
 
-    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim * sizeof(float) * 2;
+    /* Per-slot state: every parallel slot keeps its own KV cache and
+     * activation arena, so reserve n_parallel copies. */
+    size_t slots = (size_t)n_parallel;
+    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim
+                * sizeof(float) * 2 * slots;
     u32 arena_rows = s->n_ubatch ? s->n_ubatch : s->ctx_size;
-    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float) * 36.0;
+    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float)
+                        * 36.0 * (double)slots;
     size_t arena_layer = (size_t)(arena_full / (double)L);
 
     int n = 0;
@@ -1648,13 +1672,23 @@ static int session_auto_gpu_layers(Session *s) {
         size_t extra = tout ? (size_t)tout->bytes : 0;
         if (used + extra > budget) n--;
     }
-    slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB -> n_gpu_layers=%d/%u",
-         (double)free_b / 1048576.0, (double)budget / 1048576.0, n, L);
+    slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB slots=%d -> "
+         "n_gpu_layers=%d/%u",
+         (double)free_b / 1048576.0, (double)budget / 1048576.0,
+         n_parallel, n, L);
+
+    en->auto_gpu_layers          = n;
+    en->auto_gpu_layers_ctx      = s->ctx_size;
+    en->auto_gpu_layers_ubatch   = s->n_ubatch;
+    en->auto_gpu_layers_parallel = n_parallel;
+
     return n;
 }
 #endif /* GPU_BUILD */
 
-static void session_resolve_gpu_layers(Session *s, int requested) {
+static void session_resolve_gpu_layers(Session *s, int requested,
+                                       int n_parallel) {
+    (void)n_parallel;
 #if defined(GPU_BUILD)
     if (!gpu_available()) {
         if (requested > 0)
@@ -1663,7 +1697,7 @@ static void session_resolve_gpu_layers(Session *s, int requested) {
         return;
     }
     int L   = (int)s->cfg.n_layer;
-    int fit = session_auto_gpu_layers(s);
+    int fit = session_auto_gpu_layers(s, n_parallel);
     if (requested < 0) {
         s->n_gpu_layers = fit;
     } else {
@@ -1693,9 +1727,11 @@ static void session_resolve_gpu_layers(Session *s, int requested) {
 /* Create a session: sampling parameters, thread pool, architecture
  * config, and the ops table for the detected architecture.
  * n_gpu_layers: <0 auto-fit, 0 CPU-only, >0 number of leading layers
- * to place on the GPU. */
+ * to place on the GPU.
+ * n_parallel: number of concurrent sessions that will share the model;
+ * the auto-fit budget reserves n_parallel copies of per-session state. */
 Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
-                        int nthreads, int n_gpu_layers) {
+                        int nthreads, int n_gpu_layers, int n_parallel) {
     if (!en || ctx_size == 0) return NULL;
 
     Session *s = smalloc(sizeof(*s));
@@ -1720,7 +1756,7 @@ Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
 
     /* Resolve -ngl before ops.init(): recurrent state buffers are
      * allocated on the backend their layer will execute on. */
-    session_resolve_gpu_layers(s, n_gpu_layers);
+    session_resolve_gpu_layers(s, n_gpu_layers, n_parallel);
 
     /* Bind the right ops table. */
     switch (en->model->arch) {

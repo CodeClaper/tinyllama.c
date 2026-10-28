@@ -98,6 +98,7 @@ typedef struct {
     int default_tokens;
     int nthread;
     int n_gpu_layers;
+    int n_parallel;
     SampleParam sample;
     bool inspect;
     bool show_graph;
@@ -243,6 +244,15 @@ typedef struct {
     Model *model;
     Vocab *vocab;
     Weights *weights;
+
+    /* Cached result of the -ngl auto-fit calculation.  The fit depends
+     * on ctx_size / n_ubatch / the number of parallel slots, and must be
+     * resolved once before any session allocates device memory so every
+     * slot gets the same offload depth.  -1 means "not resolved yet". */
+    int  auto_gpu_layers;
+    u32  auto_gpu_layers_ctx;
+    u32  auto_gpu_layers_ubatch;
+    int  auto_gpu_layers_parallel;
 } Engine;
 
 /* ================================================================

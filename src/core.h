@@ -30,7 +30,7 @@ void engine_summary(Engine *en);
 
 /* ---- Session (inference context) lifecycle ---- */
 Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
-                        int nthreads, int n_gpu_layers);
+                        int nthreads, int n_gpu_layers, int n_parallel);
 void session_free(Session *s);
 
 /* ---- Vocab / BPE lookups ---- */

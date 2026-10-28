@@ -30,11 +30,46 @@
 #include "graph.h"
 
 #define JSON_WRAPPER_RESERVE 256 
+#define DEFAULT_N_PARALLEL   2
+#define JOB_QUEUE_CAP        256
+
+/* A parsed-but-not-yet-executed request.  The body is copied out of the
+ * connection's read buffer so the worker owns it for the whole run. */
+typedef struct {
+    int   fd;
+    char *body;
+} ClientJob;
+
+typedef struct WorkerPool WorkerPool;
+
+typedef struct {
+    WorkerPool *pool;
+    int         id;
+    pthread_t   thread;
+} Worker;
+
+struct WorkerPool {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    ClientJob       queue[JOB_QUEUE_CAP];
+    int             head;
+    int             tail;
+    int             count;
+    bool            stop;
+
+    Engine         *engine;
+    Session       **sessions;   /* one per worker, indexed by worker id */
+    Worker         *workers;
+    int             n_workers;
+};
+
 typedef struct  {
-    Engine *engine;
-    Session *session;
-    EventLoop *el;
-    int serverfd;
+    Engine      *engine;
+    Session    **sessions;
+    int          n_parallel;
+    EventLoop   *el;
+    int          serverfd;
+    WorkerPool  *pool;
 } Server;
 
 static volatile sig_atomic_t g_signal_count = 0;
@@ -130,48 +165,10 @@ static void sse_emit_done(int fd, long created, const char *finish_reason) {
         http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
 }
 
-static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
-    UNUSED(mask);
-    Server *server = (Server *)privdata;
-    Session *s = server->session;
-    Vocab   *v = server->engine->vocab;
-
-    char buf[8192];
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        if (n < 0) slog_errno("Client read error");
-        delete_file_event(el, fd, ELOOP_READABLE);
-        close(fd);
-        return;
-    }
-    buf[n] = '\0';
-
-    /* 1. Parse HTTP request. */
-    char *body = http_body(buf, (int)n);
-    if (!body) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"Incomplete HTTP request\"}");
-        delete_file_event(el, fd, ELOOP_READABLE);
-        close(fd);
-        return;
-    }
-
-    /* Check Content-Length and read remaining body if needed. */
-    {
-        const char *cl_str = http_header(buf, "Content-Length");
-        int cl = cl_str[0] ? atoi(cl_str) : 0;
-        int body_len = (int)((buf + n) - body);
-        if (cl > 0 && body_len < cl) {
-            int to_read = cl - body_len;
-            if (to_read > 0 && (int)sizeof(buf) - n > to_read) {
-                ssize_t more = read(fd, buf + n, to_read);
-                if (more > 0) {
-                    n += more;
-                    buf[n] = '\0';
-                }
-            }
-        }
-    }
+/* Execute one request on a worker thread using its dedicated session.
+ * `body` is the NUL-terminated HTTP body copied by the reader thread. */
+static void handle_request(Engine *engine, Session *s, int fd, char *body) {
+    Vocab   *v = engine->vocab;
 
     /* 2. Extract messages from JSON body. */
     char user_buf[4096]  = {0};
@@ -222,7 +219,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     if (!user_msg[0]) {
         http_respond(fd, 400, "Bad Request",
                      "{\"error\":\"No user message found\"}");
-        delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
@@ -234,7 +230,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     if (n_prompt == 0) {
         http_respond(fd, 400, "Bad Request",
                     "{\"error\":\"No valid tokens in input\"}");
-        delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
@@ -249,7 +244,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
                      "{\"error\":\"Forward pass failed\"}");
-        delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
@@ -322,7 +316,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         if (utf8_pending_len > 0)
             sse_emit_content(fd, (long)now, utf8_pending, utf8_pending_len);
         sse_emit_done(fd, (long)now, hit_eos ? "stop" : "length");
-        delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
@@ -365,9 +358,156 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
 
     http_respond(fd, 200, "OK", json_buf);
 
-    delete_file_event(el, fd, ELOOP_READABLE);
     close(fd);
 }
+
+/* ---- Request worker pool -----------------------------------------
+ * The event loop only accepts connections and reads complete requests;
+ * inference runs on n_parallel worker threads, each owning a private
+ * Session (tokens, logits, KV cache, graph arena) so requests no longer
+ * reset each other's state. */
+
+static bool worker_pool_submit(WorkerPool *pool, int fd, char *body) {
+    bool ok = true;
+    pthread_mutex_lock(&pool->lock);
+    if (pool->stop || pool->count == JOB_QUEUE_CAP) {
+        ok = false;
+    } else {
+        pool->queue[pool->tail].fd   = fd;
+        pool->queue[pool->tail].body = body;
+        pool->tail = (pool->tail + 1) % JOB_QUEUE_CAP;
+        pool->count++;
+        pthread_cond_signal(&pool->cond);
+    }
+    pthread_mutex_unlock(&pool->lock);
+    return ok;
+}
+
+static void *worker_main(void *arg) {
+    Worker *w = (Worker *)arg;
+    WorkerPool *pool = w->pool;
+    Session *s = pool->sessions[w->id];
+
+    for (;;) {
+        pthread_mutex_lock(&pool->lock);
+        while (pool->count == 0 && !pool->stop)
+            pthread_cond_wait(&pool->cond, &pool->lock);
+        if (pool->count == 0 && pool->stop) {
+            pthread_mutex_unlock(&pool->lock);
+            break;
+        }
+        ClientJob job = pool->queue[pool->head];
+        pool->head = (pool->head + 1) % JOB_QUEUE_CAP;
+        pool->count--;
+        pthread_mutex_unlock(&pool->lock);
+
+        /* Drain remaining work even after shutdown was requested. */
+        handle_request(pool->engine, s, job.fd, job.body);
+        sfree(job.body);
+    }
+    return NULL;
+}
+
+static WorkerPool *worker_pool_create(Engine *engine, Session **sessions, int n) {
+    WorkerPool *pool = scalloc(1, sizeof(*pool));
+    pthread_mutex_init(&pool->lock, NULL);
+    pthread_cond_init(&pool->cond, NULL);
+    pool->engine    = engine;
+    pool->sessions  = sessions;
+    pool->n_workers = n;
+    pool->workers   = scalloc((size_t)n, sizeof(Worker));
+
+    for (int i = 0; i < n; i++) {
+        pool->workers[i].pool = pool;
+        pool->workers[i].id   = i;
+        if (pthread_create(&pool->workers[i].thread, NULL, worker_main,
+                           &pool->workers[i]) != 0) {
+            slog(ERROR, "Failed to create request worker %d", i);
+        }
+    }
+    return pool;
+}
+
+static void worker_pool_destroy(WorkerPool *pool) {
+    if (!pool) return;
+    pthread_mutex_lock(&pool->lock);
+    pool->stop = true;
+    pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
+    for (int i = 0; i < pool->n_workers; i++)
+        pthread_join(pool->workers[i].thread, NULL);
+    pthread_mutex_destroy(&pool->lock);
+    pthread_cond_destroy(&pool->cond);
+    sfree(pool->workers);
+    sfree(pool);
+}
+
+/* Callback for a readable client socket: read one complete request,
+ * hand the body to the worker pool, and stop watching the fd. */
+static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
+    UNUSED(mask);
+    Server *server = (Server *)privdata;
+
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        if (n < 0) slog_errno("Client read error");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+    buf[n] = '\0';
+
+    /* 1. Parse HTTP request. */
+    char *body = http_body(buf, (int)n);
+    if (!body) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"Incomplete HTTP request\"}");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
+    /* Check Content-Length and read remaining body if needed. */
+    {
+        const char *cl_str = http_header(buf, "Content-Length");
+        int cl = cl_str[0] ? atoi(cl_str) : 0;
+        int body_len = (int)((buf + n) - body);
+        if (cl > 0 && body_len < cl) {
+            int to_read = cl - body_len;
+            if (to_read > 0 && (int)sizeof(buf) - n > to_read) {
+                ssize_t more = read(fd, buf + n, to_read);
+                if (more > 0) {
+                    n += more;
+                    buf[n] = '\0';
+                }
+            }
+        }
+    }
+
+    int body_len = (int)((buf + n) - body);
+    if (body_len <= 0) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"Empty HTTP body\"}");
+        delete_file_event(el, fd, ELOOP_READABLE);
+        close(fd);
+        return;
+    }
+
+    char *copy = smalloc((size_t)body_len + 1);
+    memcpy(copy, body, (size_t)body_len);
+    copy[body_len] = '\0';
+
+    /* The worker now owns the fd; the event loop must not touch it. */
+    delete_file_event(el, fd, ELOOP_READABLE);
+    if (!worker_pool_submit(server->pool, fd, copy)) {
+        sfree(copy);
+        http_respond(fd, 503, "Service Unavailable",
+                     "{\"error\":\"Server busy\"}");
+        close(fd);
+    }
+}
+
 
 /* Callback for accepting new connections. */
 static void accept_proc(EventLoop *el, int fd, int mask, void *privdata) {
@@ -397,6 +537,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
+    fprintf(file, "  -np | --parallel          <int>     Concurrent request slots, default 2\n");
     fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
@@ -436,7 +577,8 @@ static ServerOptions parse_options(int argc, char *argv[]) {
             .presence_penalty = DEFAULT_PRESENCE_PENALTY,
         },
         .nthread = DEFAULT_N_THREAD,
-        .n_gpu_layers = -1
+        .n_gpu_layers = -1,
+        .n_parallel = DEFAULT_N_PARALLEL
     };
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -449,6 +591,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-n")   || !strcmp(arg, "--tokens")) so.default_tokens = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t")   || !strcmp(arg, "--temp")) so.sample.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")   || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-np")  || !strcmp(arg, "--parallel")) so.n_parallel = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) so.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp")  || !strcmp(arg, "--topp")) so.sample.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk")  || !strcmp(arg, "--topk")) so.sample.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
@@ -467,6 +610,10 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     if (so.nthread <= 0) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         so.nthread = (int)(n > 0 ? n : 1);
+    }
+    if (so.n_parallel <= 0) {
+        fprintf(stderr, "Parallel slots must be >= 1, got %d\n", so.n_parallel);
+        usage(stderr, 2);
     }
     if (so.sample.temperature < 0.0f) {
         fprintf(stderr, "Temperature must be >= 0.0, got %.2f\n", so.sample.temperature);
@@ -507,9 +654,21 @@ static int setup_server_eventloop(Server *server, ServerOptions so) {
 }
 
 
+static void sessions_destroy(Session **sessions, int n) {
+    if (!sessions) return;
+    for (int i = 0; i < n; i++) {
+        if (!sessions[i]) continue;
+        graph_free(sessions[i]->graph);
+        sessions[i]->graph = NULL;
+        session_free(sessions[i]);
+    }
+    sfree(sessions);
+}
+
 static void server_resource_close(Server *server) {
-    graph_free(server->session->graph);
-    session_free(server->session);
+    /* Workers must stop before the sessions they use are freed. */
+    worker_pool_destroy(server->pool);
+    sessions_destroy(server->sessions, server->n_parallel);
     engine_close(server->engine);
     el_free(server->el);
     if (server->serverfd >= 0) close(server->serverfd);
@@ -541,41 +700,67 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    /* 3. Create session & configure sampling. */
-    Session *session = session_create(engine, (u32)so.ctx_size,
-                                      (u32)so.n_ubatch, so.nthread,
-                                      so.n_gpu_layers);
-    if (!session) {
-        engine_close(engine);
-        slog(ERROR, "Failed to create session.");
+    /* 3. Create one session per concurrent request slot.  Each owns its
+     * own tokens, logits, KV cache and graph arena, so requests never
+     * clobber each other.  The -T thread budget is split across slots. */
+    int threads_per_session = so.nthread;
+    if (so.n_parallel > 1) {
+        threads_per_session = so.nthread / so.n_parallel;
+        if (threads_per_session < 1) threads_per_session = 1;
     }
-    session->max_tokens        = so.default_tokens;
-    session->sample = so.sample;
 
-    /* Warmup: build the graph, plan the arena and preload weights onto
-     * the device backend so the first request only pays compute. */
-    if (!graph_prepare(session))
-        slog(WARN, "Graph warmup failed; first request will be slower");
+    Session **sessions = scalloc((size_t)so.n_parallel, sizeof(*sessions));
+    for (int i = 0; i < so.n_parallel; i++) {
+        Session *s = session_create(engine, (u32)so.ctx_size,
+                                    (u32)so.n_ubatch, threads_per_session,
+                                    so.n_gpu_layers, so.n_parallel);
+        if (!s) {
+            sessions_destroy(sessions, i);
+            engine_close(engine);
+            slog(ERROR, "Failed to create session %d/%d.", i + 1, so.n_parallel);
+        }
+        s->max_tokens = so.default_tokens;
+        s->sample     = so.sample;
+        sessions[i]   = s;
+
+        /* Warmup: build the graph, plan the arena and preload weights
+         * onto the device backend so the first request only pays
+         * compute.  Done serially: GPU weight caches are global. */
+        if (!graph_prepare(s))
+            slog(WARN, "Graph warmup failed for session %d; first request "
+                 "will be slower", i + 1);
+    }
+    if (so.n_parallel > 1)
+        slog(INFO, "Parallel slots: %d (threads per slot: %d)",
+             so.n_parallel, threads_per_session);
+
+#if defined(GPU_BUILD) || defined(METAL_BUILD)
+    if (so.n_parallel > 1)
+        slog(WARN, "GPU backend shares global scratch buffers; forward "
+             "passes across the %d slots will be serialised", so.n_parallel);
+#endif
 
     /* Draw the workflow and exit (diagnostic, like --inspect). */
     if (so.show_graph) {
-        graph_drawer(session->graph);
-        graph_free(session->graph);
-        session->graph = NULL;
-        session_free(session);
+        graph_drawer(sessions[0]->graph);
+        sessions_destroy(sessions, so.n_parallel);
         engine_close(engine);
         return 0;
     }
 
-    /* 4. Set up server & signal handling. */
+    /* 4. Set up server, worker pool & signal handling. */
     Server server;
-    server.engine = engine;
-    server.session = session;
+    memset(&server, 0, sizeof(server));
+    server.engine     = engine;
+    server.sessions   = sessions;
+    server.n_parallel = so.n_parallel;
+    server.serverfd   = -1;
 
     if (setup_server_eventloop(&server, so) == ELOOP_ERR) {
         server_resource_close(&server);
         slog(ERROR, "Failed to setup server event loop.");
     }
+    server.pool = worker_pool_create(engine, sessions, so.n_parallel);
 
 #ifdef __linux__
     g_event_fd = eventfd(0, EFD_NONBLOCK);

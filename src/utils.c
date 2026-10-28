@@ -92,11 +92,14 @@ bool key_eq(Key k1, Key k2) {
 char *get_datetime(TimeLevel level) {
     struct timeval tv;
     time_t t;
+    struct tm tm_buf;
     struct tm *ptm;
 
     gettimeofday(&tv, NULL);
     t = tv.tv_sec;
-    ptm = localtime(&t);
+    /* localtime() returns a shared static buffer; use the reentrant
+     * variant so concurrent worker logging cannot corrupt it. */
+    ptm = localtime_r(&t, &tm_buf);
     char *res = smalloc(45);
 
     switch (level) {

@@ -214,7 +214,7 @@ int main(int argc, char *argv[]) {
 
     /* Create session. */
     Session *session = session_create(engine, (u32)co.ctx_size, co.n_ubatch,
-                                      co.nthread, co.n_gpu_layers);
+                                      co.nthread, co.n_gpu_layers, 1);
     if (!session) fatal("Failed to create session");
     session->sample = co.sample;
     session->max_tokens       = co.n_tokens;
@@ -287,7 +287,7 @@ int main(int argc, char *argv[]) {
         if (!ok) fatal("Forward pass failed");
 
         /* Sample first token. */
-        u32 next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample, session->sample,
+        u32 next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
                                       session->tokens, session->n_tokens);
         double ttft_ms = (time_sec() - t_prefill) * 1000.0;
 

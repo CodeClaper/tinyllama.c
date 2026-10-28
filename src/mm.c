@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include "mm.h"
 #include "asctx.h"
 
@@ -10,11 +11,12 @@
 #define MM_INIT_BLOCK_SIZE (8 * 1024)
 
 /* The single AllocSet context backing every allocation in the process,
- * created lazily on first use.  NOTE: the AllocSet free-list machinery
- * is not thread-safe.  This engine only calls the mm() wrappers from
- * the main thread (worker threads touch pre-allocated buffers only),
- * so one unlocked context is sufficient here. */
+ * created lazily on first use.  The AllocSet free-list machinery is not
+ * thread-safe, so every wrapper serialises access to it with mm_lock.
+ * The lock is required now that request workers tokenise and log from
+ * multiple threads. */
 static AllocSetContext *mm_ctx;
+static pthread_mutex_t mm_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static AllocSetContext *mm_get_ctx(void) {
     if (mm_ctx == NULL)
@@ -28,7 +30,9 @@ static void fatal(const char *msg) {
 }
 
 void *smalloc(size_t n) {
+    pthread_mutex_lock(&mm_lock);
     void *p = alloc_set_alloc(mm_get_ctx(), n ? n : 1);
+    pthread_mutex_unlock(&mm_lock);
     if (!p) fatal("Out of memory");
     memset(p, '\0', n);
     return p;
@@ -41,7 +45,9 @@ void *scalloc(size_t n, size_t s) {
     if (n && s && n > SIZE_MAX / s) fatal("Out of memory");
     total = (n ? n : 1) * (s ? s : 1);
 
+    pthread_mutex_lock(&mm_lock);
     void *p = alloc_set_alloc(mm_get_ctx(), total);
+    pthread_mutex_unlock(&mm_lock);
     if (!p) fatal("Out of memory");
     memset(p, '\0', total);
     return p;
@@ -50,9 +56,11 @@ void *scalloc(size_t n, size_t s) {
 void *srealloc(void *p, size_t n) {
     /* alloc_set_realloc needs a live chunk; mirror realloc(NULL, n). */
     if (p == NULL) return smalloc(n);
-    p = alloc_set_realloc(p, n);
-    if (!p) fatal("out of memory");
-    return p;
+    pthread_mutex_lock(&mm_lock);
+    void *np = alloc_set_realloc(p, n);
+    pthread_mutex_unlock(&mm_lock);
+    if (!np) fatal("out of memory");
+    return np;
 }
 
 char *sstrdup(char *s) {
@@ -65,5 +73,9 @@ char *sstrdup(char *s) {
 
 void sfree(void *p) {
     /* alloc_set_free does chunk-header math; NULL must never reach it. */
-    if (p) alloc_set_free(p);
+    if (p) {
+        pthread_mutex_lock(&mm_lock);
+        alloc_set_free(p);
+        pthread_mutex_unlock(&mm_lock);
+    }
 }

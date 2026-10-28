@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <pthread.h>
 #include "graph.h"
 #include "core.h"
 #include "mm.h"
@@ -1122,7 +1123,7 @@ static bool graph_op_compute(OpCtx ctx) {
     return ok;
 }
 
-static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
+static bool graph_compute_locked(Graph *g, const GraphBatch *b, Session *s) {
     if (!g || !s || !b || g->n_node == 0) {
         slog(WARN, "graph_compute: missing graph / session / batch");
         return false;
@@ -1247,6 +1248,22 @@ fail:
 #endif
     sfree(scr);
     return false;
+}
+
+/* The CUDA and Metal backends keep process-global scratch buffers and
+ * weight caches, so concurrent encode/decode from several request
+ * workers must be serialised.  CPU plans are fully per-session and run
+ * concurrently. */
+static bool graph_compute(Graph *g, const GraphBatch *b, Session *s) {
+#if defined(GPU_BUILD) || defined(METAL_BUILD)
+    static pthread_mutex_t gpu_compute_lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&gpu_compute_lock);
+    bool ok = graph_compute_locked(g, b, s);
+    pthread_mutex_unlock(&gpu_compute_lock);
+    return ok;
+#else
+    return graph_compute_locked(g, b, s);
+#endif
 }
 
 /* Append tokens to the session and run them through the graph in

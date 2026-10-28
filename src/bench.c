@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
     /* Create session. */
     Session *session = session_create(engine, (u32)opts.ctx_size,
                                       opts.n_ubatch, opts.nthread,
-                                      opts.n_gpu_layers);
+                                      opts.n_gpu_layers, 1);
     if (!session) slog(ERROR, "Failed to create session");
     session->sample = opts.sample;
 
