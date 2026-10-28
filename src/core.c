@@ -1621,11 +1621,9 @@ static int session_auto_gpu_layers(Session *s) {
     TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
     if (te) used += (size_t)te->bytes;
 
-    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim
-                * sizeof(float) * 2;
+    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim * sizeof(float) * 2;
     u32 arena_rows = s->n_ubatch ? s->n_ubatch : s->ctx_size;
-    double arena_full = (double)arena_rows * s->cfg.n_embd
-                        * sizeof(float) * 36.0;
+    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float) * 36.0;
     size_t arena_layer = (size_t)(arena_full / (double)L);
 
     int n = 0;
