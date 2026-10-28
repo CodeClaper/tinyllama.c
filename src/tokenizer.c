@@ -277,6 +277,34 @@ static int tokenize(Vocab *v, const char *text, int text_len, u32 *tokens, int m
     return tokenize_bpe(v, text, text_len, tokens, max_tokens);
 }
 
+/* Append an empty reasoning block when --no-thinking is set:
+ *   <think>\n\n</think>\n\n
+ * Qwen3.x treats this as "answer directly".  No-op when the vocabulary
+ * does not carry the markers. */
+static void chatml_add_no_think(Session *s, u32 *tokens, int *n, int max_tokens) {
+    if (!s->no_think) return;
+
+    Vocab *v = s->en->vocab;
+    i32 think_start = v->think_start_id;
+    i32 think_end   = v->think_end_id;
+    if (think_start == (i32)VOCAB_ID_NONE)
+        think_start = vocab_lookup(v, "<think>");
+    if (think_end == (i32)VOCAB_ID_NONE)
+        think_end = vocab_lookup(v, "</think>");
+    i32 nl = v->byte_token_ids[(unsigned char)'\n'];
+    if (think_start == (i32)VOCAB_ID_NONE || think_end == (i32)VOCAB_ID_NONE ||
+        nl == (i32)VOCAB_ID_NONE)
+        return;
+
+    if (*n + 6 > max_tokens) return;
+    tokens[(*n)++] = (u32)think_start;
+    tokens[(*n)++] = (u32)nl;
+    tokens[(*n)++] = (u32)nl;
+    tokens[(*n)++] = (u32)think_end;
+    tokens[(*n)++] = (u32)nl;
+    tokens[(*n)++] = (u32)nl;
+}
+
 /* ChatML prompt template, shared by the Qwen family (and any other
  * arch whose ops table points here).  Lays out the first turn:
  *   [<|im_start|>system\n{sys}<|im_end|>\n]
@@ -325,6 +353,7 @@ int chatml_prompt(Session *s, const char *user_msg, const char *sys_msg,
     ADD(im_start_id);
     ADD_TEXT("assistant");
     ADD(nl_id);
+    chatml_add_no_think(s, tokens, &n, max_tokens);
 
     #undef ADD
     #undef ADD_TEXT
@@ -370,6 +399,7 @@ int chatml_continuation(Session *s, const char *user_msg,
     ADD(im_start_id);
     ADD_TEXT("assistant");
     ADD(nl_id);
+    chatml_add_no_think(s, tokens, &n, max_tokens);
 
     #undef ADD
     #undef ADD_TEXT

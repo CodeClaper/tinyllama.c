@@ -1746,6 +1746,7 @@ Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,
     s->sample.frequency_penalty = 0.0f;
     s->sample.presence_penalty  = 0.0f;
     s->max_tokens        = 0;
+    s->no_think          = false;
     s->pthreads          = pthreads_create(nthreads);
 
     /* Fill architecture config from model metadata. */

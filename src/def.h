@@ -102,6 +102,7 @@ typedef struct {
     SampleParam sample;
     bool inspect;
     bool show_graph;
+    bool no_think;
 } ServerOptions;
 
 typedef struct {
@@ -369,6 +370,9 @@ struct Session {
     /* ---- Sampling ---- */
     SampleParam sample;
     u32        max_tokens;
+
+    /* Disable the ChatML reasoning block (Qwen3.x) in generated prompts. */
+    bool       no_think;
     
     /* --- Graph --- */
     Graph       *graph;

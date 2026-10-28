@@ -22,6 +22,7 @@ typedef struct {
     int             nthread;
     int             n_gpu_layers;
     const char      *system;
+    bool            no_think;
 } ChatOptions;
 
 /* Usage. */
@@ -34,6 +35,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -ub | --ubatch            <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens            <int>     Number of tokens to generate, default 393216\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
+    fprintf(file, "  -nt | --no-thinking       <none>    Disable thinking mode\n");
     fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -s  | --system            <string>  System input\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
@@ -108,6 +110,7 @@ static ChatOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-ub") || !strcmp(arg, "--ubatch")) co.n_ubatch = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-n")  || !strcmp(arg, "--tokens")) co.n_tokens = (u32)parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")  || !strcmp(arg, "--threads")) co.nthread = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-nt") || !strcmp(arg, "--no-thinking")) co.no_think = true;
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) co.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-t")  || !strcmp(arg, "--temp")) co.sample.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp") || !strcmp(arg, "--topp")) co.sample.top_p = parse_float(parse_arg(argc, argv, &i, arg));
@@ -218,6 +221,7 @@ int main(int argc, char *argv[]) {
     if (!session) fatal("Failed to create session");
     session->sample = co.sample;
     session->max_tokens       = co.n_tokens;
+    session->no_think         = co.no_think;
 
     /* Warmup: build the graph, plan the arena and preload weights onto
      * the device backend so the first turn only pays compute. */

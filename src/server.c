@@ -538,6 +538,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
     fprintf(file, "  -np | --parallel          <int>     Concurrent request slots, default 2\n");
+    fprintf(file, "  -nt | --no-thinking       <none>    Disable thinking mode\n");
     fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
     fprintf(file, "  -tk | --topk              <int>     Top-k sampling, default 40\n");
@@ -592,6 +593,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
         else if (!strcmp(arg, "-t")   || !strcmp(arg, "--temp")) so.sample.temperature = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-T")   || !strcmp(arg, "--threads")) so.nthread = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-np")  || !strcmp(arg, "--parallel")) so.n_parallel = parse_int(parse_arg(argc, argv, &i, arg));
+        else if (!strcmp(arg, "-nt")  || !strcmp(arg, "--no-thinking")) so.no_think = true;
         else if (!strcmp(arg, "-ngl") || !strcmp(arg, "--n-gpu-layers")) so.n_gpu_layers = parse_int(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tp")  || !strcmp(arg, "--topp")) so.sample.top_p = parse_float(parse_arg(argc, argv, &i, arg));
         else if (!strcmp(arg, "-tk")  || !strcmp(arg, "--topk")) so.sample.top_k = (u32)parse_int(parse_arg(argc, argv, &i, arg));
@@ -721,6 +723,7 @@ int main(int argc, char *argv[]) {
         }
         s->max_tokens = so.default_tokens;
         s->sample     = so.sample;
+        s->no_think   = so.no_think;
         sessions[i]   = s;
 
         /* Warmup: build the graph, plan the arena and preload weights
