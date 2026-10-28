@@ -764,6 +764,9 @@ static bool gpu_op_attn(OpCtx *c) {
     AttnKvCache *akc = &kc->std[layer];
     if (!akc->k || !akc->v) return false;
 
+    float *qd  = op_src(c, 0);
+    float *kd  = op_src(c, 1);
+    float *vd  = op_src(c, 2);
     u32 n_head = c->cfg->n_head;
     u32 n_kv   = c->cfg->n_kv_head;
     u32 khd    = c->cfg->kv_head_dim;
@@ -774,7 +777,7 @@ static bool gpu_op_attn(OpCtx *c) {
      * 0..pos+qi (history included).  Mirrors op_attn(). */
     u64 total = (u64)c->n * n_kv * khd;
     k_kv_write<<<op_block_count(total), GPU_OP_THREADS>>>(
-        akc->k, akc->v, op_src(c, 1), op_src(c, 2),
+        akc->k, akc->v, kd, vd,
         n_kv, khd, c->kv_dim, hs, c->pos, total);
     CHECK(cudaGetLastError());
     akc->n = c->pos + c->n;
@@ -782,7 +785,7 @@ static bool gpu_op_attn(OpCtx *c) {
     dim3 grid(n_head, c->n);
     size_t shmem = ((size_t)khd + 32 + GPU_OP_THREADS + 2) * sizeof(float);
     k_attn<<<grid, GPU_OP_THREADS, shmem>>>(
-        op_src(c, 0), akc->k, akc->v, c->dst,
+        qd, akc->k, akc->v, c->dst,
         gqa, c->cfg->head_dim, khd, c->q_dim, hs, c->pos, c->scale, win);
     CHECK(cudaGetLastError());
     (void)c->scr;
