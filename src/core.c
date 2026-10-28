@@ -1643,11 +1643,9 @@ static int session_auto_gpu_layers(Session *s, int n_parallel) {
     /* Per-slot state: every parallel slot keeps its own KV cache and
      * activation arena, so reserve n_parallel copies. */
     size_t slots = (size_t)n_parallel;
-    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim
-                * sizeof(float) * 2 * slots;
+    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim * sizeof(float) * 2 * slots;
     u32 arena_rows = s->n_ubatch ? s->n_ubatch : s->ctx_size;
-    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float)
-                        * 36.0 * (double)slots;
+    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float) * 36.0 * (double)slots;
     size_t arena_layer = (size_t)(arena_full / (double)L);
 
     int n = 0;
@@ -1672,8 +1670,7 @@ static int session_auto_gpu_layers(Session *s, int n_parallel) {
         size_t extra = tout ? (size_t)tout->bytes : 0;
         if (used + extra > budget) n--;
     }
-    slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB slots=%d -> "
-         "n_gpu_layers=%d/%u",
+    slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB slots=%d -> " "n_gpu_layers=%d/%u",
          (double)free_b / 1048576.0, (double)budget / 1048576.0,
          n_parallel, n, L);
 
