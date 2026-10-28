@@ -1035,22 +1035,142 @@ __global__ void matmul_kernel_trans(const u8 * __restrict__ w,
     y[(u64)blockIdx.y * rows + idx] = sum;
 }
 
-/* ---- Q8_0 int8 dot product (__dp4a) ----------------------------
- * The activation row is quantized to q8 once per CUDA block into
- * shared memory (one f32 scale + 32 int8 per block), then the dot
- * product runs as packed int8 multiply-adds: each lane owns four
- * consecutive weights, so one __dp4a does four MACs and a warp covers
- * four 32-element quant blocks (128 elements) per iteration.  The
- * per-block weight and activation scales are applied in float after
- * the integer dot.  This avoids converting every weight to float and
- * makes the kernel bandwidth- rather than instruction-bound.
+/* ---- Q8_0 int8 dot product -------------------------------------
+ * Decode uses a bandwidth-bound GEMV.  The activation row is quantized
+ * to q8 once per matmul into persistent device scratch, then several
+ * warps cooperate on one output row.  Each lane owns four consecutive
+ * weights, so one __dp4a does four MACs and a warp covers four
+ * 32-element quant blocks (128 elements) per iteration.  Splitting K
+ * across warps gives the memory pipeline more independent streams than
+ * the one-warp-per-row kernel below.
  *
- * Requires cols % 128 == 0 so the four-block warp step stays in
- * bounds; matmul_launch() checks that and falls back otherwise.
- * Shared memory per block is cols + cols/8 bytes, so it also requires
- * that to fit the 48 KB budget.  __dp4a needs compute capability 6.1+.
+ * The older shared-memory kernel is kept as the prefill / fallback
+ * path: it quantizes the activation per CUDA block and runs one warp
+ * per row.  It requires cols % 128 == 0 and cols + cols/8 bytes of
+ * shared memory to fit the 48 KB budget.  __dp4a needs compute
+ * capability 6.1+.
  */
 #define GPU_DP4A_SMEM_MAX_BYTES (48u * 1024u)
+
+/* ---- Q8_0 multi-warp GEMV (batch == 1) ------------------------- */
+
+#define GPU_Q8_MMVQ_WARPS   4u
+#define GPU_Q8_MMVQ_THREADS (GPU_Q8_MMVQ_WARPS * 32u)
+#define GPU_Q8_BLOCK_BYTES  34u
+#define GPU_Q8_BLOCK_ELEMS  32u
+
+/* Quantize one f32 activation row to Q8_0.  One warp owns one 32-element
+ * block; the warp-wide max is an all-reduce because every lane needs the
+ * same scale to write its quantized byte. */
+__global__ void quantize_q8_0_kernel(const float *__restrict__ x,
+                                     i8 *__restrict__ qs,
+                                     float *__restrict__ ds,
+                                     u32 nblk) {
+    const u32 lane = threadIdx.x & 31u;
+    const u32 bi   = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (bi >= nblk) return;
+
+    const float v = x[(u64)bi * GPU_Q8_BLOCK_ELEMS + lane];
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+
+    const float d  = amax / 127.0f;
+    const float id = d > 0.0f ? 1.0f / d : 0.0f;
+    qs[(u64)bi * GPU_Q8_BLOCK_ELEMS + lane] = (i8)__float2int_rn(v * id);
+    if (lane == 0) ds[bi] = d;
+}
+
+/* Dot product of one Q8_0 weight block against the pre-quantized
+ * activation block.  `eo` selects the lane's four elements. */
+__device__ static inline float q8_0_mmvq_block(const u8 *__restrict__ w,
+                                                const i8 *__restrict__ xq,
+                                                const float *__restrict__ xd,
+                                                u64 blk0, u32 b, u32 eo) {
+    const u8 *blk = w + (blk0 + b) * GPU_Q8_BLOCK_BYTES;
+    const int wq  = (int)ld_u32(blk + 2 + eo);
+    const int xq4 = *(const int *)(xq + (u64)b * GPU_Q8_BLOCK_ELEMS + eo);
+    const float d = f16_to_f32(ld_u16(blk)) * xd[b];
+    return (float)__dp4a(wq, xq4, 0) * d;
+}
+
+/* batch == 1: four warps split K for one output row.  Each warp walks
+ * every fourth group of four blocks; two accumulators hide the dp4a ->
+ * float-FMA dependency chain. */
+__global__ void matmul_kernel_q8_0_mmvq(const u8 *__restrict__ w,
+                                        const i8 *__restrict__ xq,
+                                        const float *__restrict__ xd,
+                                        float *__restrict__ y,
+                                        u64 rows, u64 cols) {
+    __shared__ float warp_sum[GPU_Q8_MMVQ_WARPS];
+
+    const u32 lane = threadIdx.x & 31u;
+    const u32 warp = threadIdx.x >> 5;
+    const u32 sub  = lane >> 3;           /* which of the four blocks  */
+    const u32 eo   = 4u * (lane & 7u);    /* four-element lane offset  */
+    const u32 nblk = (u32)(cols >> 5);
+    const u32 step = GPU_Q8_MMVQ_WARPS * 4u;
+
+    for (u64 r = blockIdx.x; r < rows; r += gridDim.x) {
+        const u64 blk0 = (r * cols) >> 5;
+        float sum0 = 0.0f, sum1 = 0.0f;
+
+        u32 b = warp * 4u + sub;
+        for (; b + step < nblk; b += 2u * step) {
+            sum0 += q8_0_mmvq_block(w, xq, xd, blk0, b, eo);
+            sum1 += q8_0_mmvq_block(w, xq, xd, blk0, b + step, eo);
+        }
+        for (; b < nblk; b += step)
+            sum0 += q8_0_mmvq_block(w, xq, xd, blk0, b, eo);
+
+        float sum = sum0 + sum1;
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1)
+            sum += __shfl_down_sync(0xffffffffu, sum, o);
+        if (lane == 0) warp_sum[warp] = sum;
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            float total = warp_sum[0];
+            #pragma unroll
+            for (u32 i = 1; i < GPU_Q8_MMVQ_WARPS; i++)
+                total += warp_sum[i];
+            y[r] = total;
+        }
+        __syncthreads();
+    }
+}
+
+/* Persistent activation-quantization scratch for the decode path. */
+static i8    *g_q8_x = NULL;
+static float *g_q8_d = NULL;
+static u64    g_q8_cap = 0;
+
+static bool q8_0_mmvq_launch(const u8 *w, const float *x, float *y,
+                             u64 rows, u64 cols, u64 batch, bool trans) {
+    if (trans || batch != 1 || rows == 0 || cols == 0 || (cols % GPU_Q8_BLOCK_ELEMS) != 0)
+        return false;
+
+    const u64 nblk = cols / GPU_Q8_BLOCK_ELEMS;
+    if (cols > g_q8_cap) {
+        if (g_q8_x) CHECK(cudaFree(g_q8_x));
+        if (g_q8_d) CHECK(cudaFree(g_q8_d));
+        CHECK(cudaMalloc((void **)&g_q8_x, cols * sizeof(i8)));
+        CHECK(cudaMalloc((void **)&g_q8_d, nblk * sizeof(float)));
+        g_q8_cap = cols;
+    }
+
+    const unsigned nthreads = 256;
+    const unsigned nblocks  = (unsigned)((nblk + 7) / 8); /* 8 warps/block */
+    quantize_q8_0_kernel<<<nblocks, nthreads>>>(x, g_q8_x, g_q8_d, (u32)nblk);
+    CHECK(cudaGetLastError());
+
+    matmul_kernel_q8_0_mmvq<<<(unsigned)rows, GPU_Q8_MMVQ_THREADS>>>(
+        w, g_q8_x, g_q8_d, y, rows, cols);
+    CHECK(cudaGetLastError());
+    return true;
+}
 
 __global__ void matmul_kernel_q8_0_dp4a(const u8 *__restrict__ w,
                                         const float *__restrict__ x,
@@ -1311,9 +1431,15 @@ template<int TYPE>
 static void matmul_launch(const u8 *w, const float *x, float *y,
                           u64 rows, u64 cols, u64 batch, bool trans) {
     if constexpr (TYPE == GGUF_TYPE_Q8_0) {
-        /* dp4a path: quantize the activation to q8 in shared memory and
-         * run the weight dot as packed int8 MACs.  cols % 128 keeps the
-         * four-block warp step in bounds. */
+        /* Decode: pre-quantize the activation once, then let four warps
+         * cooperate on each output row.  This is the hot path for the
+         * Qwen3.5 / Qwen2.5 Q8_0 models. */
+        if (q8_0_mmvq_launch(w, x, y, rows, cols, batch, trans))
+            return;
+
+        /* Prefill / odd shapes: quantize the activation to q8 in shared
+         * memory and run the weight dot as packed int8 MACs.  cols % 128
+         * keeps the four-block warp step in bounds. */
         const size_t q8_smem = (size_t)cols + (size_t)(cols / 32) * sizeof(float);
         if (!trans && cols % 128 == 0 && q8_smem <= GPU_DP4A_SMEM_MAX_BYTES) {
             dim3 grid((unsigned)((rows + 7) / 8), (unsigned)batch);
@@ -1631,5 +1757,8 @@ void gpu_shutdown(void) {
     g_cache_n = 0;
     if (g_sx) { cudaFree(g_sx); g_sx = NULL; g_sx_n = 0; }
     if (g_sy) { cudaFree(g_sy); g_sy = NULL; g_sy_n = 0; }
+    if (g_q8_x) { cudaFree(g_q8_x); g_q8_x = NULL; }
+    if (g_q8_d) { cudaFree(g_q8_d); g_q8_d = NULL; }
+    g_q8_cap = 0;
     q4k_scratch_free();
 }

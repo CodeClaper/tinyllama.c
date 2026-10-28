@@ -169,9 +169,9 @@ static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
 
 /* Whether the non-transposed matvec takes an int8 __dp4a path for this
  * type/column count (mirrors matmul_launch in gpu.cu). */
-static bool uses_dp4a(u32 type, u64 cols) {
+static bool uses_dp4a(u32 type, u64 cols, u64 batch) {
     if (type == GGUF_TYPE_Q8_0)
-        return cols % 128 == 0;
+        return batch == 1 ? cols % 32 == 0 : cols % 128 == 0;
     if (type == GGUF_TYPE_Q4_K)
         return cols % 256 == 0;
     return false;
@@ -192,7 +192,7 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
 
     const float *xe = x;
     float *xq = NULL;
-    if (!trans && uses_dp4a(ti->type, cols)) {
+    if (!trans && uses_dp4a(ti->type, cols, batch)) {
         xq = malloc(nx * sizeof(float));
         for (u64 b = 0; b < batch; b++) {
             for (u64 blk = 0; blk < cols / 32; blk++) {
@@ -269,7 +269,7 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
      * mapping/decode errors rather than the intentional rounding. */
     const float *xe = x;
     float *xq = NULL;
-    if (uses_dp4a(ti->type, cols)) {
+    if (uses_dp4a(ti->type, cols, 1)) {
         xq = malloc(cols * sizeof(float));
         for (u64 blk = 0; blk < cols / 32; blk++) {
             const float *src = x + blk * 32;
