@@ -221,7 +221,8 @@ static void neon_block_q8_1(const u8 *data, float *out) {
 
 /*
  * Q4_0 block (18 bytes): [d:f16][qs:16 bytes → 32 nibbles]
- *   nib = qs[o>>1] >> ((o&1)<<2) & 0xF
+ *   o <  16: nib = qs[o]      & 0xF
+ *   o >= 16: nib = qs[o - 16] >> 4
  *   out[o] = (float)((i32)nib - 8) * d
  */
 static void neon_block_q4_0(const u8 *data, float *out) {
@@ -229,18 +230,15 @@ static void neon_block_q4_0(const u8 *data, float *out) {
     float32x4_t vd = vdupq_n_f32(d);
     const u8 *qs = data + 2;
 
-    /* Load 16 bytes; extract low & high nibbles; interleave with vzip
-     * so each half holds 16 consecutive elements in natural order. */
-    uint8x16_t vq   = vld1q_u8(qs);
-    uint8x16_t vlo  = vandq_u8(vq, vdupq_n_u8(0x0F));
-    uint8x16_t vhi  = vshrq_n_u8(vq, 4);
-    uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+    uint8x16_t vq  = vld1q_u8(qs);
+    uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+    uint8x16_t vhi = vshrq_n_u8(vq, 4);
 
     float32x4_t r0, r1, r2, r3, r4, r5, r6, r7;
 
-    neon_u8_to_f32_x16(vz.val[0], vd, vdupq_n_f32(0.0f), 8,
+    neon_u8_to_f32_x16(vlo, vd, vdupq_n_f32(0.0f), 8,
                         &r0, &r1, &r2, &r3);
-    neon_u8_to_f32_x16(vz.val[1], vd, vdupq_n_f32(0.0f), 8,
+    neon_u8_to_f32_x16(vhi, vd, vdupq_n_f32(0.0f), 8,
                         &r4, &r5, &r6, &r7);
 
     neon_store_f32_x16(out +  0, r0, r1, r2, r3);
@@ -249,6 +247,7 @@ static void neon_block_q4_0(const u8 *data, float *out) {
 
 /*
  * Q4_1 block (20 bytes): [d:f16][m:f16][qs:16 bytes → 32 nibbles]
+ *   same split-half nibble layout as Q4_0
  *   out[o] = (float)nib * d + m
  */
 static void neon_block_q4_1(const u8 *data, float *out) {
@@ -258,15 +257,14 @@ static void neon_block_q4_1(const u8 *data, float *out) {
     float32x4_t vm = vdupq_n_f32(m);
     const u8 *qs = data + 4;
 
-    uint8x16_t vq   = vld1q_u8(qs);
-    uint8x16_t vlo  = vandq_u8(vq, vdupq_n_u8(0x0F));
-    uint8x16_t vhi  = vshrq_n_u8(vq, 4);
-    uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+    uint8x16_t vq  = vld1q_u8(qs);
+    uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+    uint8x16_t vhi = vshrq_n_u8(vq, 4);
 
     float32x4_t r0, r1, r2, r3, r4, r5, r6, r7;
 
-    neon_u8_to_f32_x16(vz.val[0], vd, vm, 0, &r0, &r1, &r2, &r3);
-    neon_u8_to_f32_x16(vz.val[1], vd, vm, 0, &r4, &r5, &r6, &r7);
+    neon_u8_to_f32_x16(vlo, vd, vm, 0, &r0, &r1, &r2, &r3);
+    neon_u8_to_f32_x16(vhi, vd, vm, 0, &r4, &r5, &r6, &r7);
 
     neon_store_f32_x16(out +  0, r0, r1, r2, r3);
     neon_store_f32_x16(out + 16, r4, r5, r6, r7);
@@ -274,12 +272,9 @@ static void neon_block_q4_1(const u8 *data, float *out) {
 
 /*
  * Q5_0 block (22 bytes): [d:f16][qh:u32][ql:16 bytes → 32 nibbles]
- *   lo  = ql[o>>1] >> ((o&1)<<2) & 0xF
+ *   lo  = low/high nibble of ql[o & 15] (split-half, as Q4_0)
  *   hi  = (qh >> o) & 1
  *   out[o] = (float)((i32)((hi << 4) | lo) - 16) * d
- *
- * We unpack hi bits to a byte array first (only 32 bytes, once per block),
- * then combine with NEON.
  */
 static void neon_block_q5_0(const u8 *data, float *out) {
     float d = f16_to_f32(*(const u16 *)data);
@@ -288,36 +283,20 @@ static void neon_block_q5_0(const u8 *data, float *out) {
     memcpy(&qh, data + 2, 4);
     const u8 *ql = data + 6;
 
-    /* Unpack 32 hi bits into 16 pairs of bytes (hi in bit 4 position). */
-    u8 hi_bytes[16];
-    for (int j = 0; j < 16; j++) {
-        u8 b = 0;
-        if ((qh >> (j * 2))     & 1) b |= 0x10;   /* element 2*j     */
-        if ((qh >> (j * 2 + 1)) & 1) b |= 0x10;   /* element 2*j+1   — wait, these go to different lanes */
-        hi_bytes[j] = b;
-    }
-
-    /* Actually each element needs its own hi bit at position 4.
-     * Let's unpack to a uint8x16 of hi bits (each 0 or 1→shifted to 0x10). */
-    /* Better: unpack into 32-byte scratch, then load with NEON. */
     u8 hi[32];
     for (int o = 0; o < 32; o++)
         hi[o] = ((qh >> o) & 1) << 4;
 
-    /* Load lo nibbles, interleave for natural ordering. */
-    uint8x16_t vql  = vld1q_u8(ql);
-    uint8x16_t vlo  = vandq_u8(vql, vdupq_n_u8(0x0F));
-    uint8x16_t vhi_lo = vshrq_n_u8(vql, 4);
-    uint8x16x2_t vz = vzipq_u8(vlo, vhi_lo);
+    uint8x16_t vql    = vld1q_u8(ql);
+    uint8x16_t vlo    = vandq_u8(vql, vdupq_n_u8(0x0F));
+    uint8x16_t vhi_nb = vshrq_n_u8(vql, 4);
 
-    /* Load corresponding hi bits. */
     uint8x16_t vhi0 = vld1q_u8(hi +  0);
     uint8x16_t vhi1 = vld1q_u8(hi + 16);
 
-    /* Combine: val = lo | hi → subtract 16 → multiply by d. */
     for (int h = 0; h < 2; h++) {
         uint8x16_t vnib = vorrq_u8(
-            (h == 0) ? vz.val[0] : vz.val[1],
+            (h == 0) ? vlo : vhi_nb,
             (h == 0) ? vhi0 : vhi1);
 
         float32x4_t r0, r1, r2, r3;
@@ -344,17 +323,16 @@ static void neon_block_q5_1(const u8 *data, float *out) {
     for (int o = 0; o < 32; o++)
         hi[o] = ((qh >> o) & 1) << 4;
 
-    uint8x16_t vql     = vld1q_u8(ql);
-    uint8x16_t vlo     = vandq_u8(vql, vdupq_n_u8(0x0F));
-    uint8x16_t vhi_lo  = vshrq_n_u8(vql, 4);
-    uint8x16x2_t vz    = vzipq_u8(vlo, vhi_lo);
+    uint8x16_t vql    = vld1q_u8(ql);
+    uint8x16_t vlo    = vandq_u8(vql, vdupq_n_u8(0x0F));
+    uint8x16_t vhi_nb = vshrq_n_u8(vql, 4);
 
     uint8x16_t vhi0 = vld1q_u8(hi +  0);
     uint8x16_t vhi1 = vld1q_u8(hi + 16);
 
     for (int h = 0; h < 2; h++) {
         uint8x16_t vnib = vorrq_u8(
-            (h == 0) ? vz.val[0] : vz.val[1],
+            (h == 0) ? vlo : vhi_nb,
             (h == 0) ? vhi0 : vhi1);
 
         float32x4_t r0, r1, r2, r3;
@@ -931,65 +909,45 @@ static float neon_dot_q8_0_block(const u8 *data, const float *x) {
     return d * neon_hsum_f32x4(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
 }
 
-/* Q4_0: sum = d * Σ((nib - 8) * x) = d * (Σ(nib*x) - 8*Σ(x)) */
+/* Q4_0: sum = d * Σ((nib - 8) * x) = d * (Σ(nib*x) - 8*Σ(x)).
+ * Nibbles are split-half: qs[0..15] low -> x[0..15], high -> x[16..31]. */
 static float neon_dot_q4_0_block(const u8 *data, const float *x) {
     float d = f16_to_f32(*(const u16 *)data);
     const u8 *qs = data + 2;
 
+    uint8x16_t vq  = vld1q_u8(qs);
+    uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+    uint8x16_t vhi = vshrq_n_u8(vq, 4);
+
     float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
     float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
-    float32x4_t sum0 = vdupq_n_f32(0), sum1 = vdupq_n_f32(0);
+    float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
+    float32x4_t sx2  = vdupq_n_f32(0), sx3  = vdupq_n_f32(0);
 
-    for (int j = 0; j < 32; j += 16) {
-        /* For Q4_0, nibbles within a block alternate low/high per byte.
-         * Extract low nibbles (even elements 0,2,4,...) and high nibbles
-         * (odd elements 1,3,5,...), then interleave for natural order. */
-        uint8x16_t vq  = vld1q_u8(qs + j / 2);
-        uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
-        uint8x16_t vhi = vshrq_n_u8(vq, 4);
-        uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+    for (int h = 0; h < 2; h++) {
+        uint8x16_t vn = (h == 0) ? vlo : vhi;
+        int jj = h * 16;
 
-        /* Process first 8 elements of each half (vz.val[0]) then last 8 (vz.val[1]).
-         * Actually vzip gives: val[0] = [l0,h0,l1,h1,...,l7,h7], val[1]=[l8,h8,...,l15,h15].
-         * So each val[h] has 16 consecutively ordered elements. */
-        for (int h = 0; h < 2; h++) {
-            uint8x16_t vn = (h == 0) ? vz.val[0] : vz.val[1];
-            int off = j + h * 8;
-            (void)off; /* j/2 bytes → j elements; use separate offsets */
+        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
+        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
+        float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
 
-            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
-            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
-            float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
-            float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
-            float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
-            float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+        float32x4_t xv0 = vld1q_f32(x + jj +  0);
+        float32x4_t xv1 = vld1q_f32(x + jj +  4);
+        float32x4_t xv2 = vld1q_f32(x + jj +  8);
+        float32x4_t xv3 = vld1q_f32(x + jj + 12);
 
-            int jj = j + h * 16;
-            float32x4_t xv0 = vld1q_f32(x + jj +  0);
-            float32x4_t xv1 = vld1q_f32(x + jj +  4);
-            float32x4_t xv2 = vld1q_f32(x + jj +  8);
-            float32x4_t xv3 = vld1q_f32(x + jj + 12);
-
-            dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
-            dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
-            sum0 = vaddq_f32(sum0, xv0);  sum1 = vaddq_f32(sum1, xv1);
-            /* sum2, sum3 — reuse dot accumulators; just add x to separate regs */
-            /* Actually let me just accumulate all x values into sum0/sum1 */
-        }
+        dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
+        dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
+        sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+        sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
     }
-
-    /* Recompute: we need sum_x for all 32 elements. Let me re-accumulate. */
-    float32x4_t sx0 = vdupq_n_f32(0), sx1 = vdupq_n_f32(0);
-    float32x4_t sx2 = vdupq_n_f32(0), sx3 = vdupq_n_f32(0);
-    for (int j = 0; j < 32; j += 16) {
-        sx0 = vaddq_f32(sx0, vld1q_f32(x + j +  0));
-        sx1 = vaddq_f32(sx1, vld1q_f32(x + j +  4));
-        sx2 = vaddq_f32(sx2, vld1q_f32(x + j +  8));
-        sx3 = vaddq_f32(sx3, vld1q_f32(x + j + 12));
-    }
-    float sum_x = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));
 
     float dot_all = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+    float sum_x   = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));
     return d * (dot_all - 8.0f * sum_x);
 }
 
@@ -999,38 +957,35 @@ static float neon_dot_q4_1_block(const u8 *data, const float *x) {
     float m = f16_to_f32(*(const u16 *)(data + 2));
     const u8 *qs = data + 4;
 
+    uint8x16_t vq  = vld1q_u8(qs);
+    uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
+    uint8x16_t vhi = vshrq_n_u8(vq, 4);
+
     float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
     float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
-    float32x4_t sx0 = vdupq_n_f32(0), sx1 = vdupq_n_f32(0);
-    float32x4_t sx2 = vdupq_n_f32(0), sx3 = vdupq_n_f32(0);
+    float32x4_t sx0  = vdupq_n_f32(0), sx1  = vdupq_n_f32(0);
+    float32x4_t sx2  = vdupq_n_f32(0), sx3  = vdupq_n_f32(0);
 
-    for (int j = 0; j < 32; j += 16) {
-        uint8x16_t vq  = vld1q_u8(qs + j / 2);
-        uint8x16_t vlo = vandq_u8(vq, vdupq_n_u8(0x0F));
-        uint8x16_t vhi = vshrq_n_u8(vq, 4);
-        uint8x16x2_t vz = vzipq_u8(vlo, vhi);
+    for (int h = 0; h < 2; h++) {
+        uint8x16_t vn = (h == 0) ? vlo : vhi;
+        int jj = h * 16;
 
-        for (int h = 0; h < 2; h++) {
-            uint8x16_t vn = (h == 0) ? vz.val[0] : vz.val[1];
-            int jj = j + h * 16;
+        int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
+        int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
+        float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
+        float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
+        float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
+        float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
 
-            int16x8_t v16_0 = (int16x8_t)vmovl_u8(vget_low_u8(vn));
-            int16x8_t v16_1 = (int16x8_t)vmovl_u8(vget_high_u8(vn));
-            float32x4_t nf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_0)));
-            float32x4_t nf1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_0)));
-            float32x4_t nf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v16_1)));
-            float32x4_t nf3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v16_1)));
+        float32x4_t xv0 = vld1q_f32(x + jj +  0);
+        float32x4_t xv1 = vld1q_f32(x + jj +  4);
+        float32x4_t xv2 = vld1q_f32(x + jj +  8);
+        float32x4_t xv3 = vld1q_f32(x + jj + 12);
 
-            float32x4_t xv0 = vld1q_f32(x + jj +  0);
-            float32x4_t xv1 = vld1q_f32(x + jj +  4);
-            float32x4_t xv2 = vld1q_f32(x + jj +  8);
-            float32x4_t xv3 = vld1q_f32(x + jj + 12);
-
-            dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
-            dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
-            sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
-            sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
-        }
+        dot0 = vmlaq_f32(dot0, nf0, xv0); dot1 = vmlaq_f32(dot1, nf1, xv1);
+        dot2 = vmlaq_f32(dot2, nf2, xv2); dot3 = vmlaq_f32(dot3, nf3, xv3);
+        sx0 = vaddq_f32(sx0, xv0); sx1 = vaddq_f32(sx1, xv1);
+        sx2 = vaddq_f32(sx2, xv2); sx3 = vaddq_f32(sx3, xv3);
     }
     float dot_nib = neon_hsum_f32x4(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
     float sum_x   = neon_hsum_f32x4(vaddq_f32(vaddq_f32(sx0, sx1), vaddq_f32(sx2, sx3)));

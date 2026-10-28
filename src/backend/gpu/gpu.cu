@@ -145,11 +145,18 @@ __device__ static inline float dequant_q8_1(const u8 *data, u64 i) {
     return (float)((const i8 *)(blk + 8))[o] * d;
 }
 
+/* Q4_0/Q4_1/Q5_0/Q5_1 pack 32 values as two 16-value halves: the low
+ * nibbles of qs[0..15] are elements 0..15 and the high nibbles are
+ * elements 16..31 (ggml dequantize_row_q4_0/_q4_1/_q5_0/_q5_1). */
+__device__ static inline u32 q4_nibble(const u8 *qs, u32 o) {
+    return (qs[o & 15] >> ((o < 16) ? 0 : 4)) & 0xF;
+}
+
 __device__ static inline float dequant_q4_0(const u8 *data, u64 i) {
     u64 bi = i >> 5; u32 o = i & 31;
     const u8 *blk = data + bi * 18;
     float d = f16_to_f32(ld_u16(blk));
-    u32 nib = (blk[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 nib = q4_nibble(blk + 2, o);
     return ((float)(i32)nib - 8.0f) * d;
 }
 
@@ -158,7 +165,7 @@ __device__ static inline float dequant_q4_1(const u8 *data, u64 i) {
     const u8 *blk = data + bi * 20;
     float d = f16_to_f32(ld_u16(blk));
     float m = f16_to_f32(ld_u16(blk + 2));
-    u32 nib = (blk[4 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 nib = q4_nibble(blk + 4, o);
     return (float)nib * d + m;
 }
 
@@ -168,7 +175,7 @@ __device__ static inline float dequant_q5_0(const u8 *data, u64 i) {
     float d = f16_to_f32(ld_u16(blk));
     u32 qh = ld_u32(blk + 2);
     u32 hi = (qh >> o) & 1;
-    u32 lo = (blk[6 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 lo = q4_nibble(blk + 6, o);
     return ((float)(i32)((hi << 4) | lo) - 16.0f) * d;
 }
 
@@ -179,7 +186,7 @@ __device__ static inline float dequant_q5_1(const u8 *data, u64 i) {
     float m = f16_to_f32(ld_u16(blk + 2));
     u32 qh = ld_u32(blk + 4);
     u32 hi = (qh >> o) & 1;
-    u32 lo = (blk[8 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 lo = q4_nibble(blk + 8, o);
     return (float)((hi << 4) | lo) * d + m;
 }
 
@@ -448,20 +455,20 @@ __device__ __forceinline__ float blk_elem(const u8 *blk, u32 lane, u32 j, const 
     } else if constexpr (TYPE == GGUF_TYPE_Q8_1) {
         return (float)(i8)blk[8 + o] * s.v[0];
     } else if constexpr (TYPE == GGUF_TYPE_Q4_0) {
-        const u32 nib = (blk[2 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        const u32 nib = q4_nibble(blk + 2, o);
         return ((float)(i32)nib - 8.0f) * s.v[0];
     } else if constexpr (TYPE == GGUF_TYPE_Q4_1) {
-        const u32 nib = (blk[4 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        const u32 nib = q4_nibble(blk + 4, o);
         return (float)nib * s.v[0] + s.v[1];
     } else if constexpr (TYPE == GGUF_TYPE_Q5_0) {
         const u32 qh = ld_u32(blk + 2);
         const u32 hi = (qh >> o) & 1u;
-        const u32 lo = (blk[6 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        const u32 lo = q4_nibble(blk + 6, o);
         return ((float)(i32)((hi << 4) | lo) - 16.0f) * s.v[0];
     } else if constexpr (TYPE == GGUF_TYPE_Q5_1) {
         const u32 qh = ld_u32(blk + 4);
         const u32 hi = (qh >> o) & 1u;
-        const u32 lo = (blk[8 + (o >> 1)] >> ((o & 1u) << 2)) & 0xF;
+        const u32 lo = q4_nibble(blk + 8, o);
         return (float)((hi << 4) | lo) * s.v[0] + s.v[1];
     }
     /* No branch for the unquantized types (F32/F16/BF16/I8/I16/I32/I64/

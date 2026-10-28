@@ -244,7 +244,8 @@ static void sse_block_q8_1(const u8 *data, float *out) {
 
 /*
  * Q4_0 block (18 bytes): [d:f16][qs:16 bytes → 32 nibbles]
- *   nib = qs[o>>1] >> ((o&1)<<2) & 0xF
+ *   o <  16: nib = qs[o]      & 0xF
+ *   o >= 16: nib = qs[o - 16] >> 4
  *   out[o] = (float)((i32)nib - 8) * d
  */
 static void sse_block_q4_0(const u8 *data, float *out) {
@@ -252,15 +253,13 @@ static void sse_block_q4_0(const u8 *data, float *out) {
     __m128 vd = _mm_set1_ps(d);
     const u8 *qs = data + 2;
 
-    __m128i vq   = _mm_loadu_si128((const __m128i *)qs);
-    __m128i vlo  = sse_lo_nibbles(vq);
-    __m128i vhi  = sse_hi_nibbles(vq);
-    __m128i z0 = _mm_unpacklo_epi8(vlo, vhi);
-    __m128i z1 = _mm_unpackhi_epi8(vlo, vhi);
+    __m128i vq  = _mm_loadu_si128((const __m128i *)qs);
+    __m128i vlo = sse_lo_nibbles(vq);
+    __m128i vhi = sse_hi_nibbles(vq);
 
     __m128 r0, r1, r2, r3, r4, r5, r6, r7;
-    sse_u8_to_f32_x16(z0, vd, _mm_setzero_ps(), 8, &r0, &r1, &r2, &r3);
-    sse_u8_to_f32_x16(z1, vd, _mm_setzero_ps(), 8, &r4, &r5, &r6, &r7);
+    sse_u8_to_f32_x16(vlo, vd, _mm_setzero_ps(), 8, &r0, &r1, &r2, &r3);
+    sse_u8_to_f32_x16(vhi, vd, _mm_setzero_ps(), 8, &r4, &r5, &r6, &r7);
 
     sse_store_f32_x16(out +  0, r0, r1, r2, r3);
     sse_store_f32_x16(out + 16, r4, r5, r6, r7);
@@ -268,6 +267,7 @@ static void sse_block_q4_0(const u8 *data, float *out) {
 
 /*
  * Q4_1 block (20 bytes): [d:f16][m:f16][qs:16 bytes → 32 nibbles]
+ *   same split-half nibble layout as Q4_0
  *   out[o] = (float)nib * d + m
  */
 static void sse_block_q4_1(const u8 *data, float *out) {
@@ -277,15 +277,13 @@ static void sse_block_q4_1(const u8 *data, float *out) {
     __m128 vm = _mm_set1_ps(m);
     const u8 *qs = data + 4;
 
-    __m128i vq   = _mm_loadu_si128((const __m128i *)qs);
-    __m128i vlo  = sse_lo_nibbles(vq);
-    __m128i vhi  = sse_hi_nibbles(vq);
-    __m128i z0 = _mm_unpacklo_epi8(vlo, vhi);
-    __m128i z1 = _mm_unpackhi_epi8(vlo, vhi);
+    __m128i vq  = _mm_loadu_si128((const __m128i *)qs);
+    __m128i vlo = sse_lo_nibbles(vq);
+    __m128i vhi = sse_hi_nibbles(vq);
 
     __m128 r0, r1, r2, r3, r4, r5, r6, r7;
-    sse_u8_to_f32_x16(z0, vd, vm, 0, &r0, &r1, &r2, &r3);
-    sse_u8_to_f32_x16(z1, vd, vm, 0, &r4, &r5, &r6, &r7);
+    sse_u8_to_f32_x16(vlo, vd, vm, 0, &r0, &r1, &r2, &r3);
+    sse_u8_to_f32_x16(vhi, vd, vm, 0, &r4, &r5, &r6, &r7);
 
     sse_store_f32_x16(out +  0, r0, r1, r2, r3);
     sse_store_f32_x16(out + 16, r4, r5, r6, r7);
@@ -293,7 +291,7 @@ static void sse_block_q4_1(const u8 *data, float *out) {
 
 /*
  * Q5_0 block (22 bytes): [d:f16][qh:u32][ql:16 bytes → 32 nibbles]
- *   lo  = ql[o>>1] >> ((o&1)<<2) & 0xF
+ *   lo  = low/high nibble of ql[o & 15] (split-half, as Q4_0)
  *   hi  = (qh >> o) & 1
  *   out[o] = (float)((i32)((hi << 4) | lo) - 16) * d
  */
@@ -308,17 +306,15 @@ static void sse_block_q5_0(const u8 *data, float *out) {
     for (int o = 0; o < 32; o++)
         hi[o] = ((qh >> o) & 1) << 4;
 
-    __m128i vql  = _mm_loadu_si128((const __m128i *)ql);
-    __m128i vlo  = sse_lo_nibbles(vql);
-    __m128i vhi_lo = sse_hi_nibbles(vql);
-    __m128i z0 = _mm_unpacklo_epi8(vlo, vhi_lo);
-    __m128i z1 = _mm_unpackhi_epi8(vlo, vhi_lo);
+    __m128i vql    = _mm_loadu_si128((const __m128i *)ql);
+    __m128i vlo    = sse_lo_nibbles(vql);
+    __m128i vhi_nb = sse_hi_nibbles(vql);
 
     __m128i vhi0 = _mm_loadu_si128((const __m128i *)(hi +  0));
     __m128i vhi1 = _mm_loadu_si128((const __m128i *)(hi + 16));
 
     for (int h = 0; h < 2; h++) {
-        __m128i vnib = _mm_or_si128(h == 0 ? z0 : z1, h == 0 ? vhi0 : vhi1);
+        __m128i vnib = _mm_or_si128(h == 0 ? vlo : vhi_nb, h == 0 ? vhi0 : vhi1);
         __m128 r0, r1, r2, r3;
         sse_u8_to_f32_x16(vnib, vd, _mm_setzero_ps(), 16, &r0, &r1, &r2, &r3);
         sse_store_f32_x16(out + h * 16, r0, r1, r2, r3);
@@ -342,17 +338,15 @@ static void sse_block_q5_1(const u8 *data, float *out) {
     for (int o = 0; o < 32; o++)
         hi[o] = ((qh >> o) & 1) << 4;
 
-    __m128i vql     = _mm_loadu_si128((const __m128i *)ql);
-    __m128i vlo     = sse_lo_nibbles(vql);
-    __m128i vhi_lo  = sse_hi_nibbles(vql);
-    __m128i z0 = _mm_unpacklo_epi8(vlo, vhi_lo);
-    __m128i z1 = _mm_unpackhi_epi8(vlo, vhi_lo);
+    __m128i vql    = _mm_loadu_si128((const __m128i *)ql);
+    __m128i vlo    = sse_lo_nibbles(vql);
+    __m128i vhi_nb = sse_hi_nibbles(vql);
 
     __m128i vhi0 = _mm_loadu_si128((const __m128i *)(hi +  0));
     __m128i vhi1 = _mm_loadu_si128((const __m128i *)(hi + 16));
 
     for (int h = 0; h < 2; h++) {
-        __m128i vnib = _mm_or_si128(h == 0 ? z0 : z1, h == 0 ? vhi0 : vhi1);
+        __m128i vnib = _mm_or_si128(h == 0 ? vlo : vhi_nb, h == 0 ? vhi0 : vhi1);
         __m128 r0, r1, r2, r3;
         sse_u8_to_f32_x16(vnib, vd, vm, 0, &r0, &r1, &r2, &r3);
         sse_store_f32_x16(out + h * 16, r0, r1, r2, r3);
@@ -882,7 +876,8 @@ static float sse_dot_q8_0_block(const u8 *data, const float *x) {
     return d * sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(s0, s1), _mm_add_ps(s2, s3)));
 }
 
-/* Q4_0: sum = d * Σ((nib - 8) * x) = d * (Σ(nib*x) - 8*Σ(x)) */
+/* Q4_0: sum = d * Σ((nib - 8) * x) = d * (Σ(nib*x) - 8*Σ(x)).
+ * Nibbles are split-half: qs[0..15] low -> x[0..15], high -> x[16..31]. */
 static float sse_dot_q4_0_block(const u8 *data, const float *x) {
     float d = f16_to_f32(*(const u16 *)data);
     const u8 *qs = data + 2;
@@ -890,34 +885,30 @@ static float sse_dot_q4_0_block(const u8 *data, const float *x) {
     __m128 dot0 = _mm_setzero_ps(), dot1 = _mm_setzero_ps();
     __m128 dot2 = _mm_setzero_ps(), dot3 = _mm_setzero_ps();
 
-    for (int j = 0; j < 32; j += 16) {
-        __m128i vq  = _mm_loadu_si128((const __m128i *)(qs + j / 2));
-        __m128i vlo = sse_lo_nibbles(vq);
-        __m128i vhi = sse_hi_nibbles(vq);
-        __m128i z0 = _mm_unpacklo_epi8(vlo, vhi);
-        __m128i z1 = _mm_unpackhi_epi8(vlo, vhi);
+    __m128i vq  = _mm_loadu_si128((const __m128i *)qs);
+    __m128i vlo = sse_lo_nibbles(vq);
+    __m128i vhi = sse_hi_nibbles(vq);
 
-        for (int h = 0; h < 2; h++) {
-            __m128i vn = (h == 0) ? z0 : z1;
-            int jj = j + h * 16;
+    for (int h = 0; h < 2; h++) {
+        __m128i vn = (h == 0) ? vlo : vhi;
+        int jj = h * 16;
 
-            __m128i v16_0 = _mm_cvtepu8_epi16(vn);
-            __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vn, 8));
-            __m128 nf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-            __m128 nf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-            __m128 nf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-            __m128 nf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
+        __m128i v16_0 = _mm_cvtepu8_epi16(vn);
+        __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vn, 8));
+        __m128 nf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
+        __m128 nf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
+        __m128 nf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
+        __m128 nf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
 
-            __m128 xv0 = _mm_loadu_ps(x + jj +  0);
-            __m128 xv1 = _mm_loadu_ps(x + jj +  4);
-            __m128 xv2 = _mm_loadu_ps(x + jj +  8);
-            __m128 xv3 = _mm_loadu_ps(x + jj + 12);
+        __m128 xv0 = _mm_loadu_ps(x + jj +  0);
+        __m128 xv1 = _mm_loadu_ps(x + jj +  4);
+        __m128 xv2 = _mm_loadu_ps(x + jj +  8);
+        __m128 xv3 = _mm_loadu_ps(x + jj + 12);
 
-            dot0 = _mm_add_ps(dot0, _mm_mul_ps(nf0, xv0));
-            dot1 = _mm_add_ps(dot1, _mm_mul_ps(nf1, xv1));
-            dot2 = _mm_add_ps(dot2, _mm_mul_ps(nf2, xv2));
-            dot3 = _mm_add_ps(dot3, _mm_mul_ps(nf3, xv3));
-        }
+        dot0 = _mm_add_ps(dot0, _mm_mul_ps(nf0, xv0));
+        dot1 = _mm_add_ps(dot1, _mm_mul_ps(nf1, xv1));
+        dot2 = _mm_add_ps(dot2, _mm_mul_ps(nf2, xv2));
+        dot3 = _mm_add_ps(dot3, _mm_mul_ps(nf3, xv3));
     }
 
     __m128 sx0 = _mm_setzero_ps(), sx1 = _mm_setzero_ps();
@@ -945,36 +936,32 @@ static float sse_dot_q4_1_block(const u8 *data, const float *x) {
     __m128 sx0 = _mm_setzero_ps(), sx1 = _mm_setzero_ps();
     __m128 sx2 = _mm_setzero_ps(), sx3 = _mm_setzero_ps();
 
-    for (int j = 0; j < 32; j += 16) {
-        __m128i vq  = _mm_loadu_si128((const __m128i *)(qs + j / 2));
-        __m128i vlo = sse_lo_nibbles(vq);
-        __m128i vhi = sse_hi_nibbles(vq);
-        __m128i z0 = _mm_unpacklo_epi8(vlo, vhi);
-        __m128i z1 = _mm_unpackhi_epi8(vlo, vhi);
+    __m128i vq  = _mm_loadu_si128((const __m128i *)qs);
+    __m128i vlo = sse_lo_nibbles(vq);
+    __m128i vhi = sse_hi_nibbles(vq);
 
-        for (int h = 0; h < 2; h++) {
-            __m128i vn = (h == 0) ? z0 : z1;
-            int jj = j + h * 16;
+    for (int h = 0; h < 2; h++) {
+        __m128i vn = (h == 0) ? vlo : vhi;
+        int jj = h * 16;
 
-            __m128i v16_0 = _mm_cvtepu8_epi16(vn);
-            __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vn, 8));
-            __m128 nf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
-            __m128 nf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
-            __m128 nf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
-            __m128 nf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
+        __m128i v16_0 = _mm_cvtepu8_epi16(vn);
+        __m128i v16_1 = _mm_cvtepu8_epi16(_mm_srli_si128(vn, 8));
+        __m128 nf0 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_0));
+        __m128 nf1 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_0, 8)));
+        __m128 nf2 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(v16_1));
+        __m128 nf3 = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_srli_si128(v16_1, 8)));
 
-            __m128 xv0 = _mm_loadu_ps(x + jj +  0);
-            __m128 xv1 = _mm_loadu_ps(x + jj +  4);
-            __m128 xv2 = _mm_loadu_ps(x + jj +  8);
-            __m128 xv3 = _mm_loadu_ps(x + jj + 12);
+        __m128 xv0 = _mm_loadu_ps(x + jj +  0);
+        __m128 xv1 = _mm_loadu_ps(x + jj +  4);
+        __m128 xv2 = _mm_loadu_ps(x + jj +  8);
+        __m128 xv3 = _mm_loadu_ps(x + jj + 12);
 
-            dot0 = _mm_add_ps(dot0, _mm_mul_ps(nf0, xv0));
-            dot1 = _mm_add_ps(dot1, _mm_mul_ps(nf1, xv1));
-            dot2 = _mm_add_ps(dot2, _mm_mul_ps(nf2, xv2));
-            dot3 = _mm_add_ps(dot3, _mm_mul_ps(nf3, xv3));
-            sx0 = _mm_add_ps(sx0, xv0); sx1 = _mm_add_ps(sx1, xv1);
-            sx2 = _mm_add_ps(sx2, xv2); sx3 = _mm_add_ps(sx3, xv3);
-        }
+        dot0 = _mm_add_ps(dot0, _mm_mul_ps(nf0, xv0));
+        dot1 = _mm_add_ps(dot1, _mm_mul_ps(nf1, xv1));
+        dot2 = _mm_add_ps(dot2, _mm_mul_ps(nf2, xv2));
+        dot3 = _mm_add_ps(dot3, _mm_mul_ps(nf3, xv3));
+        sx0 = _mm_add_ps(sx0, xv0); sx1 = _mm_add_ps(sx1, xv1);
+        sx2 = _mm_add_ps(sx2, xv2); sx3 = _mm_add_ps(sx3, xv3);
     }
     float dot_nib = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(dot0, dot1), _mm_add_ps(dot2, dot3)));
     float sum_x   = sse_hsum_f32x4(_mm_add_ps(_mm_add_ps(sx0, sx1), _mm_add_ps(sx2, sx3)));

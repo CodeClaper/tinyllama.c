@@ -246,11 +246,18 @@ static inline float dequant_Q8_1(device const uint8_t *data, uint64_t i, device 
     return (float)(int8_t)blk[8 + o] * d;
 }
 
+/* Q4_0/Q4_1/Q5_0/Q5_1 pack 32 values as two 16-value halves: the low
+ * nibbles of qs[0..15] are elements 0..15 and the high nibbles are
+ * elements 16..31 (ggml dequantize_row_q4_0/_q4_1/_q5_0/_q5_1). */
+static inline uint32_t q4_nibble(device const uint8_t *qs, uint32_t o) {
+    return (qs[o & 15] >> ((o < 16) ? 0 : 4)) & 0xF;
+}
+
 static inline float dequant_Q4_0(device const uint8_t *data, uint64_t i, device const float *tables) {
     uint64_t bi = i >> 5; uint32_t o = i & 31;
     device const uint8_t *blk = data + bi * 18;
     float d = f16_to_f32(ld_u16(blk));
-    uint32_t nib = (blk[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    uint32_t nib = q4_nibble(blk + 2, o);
     return ((float)(int32_t)nib - 8.0f) * d;
 }
 
@@ -259,7 +266,7 @@ static inline float dequant_Q4_1(device const uint8_t *data, uint64_t i, device 
     device const uint8_t *blk = data + bi * 20;
     float d = f16_to_f32(ld_u16(blk));
     float m = f16_to_f32(ld_u16(blk + 2));
-    uint32_t nib = (blk[4 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    uint32_t nib = q4_nibble(blk + 4, o);
     return (float)nib * d + m;
 }
 
@@ -269,7 +276,7 @@ static inline float dequant_Q5_0(device const uint8_t *data, uint64_t i, device 
     float d = f16_to_f32(ld_u16(blk));
     uint32_t qh = ld_u32(blk + 2);
     uint32_t hi = (qh >> o) & 1;
-    uint32_t lo = (blk[6 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    uint32_t lo = q4_nibble(blk + 6, o);
     return ((float)(int32_t)((hi << 4) | lo) - 16.0f) * d;
 }
 
@@ -280,7 +287,7 @@ static inline float dequant_Q5_1(device const uint8_t *data, uint64_t i, device 
     float m = f16_to_f32(ld_u16(blk + 2));
     uint32_t qh = ld_u32(blk + 4);
     uint32_t hi = (qh >> o) & 1;
-    uint32_t lo = (blk[8 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    uint32_t lo = q4_nibble(blk + 8, o);
     return (float)((hi << 4) | lo) * d + m;
 }
 

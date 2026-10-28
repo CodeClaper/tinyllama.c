@@ -379,11 +379,18 @@ static inline float dequant_q8_1(const u8 *data, u64 i) {
     return (float)((const i8 *)(blk + 8))[o] * d;
 }
 
+/* Simple quants pack 32 values per block as two 16-value halves:
+ * the low nibbles of qs[0..15] are elements 0..15 and the high nibbles
+ * are elements 16..31 (ggml dequantize_row_q4_0/_q4_1/_q5_0/_q5_1). */
+static inline u32 q4_nibble(const u8 *qs, u32 o) {
+    return (qs[o & 15] >> ((o < 16) ? 0 : 4)) & 0xF;
+}
+
 static inline float dequant_q4_0(const u8 *data, u64 i) {
     u64 bi = i >> 5; u32 o = i & 31;
     const u8 *blk = data + bi * 18;
     float d = f16_to_f32(*(const u16 *)blk);
-    u32 nib = (blk[2 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 nib = q4_nibble(blk + 2, o);
     return ((float)(i32)nib - 8.0f) * d;
 }
 
@@ -392,7 +399,7 @@ static inline float dequant_q4_1(const u8 *data, u64 i) {
     const u8 *blk = data + bi * 20;
     float d = f16_to_f32(*(const u16 *)blk);
     float m = f16_to_f32(*(const u16 *)(blk + 2));
-    u32 nib = (blk[4 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 nib = q4_nibble(blk + 4, o);
     return (float)nib * d + m;
 }
 
@@ -402,7 +409,7 @@ static inline float dequant_q5_0(const u8 *data, u64 i) {
     float d = f16_to_f32(*(const u16 *)blk);
     u32 qh; memcpy(&qh, blk + 2, 4);
     u32 hi = (qh >> o) & 1;
-    u32 lo = (blk[6 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 lo = q4_nibble(blk + 6, o);
     return ((float)(i32)((hi << 4) | lo) - 16.0f) * d;
 }
 
@@ -413,7 +420,7 @@ static inline float dequant_q5_1(const u8 *data, u64 i) {
     float m = f16_to_f32(*(const u16 *)(blk + 2));
     u32 qh; memcpy(&qh, blk + 4, 4);
     u32 hi = (qh >> o) & 1;
-    u32 lo = (blk[8 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
+    u32 lo = q4_nibble(blk + 8, o);
     return (float)((hi << 4) | lo) * d + m;
 }
 

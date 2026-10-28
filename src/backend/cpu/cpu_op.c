@@ -632,9 +632,10 @@ static bool op_softcap(OpCtx *c) {
 /* Partial RoPE: rotates only the first rope_dim dimensions of each head.
  * head_dim is the full head dimension (stride between heads),
  * rope_dim is how many dims to rotate (64 of 256 for Qwen3.5).
- * The remaining (head_dim - rope_dim) dimensions are left unchanged. */
+ * Pairs are (i, i + rope_dim/2) within the first rope_dim dims, matching
+ * ggml's NEOX/MROPE rotation; the remaining dims are copied unchanged. */
 static void rope_partial(float *buf, u32 n_heads, u32 head_dim, u32 rope_dim, u32 pos, float theta_base) {
-    u32 half    = head_dim / 2;       /* pair stride (full head)     */
+    u32 half    = rope_dim / 2;       /* pair stride within rotated span */
     u32 n_pairs = rope_dim / 2;       /* how many pairs to rotate    */
     for (u32 h = 0; h < n_heads; h++) {
         float *bh = buf + (u64)h * head_dim;
