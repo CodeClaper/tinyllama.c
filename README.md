@@ -14,6 +14,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - Interactive CLI chat with conversation history
 - Inference benchmark with time and throughput statistics
 - Multi-threaded inference via thread pool
+- Concurrent request slots (`-np`): each slot has a private session, KV cache, and activation arena, so requests no longer reset each other's state
 - Micro-batching (`-ub`): prefill is split into bounded forward passes so activation memory scales with the micro-batch, not the context size
 - Supports multiple model architectures:
   - LLaMA
@@ -24,7 +25,7 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
   - Falcon-H1 (attention + Mamba2 hybrid)
   - Gemma 3
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
-- epoll-based event loop for HTTP serving
+- select-based event loop for HTTP serving (concurrent workers handle inference)
 - Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
 - Optional Metal GPU acceleration on macOS with automatic CPU fallback (`METAL=1 make`)
 - Partial GPU offload: `-ngl N` keeps the first `N` transformer layers on the GPU and the rest on the CPU, with only the hidden state crossing the bus at the split
@@ -46,9 +47,9 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 ## Dependencies
 
 - **Compiler:** GCC
-- **Libraries:** libm (math), pthreads, Linux kernel (eventfd, epoll)
+- **Libraries:** libm (math), pthreads; eventfd on Linux (self-pipe on other platforms)
 - **Optional:** CUDA toolkit (nvcc) for the GPU backend, or macOS with Xcode command line tools for the Metal backend
-- **OS:** Linux only (uses `eventfd`, `epoll`, `mmap`)
+- **OS:** Linux and macOS (uses `mmap`; `select` for the event loop)
 
 ## Build
 
@@ -95,8 +96,9 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
              -c 4096                          # Context size (default: 4096)
              -ub 512                          # Max tokens per forward pass (default: 512)
              -n 393216                        # Max tokens (default: 393216)
-             -t 1.0                           # Temperature (default: 1.0)
-             -T 1                             # Thread count (default: 1)
+             -t 0.8                           # Temperature (default: 0.8)
+             -T 8                             # Total thread count (default: CPU cores)
+             -np 2                            # Concurrent request slots (default: 2)
              -ngl -1                          # GPU layers (-1=auto, 0=CPU, default: -1)
              --topp 0.9                       # Top-p sampling (default: 0.9)
              -i                               # Inspect model metadata only
@@ -121,6 +123,22 @@ curl http://localhost:8080/v1/chat/completions \
     {"role": "user", "content": "Hello!"}
   ]
 }'
+```
+
+### Concurrent requests (`-np` / `--parallel`)
+
+`-np N` (default `2`) creates `N` request slots. The event loop accepts connections and reads requests, then hands each one to a worker bound to a private `Session`, so up to `N` generations run at once and additional requests wait in a bounded queue.
+
+- Every slot owns its own KV cache, activation arena, token/logits buffers, and recurrent state (e.g. Qwen3.5 SSM state); requests on different slots never share mutable inference state.
+- Model weights are loaded once and shared: the mmap-backed CPU weights are read-only for all slots, and the CUDA/Metal weight cache is global and de-duplicated.
+- Memory therefore grows as `weights + N × (arena + KV cache + recurrent state)`. Since each slot uses the full `-c` context size, raise `-np` with that in mind.
+- `-T` is the total worker-thread budget and is split evenly across slots (`max(1, -T / -np)`).
+- CPU slots run forward passes concurrently. CUDA/Metal share process-global scratch buffers, so forward passes from different slots are serialised (the server logs a warning); concurrent HTTP handling still works, but GPU compute is one slot at a time.
+
+For example, four simultaneous requests with two slots complete as two pairs, each pair reusing its slot's pre-allocated session:
+
+```bash
+./src/server -m model.gguf -np 2 -T 8 -c 4096
 ```
 
 ### Chat — Interactive CLI
@@ -208,7 +226,7 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
 
 ```
 - src/
-  - server.c          — CLI entry point, HTTP server, option parsing
+  - server.c          — CLI entry point, HTTP server, request worker pool, option parsing
   - chat.c            — Interactive CLI chat
   - bench.c           — Inference benchmark
   - core.c / core.h   — Engine/model loading, GGUF parsing
@@ -218,7 +236,7 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
   - slog.h
   - utils.c           — String parsing, key comparison, etc.
   - utils.h
-  - el.c              — epoll event loop
+  - el.c              — select-based event loop
   - el.h
   - anet.c            — TCP networking helpers
   - anet.h
