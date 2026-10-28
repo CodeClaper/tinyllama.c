@@ -261,9 +261,20 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
                                     s->tokens, s->n_tokens);
     u32 n_gen = 0;
 
+    /* The opening <think> is part of the prompt, not the sampled
+     * output.  Echo it so clients see the complete reasoning block. */
+    bool show_think = !s->no_think &&
+                      v->think_start_id != (i32)VOCAB_ID_NONE &&
+                      next_token != (u32)v->eos_id;
+
     if (stream) {
         http_stream_start(fd, 200, "OK");
         sse_emit_role(fd, (long)now);
+        if (show_think)
+            sse_emit_content(fd, (long)now, "<think>\n", 8);
+    } else if (show_think) {
+        memcpy(resp_body, "<think>\n", 8);
+        resp_used = 8;
     }
 
     for (u32 i = 0; i < max_tokens; i++) {

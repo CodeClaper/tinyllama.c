@@ -295,9 +295,15 @@ int main(int argc, char *argv[]) {
                                       session->tokens, session->n_tokens);
         double ttft_ms = (time_sec() - t_prefill) * 1000.0;
 
-        /* Generate. */
+        /* Generate.  The opening <think> lives in the prompt, so echo it
+         * here to keep the reasoning block visible in the transcript. */
         u32 n_gen = 0;
         double t0 = time_sec();
+        if (!session->no_think && v->think_start_id != (i32)VOCAB_ID_NONE &&
+            next_token != (u32)v->eos_id) {
+            fputs("<think>\n", stdout);
+            fflush(stdout);
+        }
         for (u32 i = 0; i < max_tokens; i++) {
             if (next_token == (u32)v->eos_id) break;
             char dec[64];
