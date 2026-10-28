@@ -1599,6 +1599,268 @@ void arch_config_init(Engine *en, ArchConfig *cfg) {
              cfg->kv_lora_rank, cfg->qk_nope_head_dim, cfg->qk_rope_head_dim);
 }
 
+/* Read the context length advertised by the GGUF metadata.  Most models
+ * store it as "<arch>.context_length"; fall back to the generic
+ * architecture prefix and finally to "general.context_length". */
+static u32 model_context_length(Model *m) {
+    const char *pfx  = m->arch_name[0] ? m->arch_name
+                                      : arch_key_prefix(m->arch);
+    const char *gpfx = arch_key_prefix(m->arch);
+    const char *prefixes[3];
+    int n = 0;
+    prefixes[n++] = pfx;
+    if (strcmp(gpfx, pfx) != 0) prefixes[n++] = gpfx;
+    prefixes[n++] = "general";
+
+    i64 value = 0;
+    for (int i = 0; i < n; i++) {
+        char key[96];
+        int len = snprintf(key, sizeof(key), "%s.context_length", prefixes[i]);
+        if (len <= 0 || (size_t)len >= sizeof(key)) continue;
+        if (model_get_int(m, key, &value) && value > 0)
+            return value > UINT32_MAX ? UINT32_MAX : (u32)value;
+    }
+    return 0;
+}
+
+/* Bytes of the distinct weight tensors belonging to one layer. */
+static size_t layer_weight_bytes(LayerWeights *lw) {
+    size_t bytes = 0;
+    for (int t = 0; t < TENSOR_COUNT; t++) {
+        TensorInfo *ti = lw->tensors[t];
+        if (!ti) continue;
+        bool dup = false;
+        for (int u = 0; u < t; u++)
+            if (lw->tensors[u] == ti) { dup = true; break; }
+        if (!dup) bytes += (size_t)ti->bytes;
+    }
+    return bytes;
+}
+
+/* Upper bound on the weights that will live in device memory for a
+ * given offload depth.  A negative depth means the auto-fit may place
+ * every layer on the device, so count the whole model. */
+static size_t gpu_weight_bytes(Engine *en, ArchConfig *cfg, int n_gpu_layers) {
+    Weights *w = en->weights;
+    if (!w || n_gpu_layers == 0) return 0;
+
+    u32 L = cfg->n_layer;
+    if (n_gpu_layers < 0 || (u32)n_gpu_layers >= L) {
+        size_t total = 0;
+        for (u64 i = 0; i < en->model->n_tensor; i++)
+            total += (size_t)en->model->tensor[i].bytes;
+        return total;
+    }
+
+    size_t total = 0;
+    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+    if (te) total += (size_t)te->bytes;
+    for (u32 l = 0; l < (u32)n_gpu_layers && l < L; l++)
+        total += layer_weight_bytes(&w->layers[l]);
+    return total;
+}
+
+/* True when the layer carries an attention KV cache (hybrid SSM layers
+ * use attn_qkv but have no K/V tensors and are skipped). */
+static bool layer_has_kv_cache(LayerWeights *lw) {
+    if (lw->tensors[TENSOR_ATTN_K]) return true;
+    if (lw->tensors[TENSOR_ATTN_QKV] && !lw->tensors[TENSOR_SSM_CONV1D])
+        return true;
+    return false;
+}
+
+/* KV-cache growth per context token for one session, matching the
+ * allocation performed by graph_build(). */
+static size_t kv_cache_bytes_per_token(Engine *en, ArchConfig *cfg,
+                                       int n_gpu_layers) {
+    u32 L = cfg->n_layer;
+    u32 limit = (n_gpu_layers < 0 || (u32)n_gpu_layers >= L)
+              ? L : (u32)n_gpu_layers;
+
+    if (en->model->arch == ARCH_DEEPSEEK) {
+        u64 rank = cfg->kv_lora_rank ? cfg->kv_lora_rank : 1;
+        u64 floats = (u64)cfg->head_dim + 4 * rank + 2;
+        return (size_t)floats * sizeof(float) * limit;
+    }
+
+    size_t per_layer = (size_t)cfg->n_kv_head * cfg->kv_head_dim
+                     * sizeof(float) * 2;
+    u32 layers = 0;
+    for (u32 l = 0; l < limit; l++)
+        if (layer_has_kv_cache(&en->weights->layers[l])) layers++;
+    return per_layer * layers;
+}
+
+/* Available device-memory budget after reserving room for the driver
+ * context and keeping 10% headroom. */
+static size_t gpu_memory_budget(size_t free_b) {
+    size_t reserve = (size_t)384 << 20;
+    size_t budget  = free_b > reserve ? free_b - reserve : 0;
+    return budget / 10 * 9;
+}
+
+#if defined(GPU_BUILD)
+/* Number of leading layers that fit when the session uses `ctx_size`
+ * context tokens.  This is the single source of truth for both the
+ * context-size auto-fit and session_auto_gpu_layers(), so the two can
+ * never disagree.  n_parallel slots each own a KV cache and an arena;
+ * weights are shared through the global device cache. */
+static int gpu_layers_fit_at(Engine *en, ArchConfig *cfg, u32 ctx_size,
+                             u32 n_ubatch, int n_parallel, size_t free_b) {
+    if (n_parallel < 1) n_parallel = 1;
+    Weights *w = en->weights;
+    u32 L = cfg->n_layer;
+    if (!w || !w->layers || L == 0 || free_b == 0) return 0;
+
+    size_t budget = gpu_memory_budget(free_b);
+    size_t used = 0;
+    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
+    if (te) used += (size_t)te->bytes;
+
+    size_t slots = (size_t)n_parallel;
+    size_t kv = (size_t)ctx_size * cfg->n_kv_head * cfg->kv_head_dim
+              * sizeof(float) * 2 * slots;
+    u32 arena_rows = n_ubatch ? n_ubatch : ctx_size;
+    double arena_full = (double)arena_rows * cfg->n_embd * sizeof(float)
+                      * 36.0 * (double)slots;
+    size_t arena_layer = (size_t)(arena_full / (double)L);
+
+    int n = 0;
+    for (u32 l = 0; l < L; l++) {
+        size_t lw = layer_weight_bytes(&w->layers[l]);
+        bool attn = w->layers[l].tensors[TENSOR_ATTN_K] != NULL;
+        size_t add = lw + (attn ? kv : 0) + arena_layer;
+        if (used + add > budget) break;
+        used += add;
+        n++;
+    }
+    if (n == (int)L) {
+        TensorInfo *tout = w->tensors[TENSOR_OUTPUT];
+        size_t extra = tout ? (size_t)tout->bytes : 0;
+        if (used + extra > budget) n--;
+    }
+    return n;
+}
+#endif /* GPU_BUILD */
+
+u32 engine_auto_ctx_size(Engine *en, u32 n_ubatch, int n_gpu_layers,
+                         int n_parallel) {
+    if (!en) return DEFAULT_CTX_SIZE;
+    if (n_parallel < 1) n_parallel = 1;
+
+    u32 model_ctx = model_context_length(en->model);
+    if (model_ctx == 0) model_ctx = DEFAULT_CTX_SIZE;
+
+    /* CPU-only (or no usable device): the model's full context is the
+     * only sensible default. */
+    if (n_gpu_layers == 0) return model_ctx;
+#if defined(GPU_BUILD)
+    if (!gpu_available()) return model_ctx;
+#elif defined(METAL_BUILD)
+    if (!metal_available()) return model_ctx;
+#else
+    return model_ctx;
+#endif
+
+    size_t free_b = 0, total_b = 0;
+#if defined(GPU_BUILD)
+    gpu_mem_info(&free_b, &total_b);
+#elif defined(METAL_BUILD)
+    metal_mem_info(&free_b, &total_b);
+#endif
+    (void)total_b;
+    if (free_b == 0) return model_ctx;
+
+    ArchConfig cfg;
+    arch_config_init(en, &cfg);
+    if (cfg.n_embd == 0) return model_ctx;
+
+#if defined(GPU_BUILD)
+    /* Auto offload: pick the largest context for which every layer fits
+     * on the device, so the resolved -ngl is always L/L.  Use the same
+     * estimator as session_auto_gpu_layers() to make that guarantee
+     * exact. */
+    if (n_gpu_layers < 0) {
+        int L = (int)cfg.n_layer;
+        if (L <= 0) return model_ctx;
+
+        u32 ctx;
+        int fit = gpu_layers_fit_at(en, &cfg, model_ctx, n_ubatch,
+                                    n_parallel, free_b);
+        if (fit >= L) {
+            ctx = model_ctx;
+        } else if (gpu_layers_fit_at(en, &cfg, 1, n_ubatch,
+                                     n_parallel, free_b) < L) {
+            /* Even one token cannot fit all layers: the model itself is
+             * too large for the device.  Keep a usable context and let
+             * the normal partial-offload path handle it. */
+            ctx = n_ubatch > DEFAULT_CTX_SIZE ? n_ubatch : DEFAULT_CTX_SIZE;
+            if (ctx > model_ctx) ctx = model_ctx;
+            if (ctx == 0) ctx = 1;
+            slog(WARN, "Context auto: cannot fit all %d layers in %.1f MB "
+                 "even at ctx=1; falling back to ctx=%u with partial offload",
+                 L, (double)free_b / 1048576.0, ctx);
+        } else {
+            u32 lo = 1, hi = model_ctx;
+            while (lo < hi) {
+                u32 mid = lo + (hi - lo + 1) / 2;
+                if (gpu_layers_fit_at(en, &cfg, mid, n_ubatch,
+                                      n_parallel, free_b) >= L)
+                    lo = mid;
+                else
+                    hi = mid - 1;
+            }
+            ctx = lo;
+            if (ctx > 256) ctx = ctx / 256 * 256;
+            if (ctx == 0) ctx = 1;
+        }
+
+        slog(INFO, "Context auto: model=%u free=%.1f MB slots=%d -> "
+             "ctx=%u, GPU layers=%d/%d",
+             model_ctx, (double)free_b / 1048576.0, n_parallel, ctx,
+             gpu_layers_fit_at(en, &cfg, ctx, n_ubatch, n_parallel, free_b),
+             L);
+        return ctx;
+    }
+#endif
+
+    size_t kv_per_token = kv_cache_bytes_per_token(en, &cfg, n_gpu_layers);
+    if (kv_per_token == 0) return model_ctx;
+
+    size_t weights = gpu_weight_bytes(en, &cfg, n_gpu_layers);
+    u32 arena_rows = n_ubatch ? n_ubatch : model_ctx;
+    size_t arena = (size_t)((double)arena_rows * cfg.n_embd *
+                            sizeof(float) * 36.0 * (double)n_parallel);
+
+    size_t budget = gpu_memory_budget(free_b);
+
+    size_t fixed = weights + arena;
+    u64 fit = budget > fixed
+            ? (u64)(budget - fixed) / ((u64)kv_per_token * (u64)n_parallel)
+            : 0;
+
+    u32 low = n_ubatch ? n_ubatch : 512;
+    if (low > model_ctx) low = model_ctx;
+    if (low == 0) low = 1;
+
+    u32 ctx;
+    if (fit >= model_ctx) {
+        ctx = model_ctx;
+    } else {
+        ctx = fit > UINT32_MAX ? UINT32_MAX : (u32)fit;
+        if (ctx > 256) ctx = ctx / 256 * 256;
+        if (ctx < low) ctx = low;
+        if (ctx > model_ctx) ctx = model_ctx;
+    }
+
+    slog(INFO, "Context auto: model=%u free=%.1f MB budget=%.1f MB "
+         "weights=%.1f MB kv/token=%.1f KB slots=%d -> ctx=%u",
+         model_ctx, (double)free_b / 1048576.0,
+         (double)budget / 1048576.0, (double)weights / 1048576.0,
+         (double)kv_per_token / 1024.0, n_parallel, ctx);
+    return ctx;
+}
+
 
 #if defined(GPU_BUILD)
 /* Approximate how many leading layers fit in the available device
@@ -1628,50 +1890,12 @@ static int session_auto_gpu_layers(Session *s, int n_parallel) {
     (void)total_b;
     if (free_b == 0) return 0;
 
-    Weights *w = s->en ? s->en->weights : NULL;
     u32 L = s->cfg.n_layer;
-    if (!w || !w->layers || L == 0) return 0;
-
-    size_t reserve = (size_t)384 << 20;          /* CUDA context + slack */
-    size_t budget  = free_b > reserve ? free_b - reserve : 0;
-    budget = budget / 10 * 9;                     /* keep 10% headroom */
-
-    size_t used = 0;
-    TensorInfo *te = w->tensors[TENSOR_TOKEN_EMBD];
-    if (te) used += (size_t)te->bytes;
-
-    /* Per-slot state: every parallel slot keeps its own KV cache and
-     * activation arena, so reserve n_parallel copies. */
-    size_t slots = (size_t)n_parallel;
-    size_t kv = (size_t)s->ctx_size * s->cfg.n_kv_head * s->cfg.kv_head_dim * sizeof(float) * 2 * slots;
-    u32 arena_rows = s->n_ubatch ? s->n_ubatch : s->ctx_size;
-    double arena_full = (double)arena_rows * s->cfg.n_embd * sizeof(float) * 36.0 * (double)slots;
-    size_t arena_layer = (size_t)(arena_full / (double)L);
-
-    int n = 0;
-    for (u32 l = 0; l < L; l++) {
-        size_t lw = 0;
-        for (int t = 0; t < TENSOR_COUNT; t++) {
-            TensorInfo *ti = w->layers[l].tensors[t];
-            if (!ti) continue;
-            bool dup = false;
-            for (int u = 0; u < t; u++)
-                if (w->layers[l].tensors[u] == ti) { dup = true; break; }
-            if (!dup) lw += (size_t)ti->bytes;
-        }
-        bool attn = w->layers[l].tensors[TENSOR_ATTN_K] != NULL;
-        size_t add = lw + (attn ? kv : 0) + arena_layer;
-        if (used + add > budget) break;
-        used += add;
-        n++;
-    }
-    if (n == (int)L) {
-        TensorInfo *tout = w->tensors[TENSOR_OUTPUT];
-        size_t extra = tout ? (size_t)tout->bytes : 0;
-        if (used + extra > budget) n--;
-    }
+    int n = gpu_layers_fit_at(s->en, &s->cfg, s->ctx_size, s->n_ubatch,
+                              n_parallel, free_b);
     slog(INFO, "GPU auto: free=%.1f MB budget=%.1f MB slots=%d -> " "n_gpu_layers=%d/%u",
-         (double)free_b / 1048576.0, (double)budget / 1048576.0,
+         (double)free_b / 1048576.0,
+         (double)gpu_memory_budget(free_b) / 1048576.0,
          n_parallel, n, L);
 
     en->auto_gpu_layers          = n;

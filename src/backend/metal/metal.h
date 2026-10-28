@@ -40,6 +40,10 @@ extern "C" {
 /* Returns nonzero if a usable Metal device is present. */
 int metal_available(void);
 
+/* Current free / total recommended working-set memory in bytes
+ * (0 when unavailable). */
+void metal_mem_info(size_t *free_bytes, size_t *total_bytes);
+
 /* Dequantize nb elements starting at i0 from tensor ti into out[0..nb-1].
  * out must have room for nb floats. Returns 0 on success, -1 on error. */
 int metal_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out);

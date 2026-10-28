@@ -175,6 +175,26 @@ int metal_available(void) {
     return cached;
 }
 
+void metal_mem_info(size_t *free_bytes, size_t *total_bytes) {
+    if (free_bytes) *free_bytes = 0;
+    if (total_bytes) *total_bytes = 0;
+    if (!metal_available()) return;
+
+    pthread_mutex_lock(&g_lock);
+    if (!g_device) g_device = MTLCreateSystemDefaultDevice();
+    if (g_device) {
+        NSUInteger total = 0;
+        NSUInteger used  = 0;
+        if ([g_device respondsToSelector:@selector(recommendedMaxWorkingSetSize)])
+            total = [g_device recommendedMaxWorkingSetSize];
+        if ([g_device respondsToSelector:@selector(currentAllocatedSize)])
+            used = [g_device currentAllocatedSize];
+        if (total_bytes) *total_bytes = (size_t)total;
+        if (free_bytes)  *free_bytes  = (size_t)(total > used ? total - used : 0);
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
 /* Upload the IQ grids / value tables from quants.c into one device
  * buffer.  Layout (float offsets) must match the _TAB defines in
  * metal.metal. */

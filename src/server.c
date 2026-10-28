@@ -543,7 +543,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -m  | --model             <string>  The model file path to run\n");
     fprintf(file, "  -h  | --host              <string>  The server host, defalt 127.0.0.1\n");
     fprintf(file, "  -p  | --port              <int>     The Port to listening, default 9987\n");
-    fprintf(file, "  -c  | --ctx               <int>     The context size, defalt 4096\n");
+    fprintf(file, "  -c  | --ctx               <int>     The context size, default auto (model context, capped by VRAM)\n");
     fprintf(file, "  -ub | --ubatch            <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
@@ -575,7 +575,7 @@ static ServerOptions parse_options(int argc, char *argv[]) {
     ServerOptions so = {
         .host = "127.0.0.1",
         .port = 8080,
-        .ctx_size = 4096,
+        .ctx_size = 0,
         .n_ubatch = DEFAULT_N_UBATCH,
         .default_tokens = 393216,
         .sample = {
@@ -712,6 +712,14 @@ int main(int argc, char *argv[]) {
         engine_close(engine);
         return 0;
     }
+
+    /* No explicit -c: use the model's context length when it fits in
+     * device memory, otherwise the largest value that fits across all
+     * parallel slots. */
+    if (so.ctx_size <= 0)
+        so.ctx_size = (int)engine_auto_ctx_size(engine, (u32)so.n_ubatch,
+                                                so.n_gpu_layers,
+                                                so.n_parallel);
 
     /* 3. Create one session per concurrent request slot.  Each owns its
      * own tokens, logits, KV cache and graph arena, so requests never

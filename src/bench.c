@@ -38,7 +38,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "Example: bench -m model.gguf -i \"Who is Isaac Newton?\"\n");
     fprintf(file, "Options:\n");
     fprintf(file, "  -m  | --model   <string>  The model file path to run\n");
-    fprintf(file, "  -c  | --ctx     <int>     The context size, default 4096\n");
+    fprintf(file, "  -c  | --ctx     <int>     The context size, default auto (model context, capped by VRAM)\n");
     fprintf(file, "  -ub | --ubatch  <int>     Max tokens per forward pass, default 512\n");
     fprintf(file, "  -n  | --tokens  <int>     Number of tokens to generate, default 128\n");
     fprintf(file, "  -T  | --threads <int>     Number of threads, default CPU cores\n");
@@ -63,7 +63,7 @@ static char *parse_arg(int argc, char *argv[], int *i, const char *opt) {
 /* Parse options. */
 static BenchOptions parse_options(int argc, char *argv[]) {
     BenchOptions bo = {
-        .ctx_size = 4096,
+        .ctx_size = 0,
         .n_ubatch = DEFAULT_N_UBATCH,
         .n_tokens = 128,
         .sample = {
@@ -157,6 +157,12 @@ int main(int argc, char *argv[]) {
     if (!engine) slog(ERROR, "Failed to load model");
 
     slog(INFO, "Loaded model (%s)", engine->model->arch_name);
+
+    /* No explicit -c: use the model's context length when it fits in
+     * device memory, otherwise the largest value that does. */
+    if (opts.ctx_size <= 0)
+        opts.ctx_size = (int)engine_auto_ctx_size(engine, opts.n_ubatch,
+                                                  opts.n_gpu_layers, 1);
 
     /* Create session. */
     Session *session = session_create(engine, (u32)opts.ctx_size,

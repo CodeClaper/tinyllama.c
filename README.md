@@ -93,7 +93,7 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
 ./src/server -m model.gguf                    # Model file (required)
              -p 8080                          # Port (default: 8080)
              -h 127.0.0.1                     # Host (default: 127.0.0.1)
-             -c 4096                          # Context size (default: 4096)
+             -c 4096                          # Context size (default: auto, capped by VRAM)
              -ub 512                          # Max tokens per forward pass (default: 512)
              -n 393216                        # Max tokens (default: 393216)
              -t 0.8                           # Temperature (default: 0.8)
@@ -149,7 +149,7 @@ For example, four simultaneous requests with two slots complete as two pairs, ea
 
 # Full options
 ./src/chat -m model.gguf                      # Model file (required)
-           -c 4096                            # Context size (default: 4096)
+           -c 4096                            # Context size (default: auto, capped by VRAM)
            -ub 512                            # Max tokens per forward pass (default: 512)
            -n 128                             # Max tokens per response (default: 128)
            -T 1                               # Thread count (default: 1)
@@ -174,7 +174,7 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
 
 # Full options
 ./src/bench -m model.gguf                     # Model file (required)
-            -c 4096                           # Context size (default: 4096)
+            -c 4096                           # Context size (default: auto, capped by VRAM)
             -ub 512                           # Max tokens per forward pass (default: 512)
             -n 128                            # Tokens to generate per iteration (default: 128)
             -T 1                              # Thread count (default: 1)
