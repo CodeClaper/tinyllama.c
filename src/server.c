@@ -30,7 +30,7 @@
 #include "graph.h"
 
 #define JSON_WRAPPER_RESERVE 256 
-#define DEFAULT_N_PARALLEL   2
+#define DEFAULT_N_PARALLEL   1
 #define JOB_QUEUE_CAP        256
 
 /* A parsed-but-not-yet-executed request.  The body is copied out of the
@@ -548,7 +548,7 @@ static void usage(FILE *file, int exit_code) {
     fprintf(file, "  -n  | --tokens            <int>     The default token size, defalt 393216\n");
     fprintf(file, "  -t  | --temp              <float>   Temperature for sampling, default 0.8\n");
     fprintf(file, "  -T  | --threads           <int>     Number of threads, default CPU cores\n");
-    fprintf(file, "  -np | --parallel          <int>     Concurrent request slots, default 2\n");
+    fprintf(file, "  -np | --parallel          <int>     Concurrent request slots, default 1\n");
     fprintf(file, "  -nt | --no-thinking       <none>    Disable thinking mode\n");
     fprintf(file, "  -ngl| --n-gpu-layers      <int>     Layers on GPU (-1=auto, 0=CPU, default -1)\n");
     fprintf(file, "  -tp | --topp              <float>   Top-p (nucleus) threshold, default 0.9\n");
