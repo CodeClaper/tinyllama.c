@@ -578,8 +578,7 @@ static bool gpu_op_rms_norm(OpCtx *c) {
     const float *w = gpu_op_weight_f32(tw);
     if (!w) return false;
     u32 wn = (u32)tw->n_element;
-    k_rms_norm<<<c->r, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, w, wn, c->od,
-                                         c->base, DEFAULT_EPS);
+    k_rms_norm<<<c->r, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, w, wn, c->od, c->base, DEFAULT_EPS);
     CHECK(cudaGetLastError());
     return true;
 }
