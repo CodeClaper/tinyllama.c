@@ -305,9 +305,11 @@ int main(int argc, char *argv[]) {
          * here to keep the reasoning block visible in the transcript. */
         u32 n_gen = 0;
         double t0 = time_sec();
+        bool in_think = false;
         if (!session->no_think && v->think_start_id != (i32)VOCAB_ID_NONE &&
             next_token != (u32)v->eos_id) {
-            fputs("<think>\n", stdout);
+            in_think = true;
+            fputs("\033[2m<think>\n", stdout);
             fflush(stdout);
         }
         for (u32 i = 0; i < max_tokens; i++) {
@@ -318,6 +320,11 @@ int main(int argc, char *argv[]) {
                 dec[dlen] = '\0';
                 fputs(dec, stdout);
                 fflush(stdout);
+                if (in_think && next_token == (u32)v->think_end_id) {
+                    fputs("\033[0m", stdout);
+                    fflush(stdout);
+                    in_think = false;
+                }
             }
             n_gen++;
             /* Incremental decode: one new row at the current position;
@@ -329,6 +336,10 @@ int main(int argc, char *argv[]) {
             if (!graph_execute(session, &next_token, 1, session->logits)) break;
             next_token = sample_token(session->logits, session->cfg.n_vocab, &session->sample,
                                        session->tokens, session->n_tokens);
+        }
+        if (in_think) {
+            fputs("\033[0m", stdout);
+            fflush(stdout);
         }
         double dt = time_sec() - t0;
         double tok_s = dt > 0.0 ? (double)n_gen / dt : 0.0;
