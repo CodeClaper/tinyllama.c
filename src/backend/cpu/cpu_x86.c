@@ -1565,10 +1565,139 @@ fallback_dot:
 }
 
 /* ================================================================
- * i8 dot-product path — not available on x86 (no vdotq_s32).
- * Stubs ensure callers (guarded by __ARM_FEATURE_DOTPROD) fall
- * through to gguf_dot_batch on x86.
+ * i8 dot-product path (AVX2 / AVX-VNNI)
+ *
+ * Quantise x to i8 once per mat-vec, then evaluate every weight row
+ * with integer MACs.  Q4_0 nibbles are widened to u8 and biased via
+ *   Σ((nib-8)*x) = Σ(nib*x) - 8*Σ(x)
+ * where both sums run in i32.  AVX-VNNI folds 4 MACs into one
+ * dpbusd; the AVX2 fallback uses maddubs + madd.
  * ================================================================ */
+
+#if defined(__AVX2__) && defined(__FMA__) && \
+    (defined(__x86_64__) || defined(__i386__))
+
+bool cpu_i8_dot_supported(u32 type) {
+    return type == GGUF_TYPE_Q4_0;
+}
+
+float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
+    const __m256 absmask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    __m256 vmax = _mm256_setzero_ps();
+    u64 i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 v = _mm256_and_ps(_mm256_loadu_ps(x + i), absmask);
+        vmax = _mm256_max_ps(vmax, v);
+    }
+    __m128 m = _mm_max_ps(_mm256_castps256_ps128(vmax),
+                          _mm256_extractf128_ps(vmax, 1));
+    m = _mm_max_ps(m, _mm_movehl_ps(m, m));
+    m = _mm_max_ss(m, _mm_shuffle_ps(m, m, 0x55));
+    float max_abs = _mm_cvtss_f32(m);
+    for (; i < n; i++) {
+        float v = fabsf(x[i]);
+        if (v > max_abs) max_abs = v;
+    }
+    if (max_abs < 1e-8f) max_abs = 1e-8f;
+
+    float scale = 127.0f / max_abs;
+    __m256 vscale = _mm256_set1_ps(scale);
+    i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256i q = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_loadu_ps(x + i), vscale));
+        __m128i p16 = _mm_packs_epi32(_mm256_castsi256_si128(q),
+                                      _mm256_extracti128_si256(q, 1));
+        __m128i p8  = _mm_packs_epi16(p16, p16);
+        _mm_storel_epi64((__m128i *)(out + i), p8);
+    }
+    for (; i < n; i++) {
+        float v = x[i] * scale;
+        if (v > 127.0f) v = 127.0f;
+        if (v < -128.0f) v = -128.0f;
+        out[i] = (i8)(i32)roundf(v);
+    }
+    return scale;
+}
+
+static inline i32 avx2_hsum_epi32_8(__m256i v) {
+    __m128i s = _mm_add_epi32(_mm256_castsi256_si128(v),
+                              _mm256_extracti128_si256(v, 1));
+    s = _mm_hadd_epi32(s, s);
+    s = _mm_hadd_epi32(s, s);
+    return _mm_cvtsi128_si32(s);
+}
+
+/* Integer dot of one Q4_0 block (32 elements) against i8 activations.
+ * Returns Σ((nib - 8) * x_i8). */
+static i32 avx2_dot_q4_0_i8_block(const u8 *data, const i8 *x_i8) {
+    const u8 *qs = data + 2;
+
+    __m128i q8 = _mm_loadu_si128((const __m128i *)qs);
+    __m256i w  = _mm256_cvtepu8_epi16(q8);
+    const __m256i nib = _mm256_set1_epi16(0x0F);
+    __m256i lo = _mm256_and_si256(w, nib);
+    __m256i hi = _mm256_and_si256(_mm256_srli_epi16(w, 4), nib);
+    __m256i qb = _mm256_packus_epi16(lo, hi);
+    qb = _mm256_permute4x64_epi64(qb, 0xD8);   /* [lo0..15, hi0..15] */
+
+    __m256i xv = _mm256_loadu_si256((const __m256i *)x_i8);
+
+#if defined(__AVXVNNI__)
+    __m256i acc = _mm256_dpbusd_epi32(_mm256_setzero_si256(), qb, xv);
+    __m256i sx  = _mm256_dpbusd_epi32(_mm256_setzero_si256(),
+                                      _mm256_set1_epi8(1), xv);
+#else
+    __m256i acc = _mm256_madd_epi16(_mm256_maddubs_epi16(qb, xv),
+                                    _mm256_set1_epi16(1));
+    __m256i sx  = _mm256_madd_epi16(
+                      _mm256_maddubs_epi16(_mm256_set1_epi8(1), xv),
+                      _mm256_set1_epi16(1));
+#endif
+
+    return avx2_hsum_epi32_8(acc) - 8 * avx2_hsum_epi32_8(sx);
+}
+
+float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
+                        const i8 *x_i8, float x_scale) {
+    const u8 *data = ti->data;
+    u32 type = ti->type;
+
+    if (type != GGUF_TYPE_Q4_0) {
+        float result = 0.0f;
+        for (u64 j = i; j < i + n; j++)
+            result += gguf_dequant(ti, j) * ((float)(i8)x_i8[j - i] / x_scale);
+        return result;
+    }
+
+    u64 end = i + n;
+    u64 bi0 = i / BLOCK_SIMPLE;
+    u64 bi1 = (end + BLOCK_SIMPLE - 1) / BLOCK_SIMPLE;
+    float acc = 0.0f;   /* in x_i8 units; divided by x_scale at the end */
+
+    for (u64 bi = bi0; bi < bi1; bi++) {
+        u64 bs = bi * BLOCK_SIMPLE;
+        u64 be = bs + BLOCK_SIMPLE;
+        u64 cs = i > bs ? i : bs;
+        u64 ce = end < be ? end : be;
+
+        if (cs == bs && ce == be) {
+            const u8 *blk = data + bi * 18;
+            float d = f16_to_f32(*(const u16 *)blk);
+            acc += d * (float)avx2_dot_q4_0_i8_block(blk, x_i8 + (cs - i));
+        } else {
+            for (u64 j = cs; j < ce; j++)
+                acc += gguf_dequant(ti, j) * (float)(i8)x_i8[j - i];
+        }
+    }
+    return acc / x_scale;
+}
+
+#else
+
+bool cpu_i8_dot_supported(u32 type) {
+    (void)type;
+    return false;
+}
 
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
     (void)x; (void)out; (void)n;
@@ -1576,10 +1705,12 @@ float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
 }
 
 float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
-                         const i8 *x_i8, float x_scale) {
+                        const i8 *x_i8, float x_scale) {
     (void)ti; (void)i; (void)n; (void)x_i8; (void)x_scale;
     return 0.0f;
 }
+
+#endif
 
 /* ================================================================
  * Dense f32 matrix-matrix multiply  C = A @ B

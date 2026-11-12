@@ -86,8 +86,8 @@ typedef struct {
     TensorInfo  *tw;      /* weight tensor                         */
     const float *x;       /* input vector                          */
     u64          cols;    /* row length / dot-product length       */
-    const i8    *x_i8;    /* i8-quantised x (dotprod path only)    */
-    float        x_scale; /* scale for x_i8 (dotprod path only)    */
+    const i8    *x_i8;    /* i8-quantised x (i8 dot path only)     */
+    float        x_scale; /* scale for x_i8 (i8 dot path only)     */
 } MatVecCtx;
 
 /* Standard fused dequant + dot product row worker. */
@@ -97,8 +97,8 @@ static void matvec_worker(void *arg, int tid, int i) {
     c->y[i] = gguf_dot_batch(c->tw, (u64)i * c->cols, c->cols, c->x);
 }
 
-/* i8 dot-product row worker (ARMv8.2+ dotprod, Q8_0 / Q8_K). */
-#if defined(__ARM_FEATURE_DOTPROD)
+/* i8 dot-product row worker (ARMv8.2+ dotprod / x86 AVX2/VNNI). */
+#if CPU_HAVE_I8_DOT
 static void matvec_i8_worker(void *arg, int tid, int i) {
     (void)tid;
     MatVecCtx *c = (MatVecCtx *)arg;
@@ -157,10 +157,9 @@ static bool mat_vec_mul(float *y, TensorInfo *tw, const float *x, u64 rows, u64 
         /* Standard: W stored as [rows × cols], compute y = W @ x.
          * Contiguous rows — fused dequant + dot. */
 
-        /* For Q8_0 / Q8_K: if dotprod available, quantise x to i8
-         * once, then use vdotq_s32 (1 insn / 4 MACs). */
-#if defined(__ARM_FEATURE_DOTPROD)
-        if (tw->type == GGUF_TYPE_Q8_0 || tw->type == GGUF_TYPE_Q8_K) {
+        /* Quantise x to i8 once, then reuse it across all rows. */
+#if CPU_HAVE_I8_DOT
+        if (cpu_i8_dot_supported(tw->type)) {
             i8 *x_i8 = smalloc(cols * sizeof(i8));
             if (!x_i8) return false;
             float x_scale = quantize_f32_to_i8(x, x_i8, cols);

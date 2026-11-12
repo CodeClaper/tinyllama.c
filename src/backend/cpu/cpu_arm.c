@@ -1637,6 +1637,10 @@ static float vdot_dot_q8_k_block(const u8 *data, const i8 *x_i8,
 typedef float (*i8_block_dot_fn)(const u8 *data, const i8 *x_i8,
                                   float d, float x_scale);
 
+bool cpu_i8_dot_supported(u32 type) {
+    return type == GGUF_TYPE_Q8_0 || type == GGUF_TYPE_Q8_K;
+}
+
 float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n,
                          const i8 *x_i8, float x_scale) {
     const u8 *data = ti->data;
@@ -1690,6 +1694,11 @@ fallback_i8:
 }
 
 #else  /* !__ARM_FEATURE_DOTPROD — stubs, callers fall back to gguf_dot_batch */
+
+bool cpu_i8_dot_supported(u32 type) {
+    (void)type;
+    return false;
+}
 
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n) {
     (void)x; (void)out; (void)n; return 0.0f;

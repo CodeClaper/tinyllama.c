@@ -21,14 +21,22 @@ void gguf_dequant_batch(TensorInfo *ti, u64 i0, u64 nb, float *out);
 float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x);
 
 /*
- * vdotq_s32 i8 dot-product path (ARMv8.2+ dotprod).
+ * i8 dot-product path (ARMv8.2+ dotprod, or x86 AVX2/VNNI).
  *
  * Quantise x to i8 once, then reuse across all rows.  Each dot
- * product uses vdotq_s32: one instruction for 4 i8×i8→i32 MACs
- * instead of the 5-instruction widening chain.
+ * product does 4 i8×i8→i32 MACs per instruction instead of the
+ * widening f32 chain.
  */
+#if defined(__ARM_FEATURE_DOTPROD) || \
+    ((defined(__x86_64__) || defined(__i386__)) && defined(__AVX2__) && defined(__FMA__))
+#  define CPU_HAVE_I8_DOT 1
+#else
+#  define CPU_HAVE_I8_DOT 0
+#endif
+
 float quantize_f32_to_i8(const float *x, i8 *out, u64 n);
 float gguf_dot_i8_batch(TensorInfo *ti, u64 i, u64 n, const i8 *x_i8, float x_scale);
+bool cpu_i8_dot_supported(u32 type);
 
 /*
  * Plain f32 matrix-matrix multiply: C = A @ B.
