@@ -4,7 +4,7 @@
   <img src="docs/banner.svg" alt="tinyllama.c — pure C LLM inference, GGUF v3" width="686">
 </p>
 
-Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. It loads GGUF v3 model files (the format used by llama.cpp) via mmap for zero-copy access. It provides three modes of operation:
+Tinyllama.c is a tiny and simple local inference engine for LLMs, written in pure C. It runs GGUF v3 model files (the format used by llama.cpp), loading them via mmap for zero-copy access. It provides three modes of operation:
 
 - **server** — OpenAI-compatible HTTP chat server
 - **chat** — Interactive CLI chat
@@ -20,14 +20,16 @@ Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. I
 - Multi-threaded inference via thread pool
 - Concurrent request slots (`-np`): each slot has a private session, KV cache, and activation arena, so requests no longer reset each other's state
 - Micro-batching (`-ub`): prefill is split into bounded forward passes so activation memory scales with the micro-batch, not the context size
+- Sampling controls: temperature, top-k, top-p, min-p, repeat penalty, frequency penalty, and presence penalty
+- Thinking-mode toggle for reasoning models (`-nt` / `--no-thinking`)
 - Supports multiple model architectures:
   - LLaMA
   - Qwen2
   - Qwen3 / Qwen3.5
-  - DeepSeek (including MLA)
-  - Falcon
   - Falcon-H1 (attention + Mamba2 hybrid)
   - Gemma 3
+  - DeepSeek (including MLA) — WIP
+  - Falcon — WIP
 - Multiple quantization formats (Q4_0, Q4_K, Q5_K, Q6_K, Q8_0, IQ2_XXS, IQ3_XXS, etc.)
 - select-based event loop for HTTP serving (concurrent workers handle inference)
 - Optional CUDA GPU acceleration with automatic CPU fallback (`GPU=1 make`)
@@ -79,6 +81,9 @@ METAL=1 make
 # Run tests
 make check
 
+# Package the current git HEAD as a source tarball
+make archive
+
 # Clean
 make clean
 ```
@@ -95,16 +100,23 @@ Binaries are produced at `src/server`, `src/chat`, and `src/bench`.
 
 # Full options
 ./src/server -m model.gguf                    # Model file (required)
+             --host 127.0.0.1                 # Host (default: 127.0.0.1; -h prints help)
              -p 8080                          # Port (default: 8080)
-             -h 127.0.0.1                     # Host (default: 127.0.0.1)
              -c 4096                          # Context size (default: auto, capped by VRAM)
              -ub 512                          # Max tokens per forward pass (default: 512)
              -n 393216                        # Max tokens (default: 393216)
              -t 0.8                           # Temperature (default: 0.8)
              -T 8                             # Total thread count (default: CPU cores)
-             -np 2                            # Concurrent request slots (default: 2)
+             -np 2                            # Concurrent request slots (default: 1)
+             -nt                              # Disable thinking mode
              -ngl -1                          # GPU layers (-1=auto, 0=CPU, default: -1)
-             --topp 0.9                       # Top-p sampling (default: 0.9)
+             -tp 0.9                          # Top-p sampling (default: 0.9)
+             -tk 40                           # Top-k sampling (default: 40)
+             -P 0.05                          # Min-p threshold (default: 0.05)
+             -rp 1.1                          # Repeat penalty (default: 1.1)
+             -rl 64                           # Repeat penalty lookback (default: 64)
+             -fp 0.0                          # Frequency penalty (default: 0.0)
+             -pp 0.0                          # Presence penalty (default: 0.0)
              -i                               # Inspect model metadata only
              -g                               # Draw the graph workflow and exit
 
@@ -131,7 +143,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Concurrent requests (`-np` / `--parallel`)
 
-`-np N` (default `2`) creates `N` request slots. The event loop accepts connections and reads requests, then hands each one to a worker bound to a private `Session`, so up to `N` generations run at once and additional requests wait in a bounded queue.
+`-np N` (default `1`) creates `N` request slots. The event loop accepts connections and reads requests, then hands each one to a worker bound to a private `Session`, so up to `N` generations run at once and additional requests wait in a bounded queue.
 
 - Every slot owns its own KV cache, activation arena, token/logits buffers, and recurrent state (e.g. Qwen3.5 SSM state); requests on different slots never share mutable inference state.
 - Model weights are loaded once and shared: the mmap-backed CPU weights are read-only for all slots, and the CUDA/Metal weight cache is global and de-duplicated.
@@ -155,13 +167,18 @@ For example, four simultaneous requests with two slots complete as two pairs, ea
 ./src/chat -m model.gguf                      # Model file (required)
            -c 4096                            # Context size (default: auto, capped by VRAM)
            -ub 512                            # Max tokens per forward pass (default: 512)
-           -n 128                             # Max tokens per response (default: 128)
-           -T 1                               # Thread count (default: 1)
+           -n 393216                          # Max tokens per response (default: 393216)
+           -T 8                               # Thread count (default: CPU cores)
+           -nt                                # Disable thinking mode
            -ngl -1                            # GPU layers (-1=auto, 0=CPU)
            -t 0.8                             # Temperature (default: 0.8)
            -tp 0.9                            # Top-p sampling (default: 0.9)
            -tk 40                             # Top-k sampling (default: 40)
            -P 0.05                            # Min-p threshold (default: 0.05)
+           -rp 1.1                            # Repeat penalty (default: 1.1)
+           -rl 64                             # Repeat penalty lookback (default: 64)
+           -fp 0.0                            # Frequency penalty (default: 0.0)
+           -pp 0.0                            # Presence penalty (default: 0.0)
            -s "You are a helpful assistant."  # System prompt
 
 # With a custom system prompt
@@ -181,7 +198,7 @@ During the chat session, use `/clear` to reset the conversation and `/quit` to e
             -c 4096                           # Context size (default: auto, capped by VRAM)
             -ub 512                           # Max tokens per forward pass (default: 512)
             -n 128                            # Tokens to generate per iteration (default: 128)
-            -T 1                              # Thread count (default: 1)
+            -T 8                              # Thread count (default: CPU cores)
             -ngl -1                           # GPU layers (-1=auto, 0=CPU)
             -t 0.8                            # Temperature (default: 0.8)
             -tp 0.9                           # Top-p sampling (default: 0.9)
@@ -234,8 +251,10 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
   - chat.c            — Interactive CLI chat
   - bench.c           — Inference benchmark
   - core.c / core.h   — Engine/model loading, GGUF parsing
+  - graph.c / graph.h — Forward-pass graph construction, scheduling, visualization
   - mm.c              — Safe memory allocators
   - mm.h
+  - asctx.c / asctx.h — Activation arena (scratch allocator)
   - slog.c            — Logging
   - slog.h
   - utils.c           — String parsing, key comparison, etc.
@@ -258,13 +277,16 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
   - kvcache.h
   - rax.c             — Radix tree
   - rax.h
+  - linenoise.c       — Line editing for the interactive chat
+  - linenoise.h
+  - banner.h          — 3D startup banner
   - model/            — Architecture-specific forward passes
     - model.h
     - llama.c         — LLaMA architecture
     - qwen25.c        — Qwen2.5 architecture
     - qwen35.c        — Qwen3.5 architecture
-    - deepseek.c      — DeepSeek architecture
-    - falcon.c        — Falcon architecture
+    - deepseek.c      — DeepSeek architecture (WIP)
+    - falcon.c        — Falcon architecture (WIP)
     - falcon_h1.c     — Falcon-H1 architecture (attention + Mamba2)
     - gemma3.c        — Gemma 3 architecture
   - backend/          — Hardware backends
@@ -273,12 +295,19 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
       - cpu.h
       - cpu_x86.c     — x86 SIMD optimizations
       - cpu_arm.c     — ARM NEON optimizations
+      - cpu_op.c      — CPU ops that bridge the graph to kernels
+      - cpu_op.h
     - gpu/            — GPU-optimized kernels
       - gpu.cu        — CUDA persistent-weight dequant + matmul/matvec backend
       - gpu.h
+      - gpu_op.cu     — CUDA graph ops
+      - gpu_op.h
     - metal/          — Metal GPU backend (macOS only)
       - metal.m       — Objective-C host side
       - metal.h
+      - metal_internal.h
+      - metal_op.m    — Metal graph ops
+      - metal_op.h
       - metal.metal   — MSL kernels (embedded via generated metal_msl.h)
 
 - test/               — Unit tests
@@ -288,6 +317,8 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
     - test_pthreads.c — Thread pool tests
     - test_qwen25.c   — Qwen2 integration tests
     - test_utils.c    — Utility function tests
+    - test_gpu.c      — GPU backend tests (`GPU=1 make check`)
+    - test_metal.c    — Metal backend tests (`METAL=1 make check`)
   - py/               — Test utilities
     - generate_test_vectors.py
 ```
