@@ -1355,6 +1355,36 @@ static inline __m256 avx2_i16_to_f32_x8(__m256i v) {
     return _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v)));
 }
 
+/* Widen the high 8 × i16 of v to 8 × f32. */
+static inline __m256 avx2_i16_hi_to_f32_x8(__m256i v) {
+    return _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_extracti128_si256(v, 1)));
+}
+
+/* Q4_0 (block_size = 32, 18 bytes): sum = d * Σ((nib - 8) * x).
+ * Each of the 16 packed bytes holds two elements; low nibbles are
+ * x[0..15], high nibbles x[16..31].  Both nibble planes are widened
+ * once per block, bias-corrected in i16, then fused into 8-wide FMA. */
+static float avx2_dot_q4_0_block(const u8 *data, const float *x) {
+    float d = f16_to_f32(*(const u16 *)data);
+    const u8 *qs = data + 2;
+
+    const __m256i nib   = _mm256_set1_epi16(0x0F);
+    const __m256i eight = _mm256_set1_epi16(8);
+
+    __m128i q8 = _mm_loadu_si128((const __m128i *)qs);
+    __m256i w8 = _mm256_cvtepu8_epi16(q8);
+    __m256i lo = _mm256_sub_epi16(_mm256_and_si256(w8, nib), eight);
+    __m256i hi = _mm256_sub_epi16(_mm256_and_si256(_mm256_srli_epi16(w8, 4), nib), eight);
+
+    __m256 acc = _mm256_setzero_ps();
+    acc = _mm256_fmadd_ps(avx2_i16_to_f32_x8(lo),    _mm256_loadu_ps(x +  0), acc);
+    acc = _mm256_fmadd_ps(avx2_i16_hi_to_f32_x8(lo), _mm256_loadu_ps(x +  8), acc);
+    acc = _mm256_fmadd_ps(avx2_i16_to_f32_x8(hi),    _mm256_loadu_ps(x + 16), acc);
+    acc = _mm256_fmadd_ps(avx2_i16_hi_to_f32_x8(hi), _mm256_loadu_ps(x + 24), acc);
+
+    return d * avx2_hsum_f32x8(acc);
+}
+
 static float avx2_dot_q6_k_block(const u8 *data, const float *x) {
     float d = f16_to_f32(*(const u16 *)(data + 208));
     const u8 *scales = data + 192;
@@ -1461,7 +1491,11 @@ float gguf_dot_batch(TensorInfo *ti, u64 i, u64 n, const float *x) {
     if (type <= GGUF_TYPE_Q8_1 || type == GGUF_TYPE_IQ4_NL) {
         block_elems = BLOCK_SIMPLE;
         switch (type) {
+#if defined(__AVX2__) && defined(__FMA__)
+            case GGUF_TYPE_Q4_0: block_bytes = 18; dot_fn = avx2_dot_q4_0_block; break;
+#else
             case GGUF_TYPE_Q4_0: block_bytes = 18; dot_fn = sse_dot_q4_0_block; break;
+#endif
             case GGUF_TYPE_Q4_1: block_bytes = 20; dot_fn = sse_dot_q4_1_block; break;
             case GGUF_TYPE_Q5_0: block_bytes = 22; break;
             case GGUF_TYPE_Q5_1: block_bytes = 24; break;
