@@ -77,10 +77,10 @@ chat: chat.o $(MAIN_OBJS)
 bench: bench.o $(MAIN_OBJS)
 	$(CC) $(CFLAGS) bench.o $(MAIN_OBJS) -o $@ $(LDADDCFLAGS)
 
-server.o: server.c def.h el.h http.h
+server.o: server.c def.h el.h http.h banner.h
 	$(CC) $(CFLAGS) -c server.c -o $@
 
-chat.o: chat.c
+chat.o: chat.c banner.h
 	$(CC) $(CFLAGS) -c chat.c -o $@
 
 bench.o: bench.c

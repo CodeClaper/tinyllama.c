@@ -13,6 +13,7 @@
 #include "sampler.h"
 #include "slog.h"
 #include "linenoise.h"
+#include "banner.h"
 
 typedef struct {
     EngineOptons    engine;
@@ -238,6 +239,8 @@ static void print_model_info(Engine *en, Session *s, const char *path) {
 }
 
 int main(int argc, char *argv[]) {
+    banner_print();
+
     /* Suppress INFO logs during chat to keep output clean. */
     slog_set_level(WARN);
 

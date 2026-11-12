@@ -28,6 +28,7 @@
 #include "anet.h"
 #include "http.h"
 #include "graph.h"
+#include "banner.h"
 
 #define JSON_WRAPPER_RESERVE 256 
 #define DEFAULT_N_PARALLEL   1
@@ -692,6 +693,8 @@ static void server_resource_close(Server *server) {
 }
 
 int main(int argc, char *argv[]) {
+    banner_print();
+
     /* 1. Parse server options. */
     if (argc < 2) usage(stderr, 2);
     signal(SIGPIPE, SIG_IGN);
