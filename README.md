@@ -1,7 +1,7 @@
 # tinyllama.c
 
 <p align="center">
-  <img src="docs/banner.svg" alt="tinyllama.c — pure C LLM inference, GGUF v3" width="710">
+  <img src="docs/banner.svg" alt="tinyllama.c — pure C LLM inference, GGUF v3" width="660">
 </p>
 
 Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. It loads GGUF v3 model files (the format used by llama.cpp) via mmap for zero-copy access. It provides three modes of operation:
