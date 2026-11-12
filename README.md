@@ -1,5 +1,16 @@
 # tinyllama.c
 
+```text
+█████  █████  █   █  █   █  █      █       ███   █   █   ███
+ ▒█▒▒▒  ▒█▒▒▒ ██  █▒ █▒  █▒ █▒     █▒     █ ▒▒█  ██ ██▒ █ ▒▒█
+  █▒░░░  █▒░░░█▒█ █▒░ █░█ ▒░█▒░    █▒░    █████▒  █▒█ █▒░█████▒
+  █▒░    █▒░  █▒░██▒░  █ ▒ ░█▒░    █▒░    █▒▒▒█▒░█▒░▒█▒░█▒▒▒█▒░
+  █▒░  █████  █▒░ █▒░  █▒ ░ █████  █████  █▒░░█▒░█▒░ █▒░█▒░░█▒░
+   ▒░   ▒▒▒▒▒  ▒░  ▒░   ▒░   ▒▒▒▒▒  ▒▒▒▒▒  ▒░  ▒░ ▒░  ▒░ ▒░  ▒░
+    ░    ░░░░░  ░   ░    ░    ░░░░░  ░░░░░  ░   ░  ░   ░  ░   ░
+        tinyllama.c  |  pure C LLM inference  |  GGUF v3
+```
+
 Tinyllama.c is a tiny and simple inference engine for LLMs, written in pure C. It loads GGUF v3 model files (the format used by llama.cpp) via mmap for zero-copy access. It provides three modes of operation:
 
 - **server** — OpenAI-compatible HTTP chat server
