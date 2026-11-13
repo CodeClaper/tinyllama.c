@@ -759,6 +759,9 @@ int main(int argc, char *argv[]) {
         slog(INFO, "Parallel slots: %d (threads per slot: %d)",
              so.n_parallel, threads_per_session);
 
+    /* Show what we loaded, like the chat CLI does. */
+    engine_print_info(engine, sessions[0], so.engine.model_path);
+
 #if defined(GPU_BUILD) || defined(METAL_BUILD)
     if (so.n_parallel > 1)
         slog(WARN, "GPU backend shares global scratch buffers; forward "

@@ -205,39 +205,6 @@ static double time_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
-/* Print a compact model summary, in the spirit of llama.cpp's CLI. */
-static void print_model_info(Engine *en, Session *s, const char *path) {
-    Model      *m   = en->model;
-    ArchConfig *cfg = &s->cfg;
-
-    u64 n_params = 0;
-    u64 weight_bytes = 0;
-    for (u64 i = 0; i < m->n_tensor; i++) {
-        n_params     += m->tensor[i].n_element;
-        weight_bytes += m->tensor[i].bytes;
-    }
-
-    printf("\n");
-    printf("model:       %s\n", path ? path : "-");
-    printf("arch:        %s\n", m->arch_name[0] ? m->arch_name : "unknown");
-    printf("vocab:       %u tokens\n", cfg->n_vocab);
-    printf("context:     %u tokens\n", s->ctx_size);
-    printf("embd:        %u\n", cfg->n_embd);
-    printf("layers:      %u\n", cfg->n_layer);
-    printf("heads:       %u (kv %u, dim %u)\n",
-           cfg->n_head, cfg->n_kv_head, cfg->head_dim);
-    printf("params:      %.2f B\n", (double)n_params / 1e9);
-    printf("size:        %.2f GB (%" PRIu64 " bytes)\n",
-           size_convert(weight_bytes, GB), weight_bytes);
-    printf("tensors:     %" PRIu64 " (alignment %" PRIu64 ")\n",
-           m->n_tensor, m->alignment);
-    if (en->vocab) {
-        printf("tokens:      bos=%d eos=%d\n",
-               en->vocab->bos_id, en->vocab->eos_id);
-    }
-    printf("\n");
-}
-
 int main(int argc, char *argv[]) {
     banner_print();
 
@@ -267,7 +234,7 @@ int main(int argc, char *argv[]) {
     session->no_think         = co.no_think;
 
     /* Show what we loaded, like llama.cpp's CLI does. */
-    print_model_info(engine, session, co.engine.model_path);
+    engine_print_info(engine, session, co.engine.model_path);
 
     /* Warmup: build the graph, plan the arena and preload weights onto
      * the device backend so the first turn only pays compute. */
