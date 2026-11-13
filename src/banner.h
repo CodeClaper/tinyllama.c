@@ -13,7 +13,9 @@ static const char TINYLLAMA_BANNER[] =
     "  █▒░  █████  █▒░ █▒░  █▒ ░ █████  █████  █▒░░█▒░█▒░ █▒░█▒░░█▒░\n"
     "   ▒░   ▒▒▒▒▒  ▒░  ▒░   ▒░   ▒▒▒▒▒  ▒▒▒▒▒  ▒░  ▒░ ▒░  ▒░ ▒░  ▒░\n"
     "    ░    ░░░░░  ░   ░    ░    ░░░░░  ░░░░░  ░   ░  ░   ░  ░   ░\n"
-    "        tinyllama.c  |  pure C LLM inference  |  GGUF v3\n";
+    "\n"
+    "        tinyllama.c  |  pure C LLM inference  |  GGUF v3\n"
+    "\n";
 
 static inline void banner_print(void) {
     fputs(TINYLLAMA_BANNER, stdout);
