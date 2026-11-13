@@ -415,6 +415,57 @@ int chatml_continuation(Session *s, const char *user_msg,
     return n;
 }
 
+/* ChatML full conversation.  Emits every turn in order:
+ *   <|im_start|>{role}\n{content}<|im_end|>\n
+ * and closes with an assistant header (plus reasoning prelude) so the
+ * model starts generating the next reply. */
+int chatml_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
+                        u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    int n = 0;
+
+    i32 im_start_id = v->im_start_id;
+    i32 im_end_id   = v->im_end_id;
+    if (im_start_id == (i32)VOCAB_ID_NONE)
+        im_start_id = vocab_lookup(v, "<|im_start|>");
+    if (im_end_id == (i32)VOCAB_ID_NONE)
+        im_end_id = vocab_lookup(v, "<|im_end|>");
+    if (im_start_id == (i32)VOCAB_ID_NONE || im_end_id == (i32)VOCAB_ID_NONE)
+        return 0;
+    i32 nl_id = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
+    } while (0)
+
+    for (int i = 0; i < n_msgs; i++) {
+        const char *role = (msgs[i].role && msgs[i].role[0])
+                         ? msgs[i].role : "user";
+        const char *content = msgs[i].content ? msgs[i].content : "";
+        ADD(im_start_id);
+        ADD_TEXT(role);
+        ADD(nl_id);
+        ADD_TEXT(content);
+        ADD(im_end_id);
+        ADD(nl_id);
+    }
+
+    ADD(im_start_id);
+    ADD_TEXT("assistant");
+    ADD(nl_id);
+    chatml_add_reasoning(s, tokens, &n, max_tokens);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
 /* Look up the Llama 3 header markers.  Returns false when the
  * vocabulary does not carry the Llama 3 chat special tokens. */
 static bool llama3_markers(Vocab *v, i32 *start, i32 *end, i32 *eot) {
@@ -505,6 +556,56 @@ int llama3_chat_continuation(Session *s, const char *user_msg,
     return n;
 }
 
+/* Llama 3 full conversation:
+ *   <bos>[<|start_header_id|>system<|end_header_id|>\n\n{sys}<|eot_id|>]
+ *        <|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>
+ *        ...<|start_header_id|>assistant<|end_header_id|>\n\n */
+int llama3_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
+                        u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 start, end, eot;
+    if (!llama3_markers(v, &start, &end, &eot)) return 0;
+
+    int n = 0;
+    i32 nl = v->byte_token_ids[(unsigned char)'\n'];
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt) do { \
+        if (n < max_tokens) { \
+            int tlen = (int)strlen(txt); \
+            n += tokenize(v, txt, tlen, tokens + n, max_tokens - n); \
+        } \
+    } while (0)
+
+    if (v->bos_id != (i32)VOCAB_ID_NONE) ADD(v->bos_id);
+
+    /* Llama 3 always carries a leading system turn, even if empty. */
+    if (n_msgs == 0 || !msgs[0].role || strcmp(msgs[0].role, "system") != 0) {
+        ADD(start); ADD_TEXT("system"); ADD(end);
+        ADD(nl); ADD(nl);
+        ADD(eot);
+    }
+
+    for (int i = 0; i < n_msgs; i++) {
+        const char *role = (msgs[i].role && msgs[i].role[0])
+                         ? msgs[i].role : "user";
+        const char *content = msgs[i].content ? msgs[i].content : "";
+        ADD(start); ADD_TEXT(role); ADD(end);
+        ADD(nl); ADD(nl);
+        ADD_TEXT(content);
+        ADD(eot);
+    }
+
+    ADD(start); ADD_TEXT("assistant"); ADD(end);
+    ADD(nl); ADD(nl);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
 /* Encode one Gemma template fragment.  SPM text that follows a special
  * token gets the word-boundary marker, matching llama.cpp. */
 static int gemma_text(Vocab *v, const char *txt, u32 *out, int max_out, bool prefix_space) {
@@ -583,6 +684,61 @@ int gemma_chat_continuation(Session *s, const char *user_msg,
     ADD_TEXT(user_msg, false);
     ADD(et);
     ADD_TEXT("\n", false);
+    ADD(st);
+    ADD_TEXT("model", true);
+    ADD_TEXT("\n", false);
+
+    #undef ADD
+    #undef ADD_TEXT
+    return n;
+}
+
+/* Gemma full conversation.  Gemma has only user/model turns, so a
+ * leading system message is folded into the first user turn and any
+ * later non-assistant role is treated as user:
+ *   <bos>[<start_of_turn>user\n{sys}\n\n{user}<end_of_turn>\n]...
+ *        <start_of_turn>model\n */
+int gemma_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
+                       u32 *tokens, int max_tokens) {
+    Vocab *v = s->en->vocab;
+    i32 st = v->start_of_turn_id;
+    i32 et = v->end_of_turn_id;
+    if (st == (i32)VOCAB_ID_NONE || et == (i32)VOCAB_ID_NONE) return 0;
+    int n = 0;
+
+    #define ADD(id) do { \
+        if (n < max_tokens) tokens[n++] = (u32)(id); \
+    } while (0)
+    #define ADD_TEXT(txt, sp) do { \
+        if (n < max_tokens) \
+            n += gemma_text(v, txt, tokens + n, max_tokens - n, sp); \
+    } while (0)
+
+    if (v->bos_id != (i32)VOCAB_ID_NONE) ADD(v->bos_id);
+
+    const char *sys = NULL;
+    int first = 0;
+    if (n_msgs > 0 && msgs[0].role && strcmp(msgs[0].role, "system") == 0) {
+        sys = msgs[0].content;
+        first = 1;
+    }
+
+    for (int i = first; i < n_msgs; i++) {
+        bool is_assistant = msgs[i].role && strcmp(msgs[i].role, "assistant") == 0;
+        const char *content = msgs[i].content ? msgs[i].content : "";
+
+        ADD(st);
+        ADD_TEXT(is_assistant ? "model" : "user", true);
+        ADD_TEXT("\n", false);
+        if (i == first && sys && sys[0]) {
+            ADD_TEXT(sys, false);
+            ADD_TEXT("\n\n", false);
+        }
+        ADD_TEXT(content, false);
+        ADD(et);
+        ADD_TEXT("\n", false);
+    }
+
     ADD(st);
     ADD_TEXT("model", true);
     ADD_TEXT("\n", false);

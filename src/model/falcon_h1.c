@@ -419,4 +419,5 @@ const ArchOps falcon_h1_ops = {
     .graph_build       = falcon_h1_graph_build,
     .chat_prompt       = chatml_prompt,
     .chat_continuation = chatml_continuation,
+    .chat_conversation = chatml_conversation,
 };

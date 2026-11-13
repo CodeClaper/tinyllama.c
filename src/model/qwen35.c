@@ -643,4 +643,5 @@ const ArchOps qwen35_ops = {
     .graph_build       = qwen35_graph_build,
     .chat_prompt       = chatml_prompt,
     .chat_continuation = chatml_continuation,
+    .chat_conversation = chatml_conversation,
 };

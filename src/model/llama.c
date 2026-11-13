@@ -269,4 +269,5 @@ const ArchOps llama_ops = {
     .graph_build       = llama_graph_build,
     .chat_prompt       = llama3_chat_prompt,
     .chat_continuation = llama3_chat_continuation,
+    .chat_conversation = llama3_conversation,
 };

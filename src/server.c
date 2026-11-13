@@ -33,6 +33,7 @@
 #define JSON_WRAPPER_RESERVE 256 
 #define DEFAULT_N_PARALLEL   1
 #define JOB_QUEUE_CAP        256
+#define MAX_CHAT_MESSAGES    256
 
 /* A parsed-but-not-yet-executed request.  The body is copied out of the
  * connection's read buffer so the worker owns it for the whole run. */
@@ -166,68 +167,201 @@ static void sse_emit_done(int fd, long created, const char *finish_reason) {
         http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
 }
 
+/* ---- Minimal JSON conversation parser -----------------------------
+ * Extracts the ordered "messages": [{ "role": ..., "content": ... }]
+ * array.  Everything else in the request body (tools, sampling
+ * parameters) is ignored here. */
+
+static char *json_skip_ws(char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+/* `p` points at the opening quote of a JSON string.  Returns the
+ * position just past the closing quote (or the NUL terminator). */
+static char *json_string_end(char *p) {
+    p++;
+    while (*p) {
+        if (*p == '\\' && p[1]) { p += 2; continue; }
+        if (*p == '"') return p + 1;
+        p++;
+    }
+    return p;
+}
+
+/* `p` points at the opening brace of a JSON object.  Returns the
+ * position of the matching closing brace, or NULL. */
+static char *json_object_end(char *p) {
+    int depth = 0;
+    while (*p) {
+        if (*p == '"') { p = json_string_end(p); continue; }
+        if (*p == '{') depth++;
+        else if (*p == '}' && --depth == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+/* Find `key`'s value within the object spanning [start, end). */
+static char *json_object_value(char *start, char *end, const char *key) {
+    size_t klen = strlen(key);
+    for (char *p = start; p < end; ) {
+        if (*p == '"') {
+            char *q = json_string_end(p);
+            int len = (int)(q - p - 2);
+            if (len == (int)klen && memcmp(p + 1, key, klen) == 0) {
+                char *v = json_skip_ws(q);
+                if (v < end && *v == ':')
+                    return json_skip_ws(v + 1);
+            }
+            p = q;
+        } else {
+            p++;
+        }
+    }
+    return NULL;
+}
+
+/* Parse the "messages" array into out[].  role/content are heap
+ * allocated and must be released with chat_messages_free().  Returns
+ * the number of messages stored (0 when absent/empty). */
+static int json_parse_messages(char *body, ChatMessage *out, int max) {
+    char *arr = NULL;
+    for (char *p = body; (p = strstr(p, "\"messages\"")) != NULL; p += 10) {
+        char *q = json_skip_ws(p + 10);
+        if (*q != ':') continue;
+        q = json_skip_ws(q + 1);
+        if (*q == '[') { arr = q; break; }
+    }
+    if (!arr) return 0;
+
+    int n = 0;
+    char *p = json_skip_ws(arr + 1);
+    while (*p && *p != ']') {
+        if (*p != '{') break;
+        char *end = json_object_end(p);
+        if (!end) break;
+
+        char *rv = json_object_value(p, end, "role");
+        char *cv = json_object_value(p, end, "content");
+        if (rv && *rv == '"' && n < max) {
+            char *rs = rv + 1;
+            int   rl = (int)(json_string_end(rv) - rs - 1);
+
+            const char *cs = "";
+            int         cl = 0;
+            if (cv && *cv == '"') {
+                cs = cv + 1;
+                cl = (int)(json_string_end(cv) - cs - 1);
+            }
+
+            char *role = smalloc((size_t)rl + 1);
+            int ul = json_unescape(role, rs, rl);
+            role[ul] = '\0';
+
+            char *content = smalloc((size_t)cl + 1);
+            ul = json_unescape(content, cs, cl);
+            content[ul] = '\0';
+
+            out[n].role    = role;
+            out[n].content = content;
+            n++;
+        }
+
+        p = json_skip_ws(end + 1);
+        if (*p == ',') p = json_skip_ws(p + 1);
+    }
+    return n;
+}
+
+static void chat_messages_free(ChatMessage *msgs, int n) {
+    for (int i = 0; i < n; i++) {
+        sfree((void *)msgs[i].role);
+        sfree((void *)msgs[i].content);
+    }
+}
+
 /* Execute one request on a worker thread using its dedicated session.
  * `body` is the NUL-terminated HTTP body copied by the reader thread. */
 static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     Vocab   *v = engine->vocab;
 
-    /* 2. Extract messages from JSON body. */
-    char user_buf[4096]  = {0};
-    char sys_buf[1024]   = {0};
-    const char *user_msg = "";
-    const char *sys_msg  = NULL;
+    /* 2. Parse the ordered conversation from the JSON body. */
+    ChatMessage msgs[MAX_CHAT_MESSAGES];
+    int n_msgs = json_parse_messages(body, msgs, MAX_CHAT_MESSAGES);
 
-    /* Look for system message */
-    int slen = 0;
-    char *sys_raw = json_get_string(body, "content", &slen);
-    if (sys_raw) {
-        /* Check if this content belongs to a system-role message */
-        char *role_search = sys_raw - 40; /* rough lookback */
-        if (role_search < body) role_search = body;
-        if (strstr(role_search, "\"system\"")) {
-            int ul = json_unescape(sys_buf, sys_raw,
-                                   slen < (int)sizeof(sys_buf) - 1
-                                   ? slen : (int)sizeof(sys_buf) - 1);
-            sys_buf[ul] = '\0';
-            sys_msg = sys_buf;
-        }
-    }
-
-    /* Look for all "content" fields — pick the last one preceded by "user" */
-    {
-        char *scan = body;
-        char *last_user_content = NULL;
-        int   last_user_len = 0;
-        int   clen = 0;
-        while ((scan = json_get_string(scan, "content", &clen)) != NULL) {
-            /* Look backwards for "role": "user" within ~60 chars */
-            char *check = scan - 60;
-            if (check < body) check = body;
-            if (strstr(check, "\"user\"")) {
-                last_user_content = scan;
-                last_user_len = clen;
-            }
-            scan += clen + 2;
-        }
-        if (last_user_content) {
-            int ul = json_unescape(user_buf, last_user_content,
-                                   last_user_len < (int)sizeof(user_buf) - 1
-                                   ? last_user_len : (int)sizeof(user_buf) - 1);
-            user_buf[ul] = '\0';
-            user_msg = user_buf;
-        }
-    }
-    if (!user_msg[0]) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"No user message found\"}");
-        close(fd);
-        return;
-    }
-
-    /* 3. Build chat prompt tokens. */
+    /* 3. Build chat prompt tokens from every turn, so earlier rounds
+     * carried in "messages" are part of the prompt. */
     u32 prompt_tokens[4096];
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
-    int n_prompt =  s->ops.chat_prompt(s, user_msg, sys_msg, prompt_tokens, max_pt);
+    int n_prompt = 0;
+
+    if (n_msgs > 0 && s->ops.chat_conversation)
+        n_prompt = s->ops.chat_conversation(s, msgs, n_msgs,
+                                            prompt_tokens, max_pt);
+
+    /* Fallback: bodies with no parseable "messages" array, or an arch
+     * without a conversation template. */
+    if (n_prompt == 0) {
+        char user_buf[4096]  = {0};
+        char sys_buf[1024]   = {0};
+        const char *user_msg = "";
+        const char *sys_msg  = NULL;
+
+        /* Look for system message */
+        int slen = 0;
+        char *sys_raw = json_get_string(body, "content", &slen);
+        if (sys_raw) {
+            /* Check if this content belongs to a system-role message */
+            char *role_search = sys_raw - 40; /* rough lookback */
+            if (role_search < body) role_search = body;
+            if (strstr(role_search, "\"system\"")) {
+                int ul = json_unescape(sys_buf, sys_raw,
+                                       slen < (int)sizeof(sys_buf) - 1
+                                       ? slen : (int)sizeof(sys_buf) - 1);
+                sys_buf[ul] = '\0';
+                sys_msg = sys_buf;
+            }
+        }
+
+        /* Look for all "content" fields — pick the last one preceded by "user" */
+        {
+            char *scan = body;
+            char *last_user_content = NULL;
+            int   last_user_len = 0;
+            int   clen = 0;
+            while ((scan = json_get_string(scan, "content", &clen)) != NULL) {
+                /* Look backwards for "role": "user" within ~60 chars */
+                char *check = scan - 60;
+                if (check < body) check = body;
+                if (strstr(check, "\"user\"")) {
+                    last_user_content = scan;
+                    last_user_len = clen;
+                }
+                scan += clen + 2;
+            }
+            if (last_user_content) {
+                int ul = json_unescape(user_buf, last_user_content,
+                                       last_user_len < (int)sizeof(user_buf) - 1
+                                       ? last_user_len : (int)sizeof(user_buf) - 1);
+                user_buf[ul] = '\0';
+                user_msg = user_buf;
+            }
+        }
+        if (!user_msg[0]) {
+            chat_messages_free(msgs, n_msgs);
+            http_respond(fd, 400, "Bad Request",
+                         "{\"error\":\"No user message found\"}");
+            close(fd);
+            return;
+        }
+
+        n_prompt = s->ops.chat_prompt(s, user_msg, sys_msg,
+                                      prompt_tokens, max_pt);
+    }
+
+    chat_messages_free(msgs, n_msgs);
+
     if (n_prompt == 0) {
         http_respond(fd, 400, "Bad Request",
                     "{\"error\":\"No valid tokens in input\"}");
@@ -502,8 +636,6 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         close(fd);
         return;
     }
-
-    slog(INFO, "Receive: %s\n", body);
 
     /* The worker now owns the fd; the event loop must not touch it. */
     delete_file_event(el, fd, ELOOP_READABLE);

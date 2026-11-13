@@ -334,6 +334,12 @@ typedef struct Session Session;
 typedef struct Graph Graph;
 typedef struct GraphNode GraphNode;
 
+/* One turn of a chat conversation, in wire order. */
+typedef struct {
+    const char *role;
+    const char *content;
+} ChatMessage;
+
 typedef struct {
     bool   (*init)              (Session *s);
     void   (*free)              (Session *s);
@@ -347,6 +353,9 @@ typedef struct {
      * in which case callers fall back to tokenizing the raw input. */
     int    (*chat_prompt)       (Session *s, const char *user, const char *sys, u32 *out, int max);
     int    (*chat_continuation) (Session *s, const char *user, u32 *out, int max);
+    /* Lays out a complete ordered conversation (system/user/assistant
+     * turns) and opens the final assistant turn for generation. */
+    int    (*chat_conversation) (Session *s, const ChatMessage *msgs, int n_msgs, u32 *out, int max);
 } ArchOps;
 
 struct Session {

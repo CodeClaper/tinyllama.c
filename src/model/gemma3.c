@@ -313,4 +313,5 @@ const ArchOps gemma3_ops = {
     .graph_build       = gemma3_graph_build,
     .chat_prompt       = gemma_chat_prompt,
     .chat_continuation = gemma_chat_continuation,
+    .chat_conversation = gemma_conversation,
 };
