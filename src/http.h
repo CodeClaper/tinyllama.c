@@ -3,6 +3,16 @@
 
 char *http_body(char *req, int len);
 const char *http_header(char *buf, const char *name);
+
+typedef enum {
+    HTTP_BODY_OK = 0,
+    HTTP_BODY_TOO_LARGE,
+    HTTP_BODY_INCOMPLETE_HEADER,
+    HTTP_BODY_EMPTY,
+    HTTP_BODY_INCOMPLETE,
+} HttpBodyResult;
+
+HttpBodyResult http_read_body(int fd, char **body);
 char *json_get_string(char *json, const char *key, int *len);
 int json_get_bool(char *json, const char *key);
 int json_unescape(char *dst, const char *src, int len);

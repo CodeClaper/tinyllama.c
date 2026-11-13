@@ -1,6 +1,5 @@
 #include <signal.h>
 #include <pthread.h>
-#include <errno.h>
 #include "anet.h"
 #include "el.h"
 #include <stdio.h>
@@ -464,114 +463,52 @@ static void worker_pool_destroy(WorkerPool *pool) {
     sfree(pool);
 }
 
-/* Largest request we are willing to buffer (headers + body). */
-#define MAX_REQUEST_BYTES (8 * 1024 * 1024)
-
 /* Callback for a readable client socket: read one complete request,
  * hand the body to the worker pool, and stop watching the fd. */
 static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
     UNUSED(mask);
     Server *server = (Server *)privdata;
 
-    size_t cap = 16384;
-    size_t len = 0;
-    char *buf = smalloc(cap);
     char *body = NULL;
-    size_t header_len = 0;
-    long content_length = -1;
-    bool complete = false;
-    bool too_large = false;
+    HttpBodyResult res = http_read_body(fd, &body);
+    if (res != HTTP_BODY_OK) {
+        int status = 400;
+        const char *status_msg = "Bad Request";
+        const char *error = "Bad Request";
 
-    /* Read until the headers and the full Content-Length body arrive.
-     * A single read() is not enough: large JSON requests (chat history,
-     * tool definitions) are split across TCP segments, and the request
-     * body may not be in the same segment as the headers. */
-    for (;;) {
-        if (len + 1 >= cap) {
-            if (cap >= MAX_REQUEST_BYTES) {
-                too_large = true;
+        switch (res) {
+            case HTTP_BODY_TOO_LARGE:
+                status = 413;
+                status_msg = "Payload Too Large";
+                error = "Request body too large";
                 break;
-            }
-            size_t new_cap = cap * 2;
-            if (new_cap > MAX_REQUEST_BYTES) new_cap = MAX_REQUEST_BYTES;
-            buf = srealloc(buf, new_cap);
-            cap = new_cap;
-            if (body) body = buf + header_len; /* realloc may have moved it */
+            case HTTP_BODY_INCOMPLETE_HEADER:
+                error = "Incomplete HTTP request";
+                break;
+            case HTTP_BODY_EMPTY:
+                error = "Empty HTTP body";
+                break;
+            case HTTP_BODY_INCOMPLETE:
+                error = "Incomplete HTTP body";
+                break;
+            default:
+                break;
         }
 
-        ssize_t n = read(fd, buf + len, cap - len - 1);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            slog_errno("Client read error");
-            break;
-        }
-        if (n == 0) break; /* peer closed the connection */
-
-        len += (size_t)n;
-        buf[len] = '\0';
-
-        if (!body) {
-            body = http_body(buf, (int)len);
-            if (body) {
-                header_len = (size_t)(body - buf);
-                const char *cl_str = http_header(buf, "Content-Length");
-                content_length = cl_str[0] ? strtol(cl_str, NULL, 10) : -1;
-            }
-        }
-
-        if (body && (content_length < 0 ||
-                     len - header_len >= (size_t)content_length)) {
-            complete = true;
-            break;
-        }
-    }
-
-    if (too_large) {
-        http_respond(fd, 413, "Payload Too Large",
-                     "{\"error\":\"Request body too large\"}");
-        sfree(buf);
+        char err[256];
+        (void)snprintf(err, sizeof(err), "{\"error\":\"%s\"}", error);
+        http_respond(fd, status, status_msg, err);
         delete_file_event(el, fd, ELOOP_READABLE);
         close(fd);
         return;
     }
 
-    if (!body) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"Incomplete HTTP request\"}");
-        sfree(buf);
-        delete_file_event(el, fd, ELOOP_READABLE);
-        close(fd);
-        return;
-    }
-
-    size_t body_len = content_length >= 0
-                    ? (size_t)content_length : len - header_len;
-    if (body_len <= 0) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"Empty HTTP body\"}");
-        sfree(buf);
-        delete_file_event(el, fd, ELOOP_READABLE);
-        close(fd);
-        return;
-    }
-    if (!complete) {
-        http_respond(fd, 400, "Bad Request",
-                     "{\"error\":\"Incomplete HTTP body\"}");
-        sfree(buf);
-        delete_file_event(el, fd, ELOOP_READABLE);
-        close(fd);
-        return;
-    }
-
-    char *copy = smalloc(body_len + 1);
-    memcpy(copy, body, body_len);
-    copy[body_len] = '\0';
-    sfree(buf);
+    slog(INFO, "Receive: %s\n", body);
 
     /* The worker now owns the fd; the event loop must not touch it. */
     delete_file_event(el, fd, ELOOP_READABLE);
-    if (!worker_pool_submit(server->pool, fd, copy)) {
-        sfree(copy);
+    if (!worker_pool_submit(server->pool, fd, body)) {
+        sfree(body);
         http_respond(fd, 503, "Service Unavailable",
                      "{\"error\":\"Server busy\"}");
         close(fd);

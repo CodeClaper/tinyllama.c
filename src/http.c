@@ -1,8 +1,16 @@
 #include "http.h"
+#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <errno.h>
+#include "mm.h"
+#include "slog.h"
+
+/* Largest request we are willing to buffer (headers + body). */
+#define MAX_REQUEST_BYTES (8 * 1024 * 1024)
 
 /* Find the body of an HTTP request (after \r\n\r\n).  Returns NULL
  * if the request is incomplete. */
@@ -39,6 +47,94 @@ const char *http_header(char *buf, const char *name) {
         line = next + 2;
     }
     return "";
+}
+
+/* Read a complete HTTP request body from fd.  On success returns
+ * HTTP_BODY_OK and stores a NUL-terminated copy in *body_out (the caller
+ * owns it); on failure returns a status describing why the request could
+ * not be read and sets *body_out to NULL.  A single read() is not enough:
+ * large JSON requests (chat history, tool definitions) arrive split
+ * across TCP segments, and the body may not share a segment with the
+ * headers. */
+HttpBodyResult http_read_body(int fd, char **body_out) {
+    size_t cap = 16384;
+    size_t len = 0;
+    char *buf = smalloc(cap);
+    char *body = NULL;
+    size_t header_len = 0;
+    long content_length = -1;
+    bool complete = false;
+    bool too_large = false;
+
+    *body_out = NULL;
+
+    /* Read until the headers and the full Content-Length body arrive. */
+    for (;;) {
+        if (len + 1 >= cap) {
+            if (cap >= MAX_REQUEST_BYTES) {
+                too_large = true;
+                break;
+            }
+            size_t new_cap = cap * 2;
+            if (new_cap > MAX_REQUEST_BYTES) new_cap = MAX_REQUEST_BYTES;
+            buf = srealloc(buf, new_cap);
+            cap = new_cap;
+            if (body) body = buf + header_len; /* realloc may have moved it */
+        }
+
+        ssize_t n = read(fd, buf + len, cap - len - 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            slog_errno("Client read error");
+            break;
+        }
+        if (n == 0) break; /* peer closed the connection */
+
+        len += (size_t)n;
+        buf[len] = '\0';
+
+        if (!body) {
+            body = http_body(buf, (int)len);
+            if (body) {
+                header_len = (size_t)(body - buf);
+                const char *cl_str = http_header(buf, "Content-Length");
+                content_length = cl_str[0] ? strtol(cl_str, NULL, 10) : -1;
+            }
+        }
+
+        if (body && (content_length < 0 ||
+                     len - header_len >= (size_t)content_length)) {
+            complete = true;
+            break;
+        }
+    }
+
+    if (too_large) {
+        sfree(buf);
+        return HTTP_BODY_TOO_LARGE;
+    }
+    if (!body) {
+        sfree(buf);
+        return HTTP_BODY_INCOMPLETE_HEADER;
+    }
+
+    size_t body_len = content_length >= 0
+                    ? (size_t)content_length : len - header_len;
+    if (body_len <= 0) {
+        sfree(buf);
+        return HTTP_BODY_EMPTY;
+    }
+    if (!complete) {
+        sfree(buf);
+        return HTTP_BODY_INCOMPLETE;
+    }
+
+    char *copy = smalloc(body_len + 1);
+    memcpy(copy, body, body_len);
+    copy[body_len] = '\0';
+    sfree(buf);
+    *body_out = copy;
+    return HTTP_BODY_OK;
 }
 
 /* ---- JSON helpers (minimal, no-library) ------------------------ */
