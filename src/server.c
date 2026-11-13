@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <pthread.h>
+#include <errno.h>
 #include "anet.h"
 #include "el.h"
 #include <stdio.h>
@@ -495,10 +496,12 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
             if (new_cap > MAX_REQUEST_BYTES) new_cap = MAX_REQUEST_BYTES;
             buf = srealloc(buf, new_cap);
             cap = new_cap;
+            if (body) body = buf + header_len; /* realloc may have moved it */
         }
 
         ssize_t n = read(fd, buf + len, cap - len - 1);
         if (n < 0) {
+            if (errno == EINTR) continue;
             slog_errno("Client read error");
             break;
         }
@@ -541,7 +544,8 @@ static void client_read_proc(EventLoop *el, int fd, int mask, void *privdata) {
         return;
     }
 
-    size_t body_len = len - header_len;
+    size_t body_len = content_length >= 0
+                    ? (size_t)content_length : len - header_len;
     if (body_len <= 0) {
         http_respond(fd, 400, "Bad Request",
                      "{\"error\":\"Empty HTTP body\"}");
