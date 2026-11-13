@@ -710,8 +710,6 @@ void metal_op_shutdown(void) {
     metal_graph_flush();
     for (int i = 0; i < g_wc_n; i++) g_wc_buf[i] = nil;
     g_wc_n = 0;
-    for (int i = 0; i < g_kv_n; i++) { g_kv[i].k = nil; g_kv[i].v = nil; }
-    g_kv_n = 0;
     for (int i = 0; i < g_state_n; i++) g_state[i].buf = nil;
     g_state_n = 0;
     g_args = nil;
