@@ -29,6 +29,7 @@ typedef enum { KB, MB, GB } SizeLevel;
 typedef enum { SECOND, MILLISECOND, MICROSECOND, NANOSECOND } TimeLevel;
 
 u64 next_pow2(u64 n);
+double time_sec(void);
 u64 hash_bytes(void *ptr, u64 len);
 int parse_int(char *s);
 float parse_float(char *s);

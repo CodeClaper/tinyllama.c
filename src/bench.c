@@ -126,13 +126,6 @@ static BenchOptions parse_options(int argc, char *argv[]) {
     return bo;
 }
 
-/* Get high-resolution time in seconds. */
-static double time_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 /* Decode a token to UTF-8 text into buf. Returns bytes written. */
 static int decode_token(Session *s, Vocab *v, u32 id, char *buf, int max_len) {
     if (id >= v->n_vocab) return 0;

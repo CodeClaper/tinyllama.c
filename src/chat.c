@@ -198,13 +198,6 @@ static void strip_trailing(char *s) {
         s[--len] = '\0';
 }
 
-/* High-resolution time in seconds. */
-static double time_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 int main(int argc, char *argv[]) {
     banner_print();
 

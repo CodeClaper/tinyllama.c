@@ -857,6 +857,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
         close(fd);
         return;
     }
+    double t_prefill = time_sec();
     bool ok = n_prompt > 0 && graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
@@ -864,6 +865,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
         close(fd);
         return;
     }
+    double prefill_dt = time_sec() - t_prefill;
     /* Prefill consumed part of the context; clamp to what remains. */
     u32 gen_room = s->ctx_size - s->n_tokens;
     if (max_tokens > gen_room) max_tokens = gen_room;
@@ -879,6 +881,8 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
 
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab, &s->sample,
                                     s->tokens, s->n_tokens);
+    double ttft_ms = (time_sec() - t_prefill) * 1000.0;
+    double t_gen = time_sec();
     u32 n_gen = 0;
     i32 call_token = (tools_enabled && tool_ops && tool_ops->call_end)
                    ? vocab_lookup(v, tool_ops->call_end)
@@ -961,8 +965,16 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
                                     s->tokens, s->n_tokens);
     }
 
+    double gen_dt = time_sec() - t_gen;
     bool hit_eos = next_token == (u32)v->eos_id;
     resp_body[resp_used] = '\0';
+
+    double prompt_tps = prefill_dt > 0.0 ? (double)n_prompt / prefill_dt : 0.0;
+    double gen_tps    = gen_dt > 0.0 ? (double)n_gen / gen_dt : 0.0;
+    slog(INFO, "Inference: prompt %d tokens, %.1f tok/s (%.1f ms); "
+         "generation %u tokens, %.1f tok/s (%.1f ms); TTFT %.1f ms",
+         n_prompt, prompt_tps, prefill_dt * 1000.0,
+         n_gen, gen_tps, gen_dt * 1000.0, ttft_ms);
 
     /* A model may print the call terminator as text when the vocabulary
      * lacks it as a special token; strip it before parsing. */

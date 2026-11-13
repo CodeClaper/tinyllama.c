@@ -12,6 +12,13 @@
 #include "mm.h"
 #include "slog.h"
 
+/* Get high-resolution time in seconds. */
+double time_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 /* Get next pow2 value. */
 u64 next_pow2(u64 n) {
     u64 p = 1;
