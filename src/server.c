@@ -760,7 +760,7 @@ int main(int argc, char *argv[]) {
              so.n_parallel, threads_per_session);
 
     /* Show what we loaded, like the chat CLI does. */
-    engine_print_info(engine, sessions[0], so.engine.model_path);
+    engine_print_info(engine, sessions[0], so.engine.model_path, true);
 
 #if defined(GPU_BUILD) || defined(METAL_BUILD)
     if (so.n_parallel > 1)

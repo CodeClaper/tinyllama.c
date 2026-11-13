@@ -28,7 +28,7 @@ Model *model_load(const char *path);
 Engine *engine_open(EngineOptons *opts);
 void engine_close(Engine *en);
 void engine_summary(Engine *en);
-void engine_print_info(Engine *en, Session *s, const char *path);
+void engine_print_info(Engine *en, Session *s, const char *path, bool use_slog);
 
 /* ---- Session (inference context) lifecycle ---- */
 Session *session_create(Engine *en, u32 ctx_size, u32 n_ubatch,

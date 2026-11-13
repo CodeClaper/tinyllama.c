@@ -234,7 +234,7 @@ int main(int argc, char *argv[]) {
     session->no_think         = co.no_think;
 
     /* Show what we loaded, like llama.cpp's CLI does. */
-    engine_print_info(engine, session, co.engine.model_path);
+    engine_print_info(engine, session, co.engine.model_path, false);
 
     /* Warmup: build the graph, plan the arena and preload weights onto
      * the device backend so the first turn only pays compute. */

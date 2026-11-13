@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1491,8 +1492,25 @@ void engine_summary(Engine *en) {
     model_summary(en->model);
 }
 
-/* Print a compact model summary, in the spirit of llama.cpp's CLI. */
-void engine_print_info(Engine *en, Session *s, const char *path) {
+/* Emit one model-info line to stdout or the logger. */
+static void model_info_line(bool use_slog, const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    if (use_slog) {
+        if (buf[0]) slog(INFO, "%s", buf);
+    } else {
+        printf("%s\n", buf);
+    }
+}
+
+/* Print a compact model summary, in the spirit of llama.cpp's CLI.
+ * `use_slog` routes lines through the logger (server); otherwise they
+ * go straight to stdout (chat, which suppresses INFO logs). */
+void engine_print_info(Engine *en, Session *s, const char *path, bool use_slog) {
     Model      *m   = en->model;
     ArchConfig *cfg = &s->cfg;
 
@@ -1503,25 +1521,27 @@ void engine_print_info(Engine *en, Session *s, const char *path) {
         weight_bytes += m->tensor[i].bytes;
     }
 
-    printf("\n");
-    printf("model:       %s\n", path ? path : "-");
-    printf("arch:        %s\n", m->arch_name[0] ? m->arch_name : "unknown");
-    printf("vocab:       %u tokens\n", cfg->n_vocab);
-    printf("context:     %u tokens\n", s->ctx_size);
-    printf("embd:        %u\n", cfg->n_embd);
-    printf("layers:      %u\n", cfg->n_layer);
-    printf("heads:       %u (kv %u, dim %u)\n",
-           cfg->n_head, cfg->n_kv_head, cfg->head_dim);
-    printf("params:      %.2f B\n", (double)n_params / 1e9);
-    printf("size:        %.2f GB (%" PRIu64 " bytes)\n",
-           size_convert(weight_bytes, GB), weight_bytes);
-    printf("tensors:     %" PRIu64 " (alignment %" PRIu64 ")\n",
-           m->n_tensor, m->alignment);
+#define INFO_LINE(...) model_info_line(use_slog, __VA_ARGS__)
+    INFO_LINE("");
+    INFO_LINE("model:       %s", path ? path : "-");
+    INFO_LINE("arch:        %s", m->arch_name[0] ? m->arch_name : "unknown");
+    INFO_LINE("vocab:       %u tokens", cfg->n_vocab);
+    INFO_LINE("context:     %u tokens", s->ctx_size);
+    INFO_LINE("embd:        %u", cfg->n_embd);
+    INFO_LINE("layers:      %u", cfg->n_layer);
+    INFO_LINE("heads:       %u (kv %u, dim %u)",
+              cfg->n_head, cfg->n_kv_head, cfg->head_dim);
+    INFO_LINE("params:      %.2f B", (double)n_params / 1e9);
+    INFO_LINE("size:        %.2f GB (%" PRIu64 " bytes)",
+              size_convert(weight_bytes, GB), weight_bytes);
+    INFO_LINE("tensors:     %" PRIu64 " (alignment %" PRIu64 ")",
+              m->n_tensor, m->alignment);
     if (en->vocab) {
-        printf("tokens:      bos=%d eos=%d\n",
-               en->vocab->bos_id, en->vocab->eos_id);
+        INFO_LINE("tokens:      bos=%d eos=%d",
+                  en->vocab->bos_id, en->vocab->eos_id);
     }
-    printf("\n");
+    INFO_LINE("");
+#undef INFO_LINE
 }
 
 /* Close the engine: shut down the GPU path, free vocab and model. */
