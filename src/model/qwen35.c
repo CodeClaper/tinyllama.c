@@ -8,6 +8,7 @@
 #include "../mm.h"
 #include "../slog.h"
 #include "../tokenizer.h"
+#include "../tool.h"
 #include "../utils.h"
 #include "../graph.h"
 
@@ -644,4 +645,5 @@ const ArchOps qwen35_ops = {
     .chat_prompt       = chatml_prompt,
     .chat_continuation = chatml_continuation,
     .chat_conversation = chatml_conversation,
+    .tools             = &qwen35_tool_ops,
 };

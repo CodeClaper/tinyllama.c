@@ -15,6 +15,7 @@ Tinyllama.c is a tiny and simple local inference engine for LLMs, written in pur
 - Pure C, no external ML frameworks
 - mmap-based zero-copy GGUF v3 model loading
 - OpenAI-compatible chat completions API (`/v1/chat/completions`)
+- OpenAI-style function calling: Qwen3.5 XML (`<tool_call><function=...>`), Qwen2 JSON, and Llama 3.x (`<|python_tag|>`) prompts, `tool_calls` responses, and tool-result history (the API client executes returned calls)
 - Interactive CLI chat with conversation history
 - Inference benchmark with time and throughput statistics
 - Multi-threaded inference via thread pool
@@ -140,6 +141,22 @@ curl http://localhost:8080/v1/chat/completions \
   ]
 }'
 ```
+
+Function tools can be supplied through the OpenAI `tools` and `tool_choice`
+fields. Tool support is selected by the model architecture:
+
+- **Qwen3.5** uses the XML form from its GGUF chat template:
+  `<tool_call><function=name><parameter=key>value</parameter></function></tool_call>`.
+- **Qwen2** uses `<tool_call>{"name":...,"arguments":{...}}</tool_call>`
+  (Hermes-style `to=name` calls are also accepted).
+- **Llama 3.x** uses `<|python_tag|>{"name":...,"parameters":...}` calls.
+
+Calls are returned with `finish_reason: "tool_calls"`. The caller executes the
+function and sends its result back in a subsequent `role: "tool"` message;
+Qwen tool results are rendered back as `<tool_response>` turns, matching each
+model's template. Architectures without a registered tool protocol (currently
+Gemma 3, DeepSeek, Falcon, Falcon-H1) reject tool requests with HTTP 400. The
+server never executes commands or other functions from HTTP requests.
 
 ### Concurrent requests (`-np` / `--parallel`)
 
@@ -267,6 +284,8 @@ Benchmark results on a consumer desktop (12 threads, context 4096, 128 generated
   - http.h
   - tokenizer.c       — Tokenizer (BPE/SPM/WPM)
   - tokenizer.h
+  - tool.c            — Per-architecture function-call parsing/formatting
+  - tool.h
   - sampler.c         — Token sampling
   - sampler.h
   - pthreads.c        — Thread pool

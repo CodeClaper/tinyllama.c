@@ -7,6 +7,7 @@
 #include "../graph.h"
 #include "../slog.h"
 #include "../tokenizer.h"
+#include "../tool.h"
 
 typedef struct {
     float *x;               /* [n_embd] hidden state / residual stream      */
@@ -270,4 +271,5 @@ const ArchOps llama_ops = {
     .chat_prompt       = llama3_chat_prompt,
     .chat_continuation = llama3_chat_continuation,
     .chat_conversation = llama3_conversation,
+    .tools             = &llama3_tool_ops,
 };

@@ -338,7 +338,45 @@ typedef struct GraphNode GraphNode;
 typedef struct {
     const char *role;
     const char *content;
+    const char *end_marker; /* Optional architecture-specific turn ending. */
 } ChatMessage;
+
+#define TOOL_NAME_MAX   128
+#define TOOL_ARGS_MAX   8192
+#define TOOL_MAX_PARAMS 16
+
+/* A function advertised in an OpenAI `tools` request, including the
+ * parameter names needed to repair sloppy model output. */
+typedef struct {
+    char name[TOOL_NAME_MAX];
+    int  n_params;
+    char params[TOOL_MAX_PARAMS][TOOL_NAME_MAX];
+    bool required[TOOL_MAX_PARAMS];
+} ToolDef;
+
+/* A tool call parsed from generated text.  `arguments` is the JSON
+ * object expected by the OpenAI API; parsers normalize XML/JSON forms
+ * into it. */
+typedef struct {
+    bool valid;
+    char name[TOOL_NAME_MAX];
+    char id[64]; /* populated by the server, not the parser */
+    char arguments[TOOL_ARGS_MAX];
+    int  arguments_len;
+} ToolCall;
+
+/* Per-architecture function-calling protocol.  Families whose chat
+ * template and output format are known provide one of these. */
+typedef struct {
+    bool (*parse)(const char *text, int len,
+                  const ToolDef *tools, int n_tools, ToolCall *out);
+    char *(*format_call)(const char *name, const char *arguments);
+    const char *prompt_hint;    /* output-format instructions for the prompt */
+    const char *call_end;       /* token that terminates a call */
+    const char *result_role;    /* role used for tool output turns */
+    const char *result_prefix;  /* optional wrapper around tool output */
+    const char *result_suffix;
+} ToolOps;
 
 typedef struct {
     bool   (*init)              (Session *s);
@@ -356,6 +394,9 @@ typedef struct {
     /* Lays out a complete ordered conversation (system/user/assistant
      * turns) and opens the final assistant turn for generation. */
     int    (*chat_conversation) (Session *s, const ChatMessage *msgs, int n_msgs, u32 *out, int max);
+    /* Function-calling protocol; NULL when the architecture does not
+     * support tools. */
+    const ToolOps *tools;
 } ArchOps;
 
 struct Session {

@@ -55,13 +55,13 @@ else
 endif
 
 OBJS = server.o core.o quants.o mm.o slog.o utils.o el.o anet.o http.o graph.o \
-       tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
+       tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o tool.o \
        model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
        model/falcon_h1.o model/gemma3.o \
        backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
 
 MAIN_OBJS = core.o quants.o mm.o slog.o utils.o graph.o \
-              tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o \
+              tokenizer.o sampler.o pthreads.o kvcache.o rax.o asctx.o linenoise.o tool.o \
               model/llama.o model/qwen25.o model/qwen35.o model/deepseek.o model/falcon.o \
               model/falcon_h1.o model/gemma3.o \
               backend/cpu/cpu.o backend/cpu/cpu_op.o $(GPU_OBJS) $(METAL_OBJS)
@@ -116,19 +116,22 @@ anet.o: anet.c anet.h
 tokenizer.o: tokenizer.c tokenizer.h core.h def.h utils.h
 	$(CC) $(CFLAGS) -c tokenizer.c -o $@
 
+tool.o: tool.c tool.h def.h mm.h
+	$(CC) $(CFLAGS) -c tool.c -o $@
+
 sampler.o: sampler.c sampler.h def.h
 	$(CC) $(CFLAGS) -c sampler.c -o $@
 
 pthreads.o: pthreads.c pthreads.h slog.h
 	$(CC) $(CFLAGS) -c pthreads.c -o $@
 
-model/llama.o: model/llama.c model/model.h def.h
+model/llama.o: model/llama.c model/model.h def.h tool.h
 	$(CC) $(CFLAGS) -c model/llama.c -o $@
 
-model/qwen25.o: model/qwen25.c model/model.h def.h
+model/qwen25.o: model/qwen25.c model/model.h def.h tool.h
 	$(CC) $(CFLAGS) -c model/qwen25.c -o $@
 
-model/qwen35.o: model/qwen35.c model/model.h def.h
+model/qwen35.o: model/qwen35.c model/model.h def.h tool.h
 	$(CC) $(CFLAGS) -c model/qwen35.c -o $@
 
 model/deepseek.o: model/deepseek.c model/model.h def.h

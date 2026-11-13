@@ -8,6 +8,7 @@
 #include "../mm.h"
 #include "../slog.h"
 #include "../tokenizer.h"
+#include "../tool.h"
 #include "../utils.h"
 
 typedef struct {
@@ -296,4 +297,5 @@ const ArchOps qwen25_ops = {
     .chat_prompt       = chatml_prompt,
     .chat_continuation = chatml_continuation,
     .chat_conversation = chatml_conversation,
+    .tools             = &qwen25_tool_ops,
 };

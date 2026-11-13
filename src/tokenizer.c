@@ -452,7 +452,10 @@ int chatml_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
         ADD_TEXT(role);
         ADD(nl_id);
         ADD_TEXT(content);
-        ADD(im_end_id);
+        if (msgs[i].end_marker)
+            ADD_TEXT(msgs[i].end_marker);
+        else
+            ADD(im_end_id);
         ADD(nl_id);
     }
 
@@ -595,7 +598,10 @@ int llama3_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
         ADD(start); ADD_TEXT(role); ADD(end);
         ADD(nl); ADD(nl);
         ADD_TEXT(content);
-        ADD(eot);
+        if (msgs[i].end_marker)
+            ADD_TEXT(msgs[i].end_marker);
+        else
+            ADD(eot);
     }
 
     ADD(start); ADD_TEXT("assistant"); ADD(end);
@@ -735,7 +741,10 @@ int gemma_conversation(Session *s, const ChatMessage *msgs, int n_msgs,
             ADD_TEXT("\n\n", false);
         }
         ADD_TEXT(content, false);
-        ADD(et);
+        if (msgs[i].end_marker)
+            ADD_TEXT(msgs[i].end_marker, false);
+        else
+            ADD(et);
         ADD_TEXT("\n", false);
     }
 

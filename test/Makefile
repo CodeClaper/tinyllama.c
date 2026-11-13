@@ -42,7 +42,7 @@ ifdef METAL
 	METAL_LINK  += metal.o metal_op.o
 endif
 
-all: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
+all: test_pthreads test_utils test_qwen25 test_server_tools $(GPU_TESTS) $(METAL_TESTS)
 
 test_pthreads: c/test_pthreads.c pthreads.o slog.o utils.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS)
@@ -67,6 +67,16 @@ graph.o: $(SRC_DIR)/graph.c $(SRC_DIR)/graph.h $(SRC_DIR)/def.h
 
 test_utils: c/test_utils.c utils.o slog.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
+
+tool.o: $(SRC_DIR)/tool.c $(SRC_DIR)/tool.h $(SRC_DIR)/def.h $(SRC_DIR)/mm.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/tool.c -o $@
+
+test_server_tools: c/test_server_tools.c $(SRC_DIR)/server.c $(SRC_DIR)/http.c \
+                   $(SRC_DIR)/def.h $(SRC_DIR)/tool.h \
+                   $(SRC_DIR)/mm.c $(SRC_DIR)/asctx.c $(SRC_DIR)/slog.c tool.o
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -I$(SRC_DIR) $< \
+	    $(SRC_DIR)/http.c $(SRC_DIR)/mm.c $(SRC_DIR)/asctx.c $(SRC_DIR)/slog.c \
+	    tool.o -Wl,--gc-sections -o $@ $(LDFLAGS)
 
 qwen25.o: $(SRC_DIR)/model/qwen25.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/model/qwen25.c -o $@
@@ -104,7 +114,7 @@ gemma3.o: $(SRC_DIR)/model/gemma3.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 tokenizer.o: $(SRC_DIR)/tokenizer.c $(SRC_DIR)/tokenizer.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/tokenizer.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o falcon_h1.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o tokenizer.o $(GPU_LINK) $(METAL_LINK)
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o falcon_h1.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o tokenizer.o tool.o $(GPU_LINK) $(METAL_LINK)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h
@@ -134,10 +144,11 @@ test_metal: c/test_metal.c metal.o quants.o slog.o utils.o mm.o asctx.o
 
 .PHONY: all check clean
 
-check: test_pthreads test_utils test_qwen25 $(GPU_TESTS) $(METAL_TESTS)
+check: test_pthreads test_utils test_qwen25 test_server_tools $(GPU_TESTS) $(METAL_TESTS)
 	./test_pthreads
 	./test_utils
 	./test_qwen25
+	./test_server_tools
 ifdef GPU
 	./test_gpu
 endif
@@ -146,4 +157,4 @@ ifdef METAL
 endif
 
 clean:
-	rm -f test_pthreads test_qwen25 gpu.o test_gpu metal.o test_metal *.o
+	rm -f test_pthreads test_qwen25 test_server_tools gpu.o test_gpu metal.o test_metal *.o

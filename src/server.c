@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include "anet.h"
 #include "el.h"
 #include <stdio.h>
@@ -28,12 +29,22 @@
 #include "anet.h"
 #include "http.h"
 #include "graph.h"
+#include "tool.h"
 #include "banner.h"
 
 #define JSON_WRAPPER_RESERVE 256 
 #define DEFAULT_N_PARALLEL   1
 #define JOB_QUEUE_CAP        256
 #define MAX_CHAT_MESSAGES    256
+#define MAX_REQUEST_TOOLS    64
+#define MAX_TOOL_ARGUMENTS   TOOL_ARGS_MAX
+
+typedef enum {
+    TOOL_CHOICE_AUTO,
+    TOOL_CHOICE_NONE,
+    TOOL_CHOICE_REQUIRED,
+    TOOL_CHOICE_NAMED
+} ToolChoice;
 
 /* A parsed-but-not-yet-executed request.  The body is copied out of the
  * connection's read buffer so the worker owns it for the whole run. */
@@ -75,6 +86,7 @@ typedef struct  {
 } Server;
 
 static volatile sig_atomic_t g_signal_count = 0;
+static _Atomic unsigned long long g_tool_call_seq = 0;
 static int g_event_fd = -1;
 #ifdef __linux__
 /* Linux uses an eventfd to wake the select loop from the signal handler. */
@@ -155,6 +167,31 @@ static void sse_emit_content(int fd, long created, const char *text, int len) {
         http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
 }
 
+static void sse_emit_tool_call(int fd, long created, const ToolCall *call) {
+    char name[1024];
+    int name_len = json_escape_str(name, sizeof(name) - 1,
+                                   call->name, (int)strlen(call->name));
+    name[name_len] = '\0';
+    char args[MAX_TOOL_ARGUMENTS * 6 + 1];
+    int args_len = json_escape_str(args, sizeof(args) - 1,
+                                   call->arguments, call->arguments_len);
+    args[args_len] = '\0';
+    char buf[MAX_TOOL_ARGUMENTS * 6 + 2048];
+    int n = snprintf(buf, sizeof(buf),
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"default\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"%s\","
+        "\"type\":\"function\",\"function\":{\"name\":\"%s\","
+        "\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"default\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{"
+        "\"arguments\":\"%s\"}}]},\"finish_reason\":null}]}\n\n",
+        created, created, call->id, name, created, created, args);
+    if (n > 0)
+        http_stream_write(fd, buf, n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
+}
+
 static void sse_emit_done(int fd, long created, const char *finish_reason) {
     char buf[512];
     int n = snprintf(buf, sizeof(buf),
@@ -202,6 +239,198 @@ static char *json_object_end(char *p) {
     return NULL;
 }
 
+static char *json_array_end(char *p) {
+    if (!p || *p != '[') return NULL;
+    int depth = 0;
+    while (*p) {
+        if (*p == '"') { p = json_string_end(p); continue; }
+        if (*p == '[') depth++;
+        else if (*p == ']' && --depth == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+static char *json_value_end(char *p) {
+    if (!p) return NULL;
+    if (*p == '"') return json_string_end(p);
+    if (*p == '{') {
+        char *end = json_object_end(p);
+        return end ? end + 1 : NULL;
+    }
+    if (*p == '[') {
+        char *end = json_array_end(p);
+        return end ? end + 1 : NULL;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']' &&
+           *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+    return p;
+}
+
+/* Find a field directly on an object, without matching a nested field of
+ * the same name. */
+static char *json_direct_value(char *object, const char *key) {
+    if (!object || *object != '{') return NULL;
+    char *end = json_object_end(object);
+    if (!end) return NULL;
+    char *p = json_skip_ws(object + 1);
+    while (p < end && *p == '"') {
+        char *key_end = json_string_end(p);
+        if (!key_end || key_end > end) return NULL;
+        size_t key_len = (size_t)(key_end - p - 2);
+        char *value = json_skip_ws(key_end);
+        if (*value != ':') return NULL;
+        value = json_skip_ws(value + 1);
+        char *value_end = json_value_end(value);
+        if (!value_end || value_end > end) return NULL;
+        if (key_len == strlen(key) && memcmp(p + 1, key, key_len) == 0)
+            return value;
+        p = json_skip_ws(value_end);
+        if (*p == ',') p = json_skip_ws(p + 1);
+        else break;
+    }
+    return NULL;
+}
+
+static int request_tools(char *body, ToolDef *tools, int max,
+                         char **raw_tools, int *raw_tools_len) {
+    *raw_tools = NULL;
+    *raw_tools_len = 0;
+    char *array = json_direct_value(body, "tools");
+    if (!array || *array != '[') return 0;
+    char *array_end = json_array_end(array);
+    if (!array_end) return 0;
+    *raw_tools = array;
+    *raw_tools_len = (int)(array_end - array + 1);
+
+    int count = 0;
+    char *p = json_skip_ws(array + 1);
+    while (p < array_end && count < max) {
+        if (*p != '{') break;
+        char *item_end = json_object_end(p);
+        if (!item_end || item_end > array_end) break;
+        char *function = json_direct_value(p, "function");
+        char *name = json_direct_value(function, "name");
+        if (name && *name == '"') {
+            char *name_end = json_string_end(name);
+            int name_len = (int)(name_end - name - 2);
+            if (name_end && name_len > 0 && name_len < TOOL_NAME_MAX) {
+                ToolDef *tool = &tools[count];
+                memset(tool, 0, sizeof(*tool));
+                int decoded = json_unescape(tool->name, name + 1, name_len);
+                tool->name[decoded] = '\0';
+
+                char *params = json_direct_value(function, "parameters");
+                char *props = json_direct_value(params, "properties");
+                if (props && *props == '{') {
+                    char *props_end = json_object_end(props);
+                    char *q = json_skip_ws(props + 1);
+                    while (props_end && q < props_end && *q == '"' &&
+                           tool->n_params < TOOL_MAX_PARAMS) {
+                        char *key_end = json_string_end(q);
+                        if (!key_end || key_end > props_end) break;
+                        int key_len = (int)(key_end - q - 2);
+                        char *colon = json_skip_ws(key_end);
+                        if (colon >= props_end || *colon != ':') break;
+                        char *value = json_skip_ws(colon + 1);
+                        char *value_end = json_value_end(value);
+                        if (!value_end || value_end > props_end) break;
+                        if (key_len > 0 && key_len < TOOL_NAME_MAX) {
+                            int n = tool->n_params++;
+                            int d = json_unescape(tool->params[n],
+                                                  q + 1, key_len);
+                            tool->params[n][d] = '\0';
+                            tool->required[n] = false;
+                        }
+                        q = json_skip_ws(value_end);
+                        if (*q == ',') q = json_skip_ws(q + 1);
+                        else break;
+                    }
+                }
+
+                char *req = json_direct_value(params, "required");
+                if (req && *req == '[') {
+                    char *req_end = json_array_end(req);
+                    char *q = json_skip_ws(req + 1);
+                    while (req_end && q < req_end && *q == '"') {
+                        char *end = json_string_end(q);
+                        if (!end || end > req_end) break;
+                        int len = (int)(end - q - 2);
+                        char required[TOOL_NAME_MAX];
+                        if (len > 0 && len < TOOL_NAME_MAX) {
+                            int d = json_unescape(required, q + 1, len);
+                            required[d] = '\0';
+                            for (int i = 0; i < tool->n_params; i++)
+                                if (strcmp(tool->params[i], required) == 0)
+                                    tool->required[i] = true;
+                        }
+                        q = json_skip_ws(end);
+                        if (*q == ',') q = json_skip_ws(q + 1);
+                        else break;
+                    }
+                }
+                count++;
+            }
+        }
+        p = json_skip_ws(item_end + 1);
+        if (*p == ',') p = json_skip_ws(p + 1);
+        else break;
+    }
+    return count;
+}
+
+static ToolChoice request_tool_choice(char *body, char *name, int name_cap) {
+    char *choice = json_direct_value(body, "tool_choice");
+    if (!choice || (*choice == '"' && strncmp(choice + 1, "auto\"", 5) == 0))
+        return TOOL_CHOICE_AUTO;
+    if (*choice == '"') {
+        if (strncmp(choice + 1, "none\"", 5) == 0) return TOOL_CHOICE_NONE;
+        if (strncmp(choice + 1, "required\"", 9) == 0) return TOOL_CHOICE_REQUIRED;
+        return TOOL_CHOICE_AUTO;
+    }
+    if (*choice == '{') {
+        char *function = json_direct_value(choice, "function");
+        char *field = json_direct_value(function, "name");
+        if (field && *field == '"') {
+            char *end = json_string_end(field);
+            int len = (int)(end - field - 2);
+            if (end && len > 0 && len < name_cap) {
+                int decoded = json_unescape(name, field + 1, len);
+                name[decoded] = '\0';
+                return TOOL_CHOICE_NAMED;
+            }
+        }
+    }
+    return TOOL_CHOICE_AUTO;
+}
+
+static char *tool_prompt_create(const char *raw_tools, int raw_tools_len,
+                                ToolChoice choice, const char *forced_name,
+                                const ToolOps *tool_ops) {
+    static const char before[] =
+        "# Tools\n\nYou have access to the following functions:\n\n<tools>\n";
+    static const char after[] = "\n</tools>\n";
+    const char *hint = (tool_ops && tool_ops->prompt_hint)
+                     ? tool_ops->prompt_hint : "";
+    const char *required = choice == TOOL_CHOICE_REQUIRED
+        ? "You must call one function.\n" : "";
+    char named[256] = "";
+    if (choice == TOOL_CHOICE_NAMED)
+        (void)snprintf(named, sizeof(named), "Call only the function '%s'.\n", forced_name);
+    size_t size = sizeof(before) + sizeof(after) + strlen(hint) +
+                  strlen(required) + strlen(named) +
+                  (size_t)raw_tools_len + 64;
+    char *prompt = smalloc(size);
+    int n = snprintf(prompt, size, "%s%s%s%.*s%s%s",
+                     required, named, before, raw_tools_len, raw_tools,
+                     after, hint);
+    if (n < 0 || (size_t)n >= size) {
+        sfree(prompt);
+        return NULL;
+    }
+    return prompt;
+}
+
 /* Find `key`'s value within the object spanning [start, end). */
 static char *json_object_value(char *start, char *end, const char *key) {
     size_t klen = strlen(key);
@@ -225,7 +454,10 @@ static char *json_object_value(char *start, char *end, const char *key) {
 /* Parse the "messages" array into out[].  role/content are heap
  * allocated and must be released with chat_messages_free().  Returns
  * the number of messages stored (0 when absent/empty). */
-static int json_parse_messages(char *body, ChatMessage *out, int max) {
+static int json_parse_messages(char *body, ChatMessage *out, int max,
+                               const ToolOps *tool_ops) {
+    char latest_call_id[64] = "";
+    char latest_call_name[TOOL_NAME_MAX] = "";
     char *arr = NULL;
     for (char *p = body; (p = strstr(p, "\"messages\"")) != NULL; p += 10) {
         char *q = json_skip_ws(p + 10);
@@ -263,8 +495,138 @@ static int json_parse_messages(char *body, ChatMessage *out, int max) {
             ul = json_unescape(content, cs, cl);
             content[ul] = '\0';
 
+            /* Reconstruct prior assistant tool calls so a client can send
+             * the OpenAI tool result in the next request. */
+            char *calls = json_direct_value(p, "tool_calls");
+            if (tool_ops && tool_ops->format_call &&
+                strcmp(role, "assistant") == 0 && calls && *calls == '[') {
+                char *calls_end = json_array_end(calls);
+                char *cp = json_skip_ws(calls + 1);
+                bool added_call = false;
+                int  first_call = n;
+                while (calls_end && cp < calls_end && n < max && *cp == '{') {
+                    char *call_end = json_object_end(cp);
+                    if (!call_end || call_end > calls_end) break;
+                    char *fn = json_direct_value(cp, "function");
+                    char *name_value = json_direct_value(fn, "name");
+                    char *args_value = json_direct_value(fn, "arguments");
+                    char *id_value = json_direct_value(cp, "id");
+                    if (name_value && *name_value == '"' &&
+                        args_value && *args_value == '"') {
+                        char *name_end = json_string_end(name_value);
+                        char *args_end = json_string_end(args_value);
+                        int name_len = (int)(name_end - name_value - 2);
+                        int args_len = (int)(args_end - args_value - 2);
+                        if (name_end && args_end && name_len > 0 &&
+                            name_len < TOOL_NAME_MAX && args_len >= 0 &&
+                            args_len <= MAX_TOOL_ARGUMENTS) {
+                            char tool_name[TOOL_NAME_MAX];
+                            int decoded_name = json_unescape(tool_name,
+                                name_value + 1, name_len);
+                            tool_name[decoded_name] = '\0';
+                            if (id_value && *id_value == '"') {
+                                char *id_end = json_string_end(id_value);
+                                int id_len = (int)(id_end - id_value - 2);
+                                if (id_end && id_len > 0 &&
+                                    id_len < (int)sizeof(latest_call_id)) {
+                                    int decoded_id = json_unescape(latest_call_id,
+                                        id_value + 1, id_len);
+                                    latest_call_id[decoded_id] = '\0';
+                                    (void)snprintf(latest_call_name,
+                                        sizeof(latest_call_name), "%s", tool_name);
+                                }
+                            }
+                            char *args = smalloc((size_t)args_len + 1);
+                            int decoded_args = json_unescape(args,
+                                args_value + 1, args_len);
+                            args[decoded_args] = '\0';
+                            char *call_text = tool_ops->format_call(tool_name, args);
+                            sfree(args);
+                            if (call_text) {
+                                if (n == first_call && content && content[0]) {
+                                    size_t combined_len = strlen(content) +
+                                                          strlen(call_text) + 3;
+                                    char *combined = smalloc(combined_len);
+                                    (void)snprintf(combined, combined_len,
+                                                   "%s\n\n%s", content, call_text);
+                                    sfree(call_text);
+                                    call_text = combined;
+                                }
+                                out[n].role = sstrdup("assistant");
+                                out[n].content = call_text;
+                                out[n].end_marker = tool_ops->call_end;
+                                n++;
+                                added_call = true;
+                            }
+                        }
+                    }
+                    cp = json_skip_ws(call_end + 1);
+                    if (*cp == ',') cp = json_skip_ws(cp + 1);
+                    else break;
+                }
+                if (added_call) {
+                    sfree(role);
+                    sfree(content);
+                    p = json_skip_ws(end + 1);
+                    if (*p == ',') p = json_skip_ws(p + 1);
+                    continue;
+                }
+            }
+
+            /* Tool results use the architecture's own turn role. */
+            if (strcmp(role, "tool") == 0) {
+                char *name_value = json_direct_value(p, "name");
+                char *call_id_value = json_direct_value(p, "tool_call_id");
+                if (tool_ops && tool_ops->result_role &&
+                    strcmp(tool_ops->result_role, "tool") != 0) {
+                    sfree(role);
+                    role = sstrdup((char *)tool_ops->result_role);
+                    if (tool_ops->result_prefix || tool_ops->result_suffix) {
+                        const char *pre = tool_ops->result_prefix
+                                        ? tool_ops->result_prefix : "";
+                        const char *suf = tool_ops->result_suffix
+                                        ? tool_ops->result_suffix : "";
+                        size_t wrapped_len = strlen(pre) + strlen(content) +
+                                             strlen(suf) + 1;
+                        char *wrapped = smalloc(wrapped_len);
+                        (void)snprintf(wrapped, wrapped_len, "%s%s%s",
+                                       pre, content, suf);
+                        sfree(content);
+                        content = wrapped;
+                    }
+                    name_value = NULL;
+                } else if ((!name_value || *name_value != '"') && call_id_value &&
+                    *call_id_value == '"' && latest_call_id[0]) {
+                    char *id_end = json_string_end(call_id_value);
+                    int id_len = (int)(id_end - call_id_value - 2);
+                    char id[sizeof(latest_call_id)];
+                    if (id_len > 0 && id_len < (int)sizeof(id)) {
+                        int decoded_id = json_unescape(id, call_id_value + 1, id_len);
+                        id[decoded_id] = '\0';
+                        if (strcmp(id, latest_call_id) == 0) {
+                            name_value = NULL;
+                            sfree(role);
+                            role = sstrdup(latest_call_name);
+                        }
+                    }
+                }
+                if (name_value && *name_value == '"') {
+                    char *name_end = json_string_end(name_value);
+                    int name_len = (int)(name_end - name_value - 2);
+                    if (name_end && name_len > 0 && name_len < TOOL_NAME_MAX) {
+                        char *tool_name = smalloc((size_t)name_len + 1);
+                        int decoded = json_unescape(tool_name,
+                            name_value + 1, name_len);
+                        tool_name[decoded] = '\0';
+                        sfree(role);
+                        role = tool_name;
+                    }
+                }
+            }
+
             out[n].role    = role;
             out[n].content = content;
+            out[n].end_marker = NULL;
             n++;
         }
 
@@ -299,9 +661,53 @@ static bool request_max_tokens(char *body, u32 *out) {
 static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     Vocab   *v = engine->vocab;
 
+    const ToolOps *tool_ops = s->ops.tools;
+
     /* 2. Parse the ordered conversation from the JSON body. */
-    ChatMessage msgs[MAX_CHAT_MESSAGES];
-    int n_msgs = json_parse_messages(body, msgs, MAX_CHAT_MESSAGES);
+    ChatMessage msgs[MAX_CHAT_MESSAGES + 1];
+    int n_msgs = json_parse_messages(body, msgs, MAX_CHAT_MESSAGES, tool_ops);
+    ToolDef tools[MAX_REQUEST_TOOLS];
+    char *raw_tools = NULL;
+    int raw_tools_len = 0;
+    int n_tools = request_tools(body, tools, MAX_REQUEST_TOOLS,
+                                &raw_tools, &raw_tools_len);
+    char forced_tool[TOOL_NAME_MAX] = "";
+    ToolChoice tool_choice = request_tool_choice(body, forced_tool,
+                                                  sizeof(forced_tool));
+    bool tools_enabled = n_tools > 0 && tool_choice != TOOL_CHOICE_NONE;
+    if (tool_choice == TOOL_CHOICE_NAMED) {
+        bool found = false;
+        for (int i = 0; i < n_tools; i++)
+            if (strcmp(forced_tool, tools[i].name) == 0) found = true;
+        if (!found) {
+            chat_messages_free(msgs, n_msgs);
+            http_respond(fd, 400, "Bad Request",
+                         "{\"error\":\"tool_choice names an unknown function\"}");
+            close(fd);
+            return;
+        }
+    }
+    if (tools_enabled && !tool_ops) {
+        char err[256];
+        (void)snprintf(err, sizeof(err),
+                       "{\"error\":\"Tool calling is not supported by the "
+                       "%s architecture\"}", engine->model->arch_name);
+        chat_messages_free(msgs, n_msgs);
+        http_respond(fd, 400, "Bad Request", err);
+        close(fd);
+        return;
+    }
+    char *tool_prompt = tools_enabled
+        ? tool_prompt_create(raw_tools, raw_tools_len, tool_choice,
+                             forced_tool, tool_ops)
+        : NULL;
+    if (tools_enabled && !tool_prompt) {
+        chat_messages_free(msgs, n_msgs);
+        http_respond(fd, 500, "Internal Server Error",
+                     "{\"error\":\"Could not construct tool prompt\"}");
+        close(fd);
+        return;
+    }
 
     /* 3. Build chat prompt tokens from every turn, so earlier rounds
      * carried in "messages" are part of the prompt. */
@@ -309,9 +715,42 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     int max_pt = (int)(sizeof(prompt_tokens) / sizeof(prompt_tokens[0]));
     int n_prompt = 0;
 
-    if (n_msgs > 0 && s->ops.chat_conversation)
-        n_prompt = s->ops.chat_conversation(s, msgs, n_msgs,
-                                            prompt_tokens, max_pt);
+    if (n_msgs > 0 && s->ops.chat_conversation) {
+        if (tool_prompt) {
+            /* The Qwen/Llama templates put the tools block inside the
+             * leading system turn, followed by the caller's system text. */
+            ChatMessage prompt_msgs[MAX_CHAT_MESSAGES + 1];
+            int first_nonsys = 0;
+            size_t sys_len = strlen(tool_prompt) + 1;
+            while (first_nonsys < n_msgs && msgs[first_nonsys].role &&
+                   strcmp(msgs[first_nonsys].role, "system") == 0) {
+                if (msgs[first_nonsys].content)
+                    sys_len += strlen(msgs[first_nonsys].content) + 2;
+                first_nonsys++;
+            }
+            char *merged_sys = smalloc(sys_len);
+            size_t used = (size_t)snprintf(merged_sys, sys_len, "%s",
+                                           tool_prompt);
+            for (int i = 0; i < first_nonsys; i++) {
+                if (!msgs[i].content || !msgs[i].content[0]) continue;
+                used += (size_t)snprintf(merged_sys + used, sys_len - used,
+                                         "\n\n%s", msgs[i].content);
+            }
+            prompt_msgs[0].role = "system";
+            prompt_msgs[0].content = merged_sys;
+            prompt_msgs[0].end_marker = NULL;
+            int rest = n_msgs - first_nonsys;
+            if (rest > 0)
+                memcpy(prompt_msgs + 1, msgs + first_nonsys,
+                       (size_t)rest * sizeof(*msgs));
+            n_prompt = s->ops.chat_conversation(s, prompt_msgs, rest + 1,
+                                                prompt_tokens, max_pt);
+            sfree(merged_sys);
+        } else {
+            n_prompt = s->ops.chat_conversation(s, msgs, n_msgs,
+                                                prompt_tokens, max_pt);
+        }
+    }
 
     /* Fallback: bodies with no parseable "messages" array, or an arch
      * without a conversation template. */
@@ -369,11 +808,22 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
             return;
         }
 
+        char *combined_sys = NULL;
+        if (tool_prompt) {
+            size_t sys_len = sys_msg ? strlen(sys_msg) : 0;
+            size_t size = strlen(tool_prompt) + sys_len + 3;
+            combined_sys = smalloc(size);
+            (void)snprintf(combined_sys, size, "%s%s%s", tool_prompt,
+                           sys_len ? "\n\n" : "", sys_msg ? sys_msg : "");
+            sys_msg = combined_sys;
+        }
         n_prompt = s->ops.chat_prompt(s, user_msg, sys_msg,
                                       prompt_tokens, max_pt);
+        sfree(combined_sys);
     }
 
     chat_messages_free(msgs, n_msgs);
+    sfree(tool_prompt);
 
     if (n_prompt == 0) {
         http_respond(fd, 400, "Bad Request",
@@ -420,6 +870,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
 
     /* 5. Generate. */
     bool stream = json_get_bool(body, "stream");
+    bool buffered_stream = stream && tools_enabled;
     char resp_body[65536];
     int  resp_used = 0;
     char utf8_pending[8];
@@ -429,6 +880,10 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     u32 next_token = sample_token(s->logits, s->cfg.n_vocab, &s->sample,
                                     s->tokens, s->n_tokens);
     u32 n_gen = 0;
+    i32 call_token = (tools_enabled && tool_ops && tool_ops->call_end)
+                   ? vocab_lookup(v, tool_ops->call_end)
+                   : (i32)VOCAB_ID_NONE;
+    bool hit_tool_marker = false;
 
     /* The opening <think> is part of the prompt, not the sampled
      * output.  Echo it so clients see the complete reasoning block. */
@@ -436,7 +891,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
                       v->think_start_id != (i32)VOCAB_ID_NONE &&
                       next_token != (u32)v->eos_id;
 
-    if (stream) {
+    if (stream && !buffered_stream) {
         http_stream_start(fd, 200, "OK");
         sse_emit_role(fd, (long)now);
         if (show_think)
@@ -447,10 +902,14 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     }
 
     for (u32 i = 0; i < max_tokens; i++) {
+        if (call_token != (i32)VOCAB_ID_NONE && next_token == (u32)call_token) {
+            hit_tool_marker = true;
+            break;
+        }
         if (next_token == (u32)v->eos_id) break;
         if (next_token < v->n_vocab && v->token[next_token].content) {
             Key *tk = &v->token[next_token];
-            if (stream) {
+            if (stream && !buffered_stream) {
                 char piece[2048];
                 int plen = s->ops.decode
                     ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
@@ -477,7 +936,20 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
                     ? s->ops.decode((const u8 *)tk->content, (int)tk->len,
                                     resp_body + resp_used, remaining)
                     : 0;
-                if (added > 0) resp_used += added;
+                if (added > 0) {
+                    resp_used += added;
+                    resp_body[resp_used] = '\0';
+                    /* Weak models keep generating after the closing tag
+                     * (repeating </tool_call> or rambling), which makes
+                     * the strict parser reject an otherwise valid call.
+                     * Stop as soon as the terminator is complete. */
+                    if (tools_enabled &&
+                        (strstr(resp_body, "</tool_call>") ||
+                         strstr(resp_body, "</function>"))) {
+                        hit_tool_marker = true;
+                        break;
+                    }
+                }
             }
         }
         n_gen++;
@@ -490,20 +962,88 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     }
 
     bool hit_eos = next_token == (u32)v->eos_id;
+    resp_body[resp_used] = '\0';
+
+    /* A model may print the call terminator as text when the vocabulary
+     * lacks it as a special token; strip it before parsing. */
+    int parse_len = resp_used;
+    if (tool_ops && tool_ops->call_end) {
+        int marker_len = (int)strlen(tool_ops->call_end);
+        if (parse_len >= marker_len &&
+            memcmp(resp_body + parse_len - marker_len,
+                   tool_ops->call_end, (size_t)marker_len) == 0)
+            parse_len -= marker_len;
+    }
+    ToolCall tool_call;
+    bool has_tool_call = tools_enabled && tool_ops && tool_ops->parse &&
+        tool_ops->parse(resp_body, parse_len, tools, n_tools, &tool_call);
+    if (has_tool_call) {
+        hit_tool_marker = true;
+        unsigned long long seq = atomic_fetch_add_explicit(
+            &g_tool_call_seq, 1, memory_order_relaxed);
+        (void)snprintf(tool_call.id, sizeof(tool_call.id), "call_%ld_%ld_%llu",
+                       (long)now, (long)getpid(), seq);
+    }
 
     /* 6a. Stream the response as SSE events. */
     if (stream) {
-        if (utf8_pending_len > 0)
-            sse_emit_content(fd, (long)now, utf8_pending, utf8_pending_len);
-        sse_emit_done(fd, (long)now, hit_eos ? "stop" : "length");
+        if (buffered_stream) {
+            http_stream_start(fd, 200, "OK");
+            sse_emit_role(fd, (long)now);
+            if (has_tool_call) {
+                sse_emit_tool_call(fd, (long)now, &tool_call);
+                sse_emit_done(fd, (long)now, "tool_calls");
+            } else {
+                int off = 0;
+                while (off < resp_used) {
+                    int chunk = resp_used - off;
+                    if (chunk > 12000) chunk = 12000;
+                    int complete = utf8_complete_prefix(resp_body + off, chunk);
+                    if (complete == 0) complete = chunk;
+                    sse_emit_content(fd, (long)now, resp_body + off, complete);
+                    off += complete;
+                }
+                sse_emit_done(fd, (long)now,
+                              (hit_eos || hit_tool_marker) ? "stop" : "length");
+            }
+        } else {
+            if (utf8_pending_len > 0)
+                sse_emit_content(fd, (long)now, utf8_pending, utf8_pending_len);
+            sse_emit_done(fd, (long)now,
+                          (hit_eos || hit_tool_marker) ? "stop" : "length");
+        }
         close(fd);
         return;
     }
 
-    resp_body[resp_used] = '\0';
-
     /* 6b. Build OpenAI-compatible JSON response. */
     char json_buf[65536];
+    if (has_tool_call) {
+        char escaped_name[1024];
+        int name_len = json_escape_str(escaped_name, sizeof(escaped_name) - 1,
+                                       tool_call.name, (int)strlen(tool_call.name));
+        escaped_name[name_len] = '\0';
+        char escaped_args[MAX_TOOL_ARGUMENTS * 6 + 1];
+        int args_len = json_escape_str(escaped_args, sizeof(escaped_args) - 1,
+                                       tool_call.arguments,
+                                       tool_call.arguments_len);
+        escaped_args[args_len] = '\0';
+        (void)snprintf(json_buf, sizeof(json_buf),
+            "{\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion\","
+            "\"created\":%ld,\"model\":\"default\",\"choices\":[{"
+            "\"index\":0,\"message\":{\"role\":\"assistant\","
+            "\"content\":null,\"tool_calls\":[{\"id\":\"%s\","
+            "\"type\":\"function\",\"function\":{\"name\":\"%s\","
+            "\"arguments\":\"%s\"}}]},\"finish_reason\":\"tool_calls\"}],"
+            "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%u,"
+            "\"total_tokens\":%d}}",
+            (long)now, (long)now, tool_call.id, escaped_name, escaped_args,
+            n_prompt, n_gen, n_prompt + (int)n_gen);
+        http_respond(fd, 200, "OK", json_buf);
+        close(fd);
+        return;
+    }
+
     /* JSON-escape the generated text.  Reserve 256 bytes for the
      * JSON wrapper so the final snprintf can't overflow json_buf. */
     char escaped[65536 - JSON_WRAPPER_RESERVE];
@@ -533,7 +1073,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
                   "}",
                   (long)now, (long)now,
                   escaped,
-                  hit_eos ? "stop" : "length",
+                  (hit_eos || hit_tool_marker) ? "stop" : "length",
                   n_prompt, n_gen, n_prompt + (int)n_gen);
 
     http_respond(fd, 200, "OK", json_buf);
