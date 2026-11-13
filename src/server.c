@@ -281,6 +281,19 @@ static void chat_messages_free(ChatMessage *msgs, int n) {
     }
 }
 
+/* Resolve the output cap from the request.  max_completion_tokens (the
+ * current OpenAI field) takes precedence over the legacy max_tokens;
+ * absent or 0 keeps the session default.  Returns false for negatives. */
+static bool request_max_tokens(char *body, u32 *out) {
+    long v;
+    if (!json_get_int(body, "max_completion_tokens", &v) &&
+        !json_get_int(body, "max_tokens", &v))
+        return true;
+    if (v < 0) return false;
+    if (v > 0) *out = (u32)v;
+    return true;
+}
+
 /* Execute one request on a worker thread using its dedicated session.
  * `body` is the NUL-terminated HTTP body copied by the reader thread. */
 static void handle_request(Engine *engine, Session *s, int fd, char *body) {
@@ -371,6 +384,16 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
 
     /* 4. Reset session & prefill. */
     s->ops.reset(s);
+
+    /* Output cap: an explicit request value overrides the session
+     * default, but never exceeds the free context. */
+    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
+    if (!request_max_tokens(body, &max_tokens)) {
+        http_respond(fd, 400, "Bad Request",
+                     "{\"error\":\"max_tokens must be >= 0\"}");
+        close(fd);
+        return;
+    }
     /* The batch is appended at the current position; the executor
      * extends the session KV cache. */
     u32 room = s->ctx_size - s->n_tokens;
@@ -391,10 +414,12 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
         close(fd);
         return;
     }
+    /* Prefill consumed part of the context; clamp to what remains. */
+    u32 gen_room = s->ctx_size - s->n_tokens;
+    if (max_tokens > gen_room) max_tokens = gen_room;
 
     /* 5. Generate. */
     bool stream = json_get_bool(body, "stream");
-    u32 max_tokens = s->max_tokens > 0 ? s->max_tokens : 256;
     char resp_body[65536];
     int  resp_used = 0;
     char utf8_pending[8];

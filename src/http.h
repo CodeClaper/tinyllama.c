@@ -15,6 +15,7 @@ typedef enum {
 HttpBodyResult http_read_body(int fd, char **body);
 char *json_get_string(char *json, const char *key, int *len);
 int json_get_bool(char *json, const char *key);
+int json_get_int(char *json, const char *key, long *out);
 int json_unescape(char *dst, const char *src, int len);
 int json_escape_str(char *out, int out_len, const char *in, int in_len);
 void http_respond(int fd, int status, const char *status_msg, const char *body);

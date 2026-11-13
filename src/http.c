@@ -192,6 +192,32 @@ int json_get_bool(char *json, const char *key) {
     return 0;
 }
 
+/* Extract an integer value associated with key.  Returns 1 and stores
+ * the parsed value in *out when the key is present and numeric, else 0. */
+int json_get_int(char *json, const char *key, long *out) {
+    char search[128];
+    int slen = snprintf(search, sizeof(search), "\"%s\"", key);
+    if (slen < 0 || slen >= (int)sizeof(search)) return 0;
+
+    char *pos = json;
+    while ((pos = strstr(pos, search)) != NULL) {
+        pos += slen;
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        if (*pos != ':') continue;
+        pos++;
+        while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r')
+            pos++;
+        if (*pos != '-' && (*pos < '0' || *pos > '9')) continue;
+        char *end = NULL;
+        long v = strtol(pos, &end, 10);
+        if (end == pos) continue;
+        *out = v;
+        return 1;
+    }
+    return 0;
+}
+
 /* Copy src[0..len] to dst, unescaping JSON escape sequences.
  * Returns the number of bytes written (excluding NUL). */
 int json_unescape(char *dst, const char *src, int len) {
