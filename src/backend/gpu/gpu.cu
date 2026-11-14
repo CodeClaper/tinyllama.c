@@ -842,13 +842,14 @@ __device__ static inline float dequant_iq4_xs(const u8 *data, u64 i) {
     u64 bi = i >> 8; u32 o = i & 255;
     const u8 *blk = data + bi * 136;
     float d = f16_to_f32(ld_u16(blk));
-    u32 qh = (blk[2 + (o >> 5)] >> (o & 31)) & 1;
-    u32 ql = (blk[2 + 8 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-    u32 q  = ql | (qh << 4);
-    i8  sc_l = (i8)blk[2 + 8 + 128 + (o >> 4)];
-    i8  sc_h = (i8)blk[2 + 8 + 128 + 16 + (o >> 4)];
-    float sc = (float)(i32)sc_l + ((float)(i32)sc_h / 127.0f);
-    return d * sc * __ldg(&d_iq4_nl_values[q]);
+    u32 ib = o >> 5;
+    u32 j  = o & 31;
+    u32 qb = blk[8 + ib * 16 + (j & 15)];
+    u32 q  = (j < 16) ? (qb & 0xF) : (qb >> 4);
+    u32 sc = (u32)(blk[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xF;
+    sc |= ((u32)(ld_u16(blk + 2) >> (2 * ib)) & 0x3) << 4;
+    float dl = d * (float)((i32)sc - 32);
+    return dl * __ldg(&d_iq4_nl_values[q]);
 }
 
 /* ================================================================
@@ -1375,6 +1376,114 @@ static bool q8_0_gemm_launch(const u8 *w, const float *x, float *y,
     return true;
 }
 
+/* ---- Generic tiled GEMM ----------------------------------------
+ * Type-generic prefill path for every quant format except the
+ * specialised Q8_0 int8 kernel above.  A block stages a dequantised
+ * weight tile and an activation tile in shared memory, then reuses
+ * the weight tile across GPU_TILED_GEMM_BN batch rows.  Without this,
+ * every non-Q8_0 matmul rescanned the full weight matrix once per
+ * batch row during prefill. */
+#define GPU_TILED_GEMM_BM 64
+#define GPU_TILED_GEMM_BN 64
+#define GPU_TILED_GEMM_BK 32
+#define GPU_TILED_GEMM_LD (GPU_TILED_GEMM_BK + 1)
+#define GPU_TILED_GEMM_THREADS 256
+#define GPU_TILED_GEMM_MIN_BATCH 16
+
+template<int TYPE>
+__global__ void matmul_kernel_tiled(const u8 *__restrict__ w,
+                                    const float *__restrict__ x,
+                                    float *__restrict__ y,
+                                    u64 rows, u64 cols, u64 batch,
+                                    bool trans) {
+    __shared__ __align__(16) float sw[GPU_TILED_GEMM_BM][GPU_TILED_GEMM_LD];
+    __shared__ __align__(16) float sx[GPU_TILED_GEMM_BN][GPU_TILED_GEMM_LD];
+
+    const u32 tid  = threadIdx.x;
+    const u64 row0 = (u64)blockIdx.x * GPU_TILED_GEMM_BM;
+    const u64 bat0 = (u64)blockIdx.y * GPU_TILED_GEMM_BN;
+
+    const u32 tm = tid >> 4;
+    const u32 tn = tid & 15u;
+    const u64 mbase = row0 + (u64)tm * 4u;
+    const u64 nbase = bat0 + (u64)tn * 4u;
+
+    float acc[4][4];
+    #pragma unroll
+    for (int i = 0; i < 4; i++)
+        #pragma unroll
+        for (int j = 0; j < 4; j++)
+            acc[i][j] = 0.0f;
+
+    for (u64 k0 = 0; k0 < cols; k0 += GPU_TILED_GEMM_BK) {
+        for (u32 t = tid; t < GPU_TILED_GEMM_BM * GPU_TILED_GEMM_BK;
+             t += GPU_TILED_GEMM_THREADS) {
+            const u32 m  = t / GPU_TILED_GEMM_BK;
+            const u32 kk = t & (GPU_TILED_GEMM_BK - 1);
+            const u64 r  = row0 + m;
+            const u64 k  = k0 + kk;
+            if (r < rows && k < cols) {
+                const u64 idx = trans ? (k * rows + r) : (r * cols + k);
+                sw[m][kk] = dequant_one_t<TYPE>(w, idx);
+            } else {
+                sw[m][kk] = 0.0f;
+            }
+        }
+
+        for (u32 t = tid; t < GPU_TILED_GEMM_BN * GPU_TILED_GEMM_BK;
+             t += GPU_TILED_GEMM_THREADS) {
+            const u32 n  = t / GPU_TILED_GEMM_BK;
+            const u32 kk = t & (GPU_TILED_GEMM_BK - 1);
+            const u64 nb = bat0 + n;
+            const u64 k  = k0 + kk;
+            sx[n][kk] = (nb < batch && k < cols)
+                      ? x[nb * cols + k] : 0.0f;
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (u32 kk = 0; kk < GPU_TILED_GEMM_BK; kk++) {
+            float wv[4], xv[4];
+            #pragma unroll
+            for (int i = 0; i < 4; i++)
+                wv[i] = sw[tm * 4 + i][kk];
+            #pragma unroll
+            for (int j = 0; j < 4; j++)
+                xv[j] = sx[tn * 4 + j][kk];
+            #pragma unroll
+            for (int i = 0; i < 4; i++)
+                #pragma unroll
+                for (int j = 0; j < 4; j++)
+                    acc[i][j] = fmaf(wv[i], xv[j], acc[i][j]);
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; i++)
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            u64 m = mbase + (u64)i;
+            u64 n = nbase + (u64)j;
+            if (m < rows && n < batch)
+                y[n * rows + m] = acc[i][j];
+        }
+}
+
+template<int TYPE>
+static bool tiled_gemm_launch(const u8 *w, const float *x, float *y,
+                              u64 rows, u64 cols, u64 batch, bool trans) {
+    if (batch < GPU_TILED_GEMM_MIN_BATCH || rows == 0 || cols == 0)
+        return false;
+
+    dim3 grid((unsigned)((rows + GPU_TILED_GEMM_BM - 1) / GPU_TILED_GEMM_BM),
+              (unsigned)((batch + GPU_TILED_GEMM_BN - 1) / GPU_TILED_GEMM_BN));
+    matmul_kernel_tiled<TYPE><<<grid, GPU_TILED_GEMM_THREADS>>>(
+        w, x, y, rows, cols, batch, trans);
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 /* ================================================================
  * Host-side plumbing
  * ================================================================ */
@@ -1607,6 +1716,10 @@ static void matmul_launch(const u8 *w, const float *x, float *y,
             return;
         }
     }
+
+    if (tiled_gemm_launch<TYPE>(w, x, y, rows, cols, batch, trans))
+        return;
+
     if constexpr (TYPE == GGUF_TYPE_IQ4_NL) {
         if (!trans && cols % 32 == 0) {
             u64 groups = (rows + 31) / 32;   /* 8 warps * 4 rows */

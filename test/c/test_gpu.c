@@ -169,14 +169,15 @@ static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
 
 /* Whether the non-transposed matvec takes an int8 __dp4a path for this
  * type/column count (mirrors matmul_launch in gpu.cu). */
-static bool uses_dp4a(u32 type, u64 cols, u64 batch) {
+static bool uses_dp4a(u32 type, u64 cols, u64 batch, bool trans) {
+    if (trans) return false;
     if (type == GGUF_TYPE_Q8_0) {
         if (batch == 1) return cols % 32 == 0;
         if (batch >= 8) return cols % 32 == 0;
         return cols % 128 == 0;
     }
     if (type == GGUF_TYPE_Q4_K)
-        return cols % 256 == 0;
+        return batch < 16 && cols % 256 == 0;
     return false;
 }
 
@@ -195,7 +196,7 @@ static int check_matmul(TensorInfo *ti, u64 rows, u64 cols,
 
     const float *xe = x;
     float *xq = NULL;
-    if (!trans && uses_dp4a(ti->type, cols, batch)) {
+    if (!trans && uses_dp4a(ti->type, cols, batch, trans)) {
         xq = malloc(nx * sizeof(float));
         for (u64 b = 0; b < batch; b++) {
             for (u64 blk = 0; blk < cols / 32; blk++) {
@@ -272,7 +273,7 @@ static int check_decode_identity(TensorInfo *ti, u64 rows, u64 cols) {
      * mapping/decode errors rather than the intentional rounding. */
     const float *xe = x;
     float *xq = NULL;
-    if (uses_dp4a(ti->type, cols, 1)) {
+    if (uses_dp4a(ti->type, cols, 1, false)) {
         xq = malloc(cols * sizeof(float));
         for (u64 blk = 0; blk < cols / 32; blk++) {
             const float *src = x + blk * 32;
@@ -352,6 +353,19 @@ static int run_type(u32 type, u64 be, u64 bb) {
         bad = check_matmul(&ti, rows, cols, false, 3);
         if (bad)
             printf("  [%s %llux%llu] matmat: %d mismatches\n",
+                   type_name(type), (unsigned long long)rows,
+                   (unsigned long long)cols, bad);
+
+        bad = check_matmul(&ti, rows, cols, false, 16);
+        if (bad)
+            printf("  [%s %llux%llu] tiled matmat: %d mismatches\n",
+                   type_name(type), (unsigned long long)rows,
+                   (unsigned long long)cols, bad);
+        fails += bad;
+
+        bad = check_matmul(&ti, cols, rows, true, 16);
+        if (bad)
+            printf("  [%s %llux%llu] tiled matmat trans: %d mismatches\n",
                    type_name(type), (unsigned long long)rows,
                    (unsigned long long)cols, bad);
 

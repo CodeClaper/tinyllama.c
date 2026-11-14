@@ -687,12 +687,16 @@ static void scalar_block_iq2_s(const u8 *data, float *out) {
 
 static void scalar_block_iq4_xs(const u8 *data, float *out) {
     float d = f16_to_f32(*(const u16 *)data);
-    for (u32 o = 0; o < 256; o++) {
-        u32 qh = (data[2 + (o >> 5)] >> (o & 31)) & 1;
-        u32 ql = (data[10 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-        i8  sc_l = (i8)data[10 + 128 + (o >> 4)];
-        i8  sc_h = (i8)data[10 + 128 + 16 + (o >> 4)];
-        out[o] = d * ((float)(i32)sc_l + ((float)(i32)sc_h / 127.0f)) * iq4_nl_values[ql | (qh << 4)];
+    u32 sh = (u32)data[2] | ((u32)data[3] << 8);
+    for (u32 ib = 0; ib < 8; ib++) {
+        u32 sc = (u32)(data[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xF;
+        sc |= ((sh >> (2 * ib)) & 0x3) << 4;
+        float dl = d * (float)((i32)sc - 32);
+        for (u32 j = 0; j < 16; j++) {
+            u32 qb = data[8 + ib * 16 + j];
+            out[ib * 32 + j]      = dl * iq4_nl_values[qb & 0xF];
+            out[ib * 32 + j + 16] = dl * iq4_nl_values[qb >> 4];
+        }
     }
 }
 

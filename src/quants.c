@@ -626,13 +626,14 @@ static inline float dequant_iq4_xs(const u8 *data, u64 i) {
     u64 bi = i >> 8; u32 o = i & 255;
     const u8 *blk = data + bi * 136;
     float d = f16_to_f32(*(const u16 *)blk);
-    u32 qh = (blk[2 + (o >> 5)] >> (o & 31)) & 1;
-    u32 ql = (blk[2 + 8 + (o >> 1)] >> ((o & 1) << 2)) & 0xF;
-    u32 q  = ql | (qh << 4);
-    i8  sc_l = (i8)blk[2 + 8 + 128 + (o >> 4)];
-    i8  sc_h = (i8)blk[2 + 8 + 128 + 16 + (o >> 4)];
-    float sc = (float)(i32)sc_l + ((float)(i32)sc_h / 127.0f);
-    return d * sc * iq4_nl_values[q];
+    u32 ib = o >> 5;
+    u32 j  = o & 31;
+    u32 qb = blk[8 + ib * 16 + (j & 15)];
+    u32 q  = (j < 16) ? (qb & 0xF) : (qb >> 4);
+    u32 sc = (u32)(blk[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xF;
+    sc |= ((u32)(*(const u16 *)(blk + 2) >> (2 * ib)) & 0x3) << 4;
+    float dl = d * (float)((i32)sc - 32);
+    return dl * iq4_nl_values[q];
 }
 
 /* ---- Dispatcher --------------------------------------------------- */
