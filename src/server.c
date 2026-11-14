@@ -24,12 +24,10 @@
 #include "utils.h"
 #include "mm.h"
 #include "core.h"
-#include "tokenizer.h"
 #include "sampler.h"
 #include "anet.h"
 #include "http.h"
 #include "graph.h"
-#include "tool.h"
 #include "banner.h"
 
 #define JSON_WRAPPER_RESERVE 256 
