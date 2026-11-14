@@ -14,6 +14,7 @@
 
 #include "../../def.h"
 #include "../../core.h"
+#include "../../kvcache.h"
 #include "../../mm.h"
 #include "../../slog.h"
 #include "cpu.h"
@@ -984,14 +985,23 @@ static bool op_attn(OpCtx *c) {
     u32 gqa    = n_head / n_kv;
     u32 hs     = akc->cap * khd;   /* stride between heads */
 
+    KvRadixCache *radix = (KvRadixCache *)c->g->plan->radix;
+    u32 *slots = NULL;
+    if (radix) {
+        if (radix->req.len < c->pos + c->n) return false;
+        slots = radix->req.slots;
+    }
+
     /* K/V write-through (head-major: [head][pos][dim]). */
     for (u32 i = 0; i < c->n; i++) {
+        u32 slot = slots ? slots[c->pos + i] : c->pos + i;
+        if (slot >= akc->cap) return false;
         const float *kr = kd + (u64)i * c->kv_dim;
         const float *vr = vd + (u64)i * c->kv_dim;
         for (u32 h = 0; h < n_kv; h++) {
-            memcpy(akc->k + (u64)h * hs + (u64)(c->pos + i) * khd,
+            memcpy(akc->k + (u64)h * hs + (u64)slot * khd,
                    kr + (u64)h * khd, (size_t)khd * sizeof(float));
-            memcpy(akc->v + (u64)h * hs + (u64)(c->pos + i) * khd,
+            memcpy(akc->v + (u64)h * hs + (u64)slot * khd,
                    vr + (u64)h * khd, (size_t)khd * sizeof(float));
         }
     }
@@ -1011,20 +1021,42 @@ static bool op_attn(OpCtx *c) {
             u32 start = (win && n_keys > win) ? n_keys - win : 0;
             u32 n_vis = n_keys - start;
 
-            /* Scores = K-block [n_vis × khd] (contiguous per head) @ qh.
-             * SIMD matrix-vector dot, then apply the 1/sqrt(kv_head_dim)
-             * scale once to the whole score vector. */
-            mul_mat_vec(c->scr, kh_base + (u64)start * khd, qh, n_vis, khd);
-            for (u32 t = 0; t < n_vis; t++)
-                c->scr[t] *= c->scale;
+            if (slots) {
+                for (u32 t = 0; t < n_vis; t++) {
+                    u32 slot = slots[start + t];
+                    if (slot >= akc->cap) return false;
+                    const float *kr = kh_base + (u64)slot * khd;
+                    float sum = 0.0f;
+                    for (u32 d = 0; d < khd; d++)
+                        sum += kr[d] * qh[d];
+                    c->scr[t] = sum * c->scale;
+                }
+            } else {
+                /* Scores = K-block [n_vis × khd] (contiguous per head) @ qh.
+                 * SIMD matrix-vector dot, then apply the 1/sqrt(kv_head_dim)
+                 * scale once to the whole score vector. */
+                mul_mat_vec(c->scr, kh_base + (u64)start * khd, qh, n_vis, khd);
+                for (u32 t = 0; t < n_vis; t++)
+                    c->scr[t] *= c->scale;
+            }
             softmax(c->scr, n_vis);
 
             float *oh = c->dst + (u64)qi * c->q_dim + (u64)h * hd;
-            float *vt = vh_base + (u64)start * khd;
-            for (u32 t = 0; t < n_vis; t++, vt += khd) {
-                float st = c->scr[t];
-                for (u32 d = 0; d < khd; d++)
-                    oh[d] += st * vt[d];
+            if (slots) {
+                for (u32 t = 0; t < n_vis; t++) {
+                    u32 slot = slots[start + t];
+                    float st = c->scr[t];
+                    const float *vt = vh_base + (u64)slot * khd;
+                    for (u32 d = 0; d < khd; d++)
+                        oh[d] += st * vt[d];
+                }
+            } else {
+                float *vt = vh_base + (u64)start * khd;
+                for (u32 t = 0; t < n_vis; t++, vt += khd) {
+                    float st = c->scr[t];
+                    for (u32 d = 0; d < khd; d++)
+                        oh[d] += st * vt[d];
+                }
             }
         }
     }

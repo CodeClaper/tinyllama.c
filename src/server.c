@@ -832,8 +832,12 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
         return;
     }
 
-    /* 4. Reset session & prefill. */
-    s->ops.reset(s);
+    /* 4. Reset/restore session state and reuse the cached token prefix. */
+    GraphKvPlan kv = graph_kv_prepare(s, prompt_tokens, (u32)n_prompt);
+    u32 reused = kv.matched;
+    u32 start = kv.resume;
+    s->n_tokens = start;
+    u32 n_prefill = (u32)n_prompt - start;
 
     /* Output cap: an explicit request value overrides the session
      * default, but never exceeds the free context. */
@@ -847,7 +851,7 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     /* The batch is appended at the current position; the executor
      * extends the session KV cache. */
     u32 room = s->ctx_size - s->n_tokens;
-    if (n_prompt > (int)room) {
+    if (n_prefill > room) {
         char err[256];
         (void)snprintf(err, sizeof(err),
                        "{\"error\":\"Context length exceeded: prompt is %d tokens, "
@@ -858,7 +862,34 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
         return;
     }
     double t_prefill = time_sec();
-    bool ok = n_prompt > 0 && graph_execute(s, prompt_tokens, (u32)n_prompt, s->logits);
+    bool ok = true;
+    bool stateful = graph_state_bytes(s) > 0;
+    if (stateful) {
+        u32 matched = kv.matched;
+        u32 last = (u32)n_prompt - 1;
+        if (start < matched) {
+            ok = graph_execute(s, prompt_tokens + start, matched - start,
+                               s->logits);
+            start = matched;
+            if (ok) graph_kv_checkpoint(s);
+        } else if (ok && start > 0 && start == matched) {
+            graph_kv_checkpoint(s);
+        }
+        if (ok && start < last) {
+            ok = graph_execute(s, prompt_tokens + start, last - start,
+                               s->logits);
+            start = last;
+            if (ok) graph_kv_checkpoint(s);
+        } else if (ok && start == last && last > 0) {
+            graph_kv_checkpoint(s);
+        }
+        if (ok && start < (u32)n_prompt)
+            ok = graph_execute(s, prompt_tokens + start,
+                               (u32)n_prompt - start, s->logits);
+    } else {
+        ok = n_prefill > 0 &&
+             graph_execute(s, prompt_tokens + start, n_prefill, s->logits);
+    }
     if (!ok) {
         http_respond(fd, 500, "Internal Server Error",
                      "{\"error\":\"Forward pass failed\"}");
@@ -969,11 +1000,12 @@ static void handle_request(Engine *engine, Session *s, int fd, char *body) {
     bool hit_eos = next_token == (u32)v->eos_id;
     resp_body[resp_used] = '\0';
 
-    double prompt_tps = prefill_dt > 0.0 ? (double)n_prompt / prefill_dt : 0.0;
+    double prompt_tps = prefill_dt > 0.0 ? (double)n_prefill / prefill_dt : 0.0;
     double gen_tps    = gen_dt > 0.0 ? (double)n_gen / gen_dt : 0.0;
-    slog(INFO, "Inference: prompt %d tokens, %.1f tok/s (%.1f ms); "
+    double cache_hit  = n_prompt > 0 ? 100.0 * (double)reused / (double)n_prompt : 0.0;
+    slog(INFO, "Inference: prompt %d tokens (%u cached, %.1f%% hit), %.1f tok/s (%.1f ms); "
          "generation %u tokens, %.1f tok/s (%.1f ms); TTFT %.1f ms",
-         n_prompt, prompt_tps, prefill_dt * 1000.0,
+         n_prompt, reused, cache_hit, prompt_tps, prefill_dt * 1000.0,
          n_gen, gen_tps, gen_dt * 1000.0, ttft_ms);
 
     /* A model may print the call terminator as text when the vocabulary

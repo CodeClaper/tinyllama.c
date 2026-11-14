@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include "graph.h"
 #include "core.h"
+#include "kvcache.h"
 #include "mm.h"
 #include "model/model.h"
 #include "slog.h"
@@ -66,18 +67,6 @@ static int op_stat_class(GraphOp op) {
 /* ---------------------------------------------------------------- *
  * Operators
  * ---------------------------------------------------------------- */
-
-/* Grow a dynamic array, doubling capacity when full. */
-static bool grow(void **arr, u32 *cap, u32 need, size_t rec) {
-    if (*cap >= need) return true;
-    u32 nc = *cap ? *cap * 2 : 16;
-    if (nc < need) nc = need;
-    void *p = srealloc(*arr, (size_t)nc * rec);
-    if (!p) return false;
-    *arr = p;
-    *cap = nc;
-    return true;
-}
 
 /* Append a node; output shapes are derived at execution time.
  * src[]   = source nodes, weights[] = per-source weight tensors,
@@ -351,12 +340,71 @@ GraphNode *graph_mamba2_scan(Graph *g, GraphNode *conv, GraphNode *proj,
 
 /* Caller-owned state buffers.  The graph only borrows the pointer, so the
  * owner (the arch workspace) keeps control of allocation and reset. */
-u32 graph_state(Graph *g, void *ptr) {
+u32 graph_state(Graph *g, void *ptr, size_t bytes, BackendType backend) {
     if (!g || !ptr) return GRAPH_STATE_NONE;
-    if (!grow((void **)&g->state, &g->state_cap, g->n_state + 1, sizeof(void *)))
-        return GRAPH_STATE_NONE;
+    if (g->n_state == g->state_cap) {
+        u32 cap = g->state_cap ? g->state_cap * 2 : 16;
+        g->state = srealloc(g->state, (size_t)cap * sizeof(void *));
+        g->state_size = srealloc(g->state_size, (size_t)cap * sizeof(size_t));
+        g->state_backend = srealloc(g->state_backend,
+                                    (size_t)cap * sizeof(BackendType));
+        g->state_cap = cap;
+    }
     g->state[g->n_state] = ptr;
+    g->state_size[g->n_state] = bytes;
+    g->state_backend[g->n_state] = backend;
     return g->n_state++;
+}
+
+size_t graph_state_bytes(Session *s) {
+    Graph *g = s ? s->graph : NULL;
+    if (!g) return 0;
+    size_t total = 0;
+    for (u32 i = 0; i < g->n_state; i++)
+        total += g->state_size[i];
+    return total;
+}
+
+bool graph_state_save(Session *s, void *dst, size_t cap) {
+    Graph *g = s ? s->graph : NULL;
+    if (!g || !dst || cap < graph_state_bytes(s)) return false;
+    u8 *p = (u8 *)dst;
+    for (u32 i = 0; i < g->n_state; i++) {
+        size_t bytes = g->state_size[i];
+        if (!bytes) continue;
+#if defined(GPU_BUILD)
+        if (g->state_backend[i] == BACKEND_CUDA) {
+            if (cudaMemcpy(p, g->state[i], bytes, cudaMemcpyDeviceToHost)
+                != cudaSuccess) return false;
+            p += bytes;
+            continue;
+        }
+#endif
+        memcpy(p, g->state[i], bytes);
+        p += bytes;
+    }
+    return true;
+}
+
+bool graph_state_load(Session *s, const void *src, size_t len) {
+    Graph *g = s ? s->graph : NULL;
+    if (!g || !src || len < graph_state_bytes(s)) return false;
+    const u8 *p = (const u8 *)src;
+    for (u32 i = 0; i < g->n_state; i++) {
+        size_t bytes = g->state_size[i];
+        if (!bytes) continue;
+#if defined(GPU_BUILD)
+        if (g->state_backend[i] == BACKEND_CUDA) {
+            if (cudaMemcpy(g->state[i], p, bytes, cudaMemcpyHostToDevice)
+                != cudaSuccess) return false;
+            p += bytes;
+            continue;
+        }
+#endif
+        memcpy(g->state[i], p, bytes);
+        p += bytes;
+    }
+    return true;
 }
 
 GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v,
@@ -456,7 +504,11 @@ void graph_free(Graph *g) {
         g->plan = NULL;
     }
     sfree(g->state);   /* borrowed pointers only: targets outlive us */
+    sfree(g->state_size);
+    sfree(g->state_backend);
     g->state = NULL;
+    g->state_size = NULL;
+    g->state_backend = NULL;
     for (GraphNode *n = g->head; n; ) {
         GraphNode *next = n->next;
         sfree(n);
@@ -741,6 +793,23 @@ static bool cache_build_mla_kvcache(Graph *g, Session *s) {
     return true;
 }
 
+static bool arch_can_rewind(const Session *s) {
+    if (!s || !s->en || !s->en->model) return false;
+    switch (s->en->model->arch) {
+        case ARCH_LLAMA:
+        case ARCH_QWEN2:
+        case ARCH_FALCON:
+        case ARCH_GEMMA3:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool arch_uses_radix(const Session *s) {
+    return arch_can_rewind(s) || graph_state_bytes((Session *)s) > 0;
+}
+
 /* Standard attention: allocate K/V only for layers that actually
  * carry an OP_ATTN node (Qwen3.5 is hybrid, so most layers have no
  * KV cache at all), and place each layer's cache on the backend
@@ -787,6 +856,18 @@ static bool cache_build_attn_kvcache(Graph *g, Session *s) {
         kc->std[l].v   = (float *)base[b]; base[b] += bytes;
         kc->std[l].cap = s->ctx_size;
     }
+
+    bool stateful = graph_state_bytes(s) > 0;
+    bool all_cpu = arch_uses_radix(s);
+    for (u32 l = 0; l < c->n_layer && all_cpu; l++)
+        if (used[l] && lb[l] != BACKEND_CPU) all_cpu = false;
+    if (all_cpu && stateful && s->n_gpu_layers != 0)
+        all_cpu = false;
+    if (all_cpu) {
+        p->radix = kv_cache_create(s, kc, s->ctx_size);
+        if (!p->radix)
+            slog(WARN, "KV radix cache disabled: allocation failed");
+    }
     return true;
 }
 
@@ -818,6 +899,8 @@ static bool cache_build(Graph *g, Session *s) {
 static void cache_destroy(GraphPlan *p) {
     KvCache *kc = p->cache;
     if (!kc) return;
+    kv_cache_destroy((KvRadixCache *)p->radix);
+    p->radix = NULL;
     if (kc->is_mla) sfree(kc->mla);
     else            sfree(kc->std);
     sfree(kc);
@@ -1292,6 +1375,12 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
         }
     }
 
+    if ((!s->graph->plan || !s->graph->plan->ready) &&
+        !graph_plan(s->graph, s)) {
+        slog(WARN, "graph_execute: arena / KV plan failed");
+        return false;
+    }
+
     u32 pos = s->n_tokens;
     if ((u64)pos + n_tokens > s->ctx_size) {
         slog(WARN, "graph_execute: batch of %u at pos %u exceeds ctx_size=%u",
@@ -1303,11 +1392,16 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
         return false;
     }
 
+    KvRadixCache *radix = (KvRadixCache *)s->graph->plan->radix;
     u32 done = 0;
     while (done < n_tokens) {
         u32 chunk = n_tokens - done;
         if (chunk > s->n_ubatch) chunk = s->n_ubatch;
         memcpy(s->tokens + pos + done, tokens + done, (size_t)chunk * sizeof(u32));
+        if (radix && !kv_cache_append(radix, s->tokens, pos + done, chunk)) {
+            slog(WARN, "graph_execute: KV slot allocation failed");
+            return false;
+        }
         GraphBatch batch = {
             .tokens = s->tokens + pos + done,
             .pos    = pos + done,
@@ -1324,6 +1418,45 @@ bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits) {
         memcpy(logits, s->logits, (size_t)s->cfg.n_vocab * sizeof(float));
 
     return true;
+}
+
+GraphKvPlan graph_kv_prepare(Session *s, const u32 *tokens, u32 n) {
+    GraphKvPlan plan = {0};
+    if (!s || !tokens || n == 0) return plan;
+
+    bool stateful = graph_state_bytes(s) > 0;
+    GraphPlan *p = s->graph ? s->graph->plan : NULL;
+    KvRadixCache *c = p ? (KvRadixCache *)p->radix : NULL;
+
+    u32 matched = 0;
+    if (c) {
+        matched = kv_cache_match(c, tokens, n);
+    } else if (s->tokens && s->n_tokens) {
+        u32 limit = s->n_tokens < n ? s->n_tokens : n;
+        while (matched < limit && s->tokens[matched] == tokens[matched]) matched++;
+    }
+    plan.matched = matched;
+
+    if (stateful && matched == s->n_tokens && n > matched) {
+        plan.resume = matched;
+        plan.continuation = true;
+        return plan;
+    }
+
+    s->ops.reset(s);
+
+    if (stateful) {
+        plan.resume = c ? kv_cache_restore(c, matched, n, NULL) : 0;
+    } else if (arch_can_rewind(s)) {
+        plan.resume = matched == 0 ? 0 : (matched < n ? matched : matched - 1);
+    }
+    return plan;
+}
+
+void graph_kv_checkpoint(Session *s) {
+    if (!s || !s->graph || !s->graph->plan) return;
+    KvRadixCache *c = (KvRadixCache *)s->graph->plan->radix;
+    if (c) (void)kv_cache_checkpoint(c, s->n_tokens);
 }
 
 /* Build + plan + preload up front.  graph_execute() does all of this

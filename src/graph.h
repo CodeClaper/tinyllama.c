@@ -75,13 +75,32 @@ GraphNode *graph_mamba2_scan(Graph *g, GraphNode *conv, GraphNode *proj,
                              u32 state, u32 n_head, u32 head_dim,
                              u32 d_state, u32 n_group, u32 d_inner);
 GraphNode *graph_attn(Graph *g, GraphNode *q, GraphNode *k, GraphNode *v, u32 layer, u32 window);
-u32 graph_state(Graph *g, void *ptr);
+u32 graph_state(Graph *g, void *ptr, size_t bytes, BackendType backend);
+
+/* Generic checkpointing of every buffer registered with graph_state(). */
+size_t graph_state_bytes(Session *s);
+bool   graph_state_save(Session *s, void *dst, size_t cap);
+bool   graph_state_load(Session *s, const void *src, size_t len);
 
 /* Runs tokens through the graph, splitting batches larger than
  * Session.n_ubatch into micro-batches.  Generates the execution plan
  * (arena slot layout) once: node->data pointers are baked into the graph
  * and any n <= n_ubatch reuses the slots. */
 bool graph_execute(Session *s, const u32 *tokens, u32 n_tokens, float *logits);
+
+/* Prefix-cache preparation for a new request.  `matched` is the longest
+ * resident prefix; `resume` is where the forward pass may start after
+ * restoring the best recurrent-state checkpoint. */
+typedef struct {
+    u32  matched;
+    u32  resume;
+    bool continuation;
+} GraphKvPlan;
+
+GraphKvPlan graph_kv_prepare(Session *s, const u32 *tokens, u32 n);
+
+/* Snapshot the current recurrent state at the current position. */
+void graph_kv_checkpoint(Session *s);
 
 /* Build the graph (if needed), generate the execution plan and preload
  * every weight onto the device backend.  Call once at startup so the

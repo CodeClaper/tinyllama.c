@@ -62,8 +62,14 @@ mm.o: $(SRC_DIR)/mm.c $(SRC_DIR)/mm.h $(SRC_DIR)/def.h $(SRC_DIR)/asctx.h
 asctx.o: $(SRC_DIR)/asctx.c $(SRC_DIR)/asctx.h $(SRC_DIR)/def.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/asctx.c -o $@
 
-graph.o: $(SRC_DIR)/graph.c $(SRC_DIR)/graph.h $(SRC_DIR)/def.h
+graph.o: $(SRC_DIR)/graph.c $(SRC_DIR)/graph.h $(SRC_DIR)/def.h $(SRC_DIR)/kvcache.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/graph.c -o $@
+
+kvcache.o: $(SRC_DIR)/kvcache.c $(SRC_DIR)/kvcache.h $(SRC_DIR)/def.h $(SRC_DIR)/rax.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/kvcache.c -o $@
+
+rax.o: $(SRC_DIR)/rax.c $(SRC_DIR)/rax.h
+	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/rax.c -o $@
 
 test_utils: c/test_utils.c utils.o slog.o mm.o asctx.o
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
@@ -86,7 +92,7 @@ quants.o: $(SRC_DIR)/quants.c $(SRC_DIR)/quants.h $(SRC_DIR)/def.h
 cpu.o: $(SRC_DIR)/backend/cpu/cpu.c $(SRC_DIR)/backend/cpu/cpu.h $(SRC_DIR)/backend/cpu/cpu_arm.c $(SRC_DIR)/backend/cpu/cpu_x86.c $(SRC_DIR)/def.h $(SRC_DIR)/quants.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/backend/cpu/cpu.c -o $@
 
-cpu_op.o: $(SRC_DIR)/backend/cpu/cpu_op.c $(SRC_DIR)/backend/cpu/cpu_op.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h $(SRC_DIR)/mm.h $(SRC_DIR)/slog.h
+cpu_op.o: $(SRC_DIR)/backend/cpu/cpu_op.c $(SRC_DIR)/backend/cpu/cpu_op.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h $(SRC_DIR)/kvcache.h $(SRC_DIR)/mm.h $(SRC_DIR)/slog.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/backend/cpu/cpu_op.c -o $@
 
 llama.o: $(SRC_DIR)/model/llama.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
@@ -107,7 +113,7 @@ gemma3.o: $(SRC_DIR)/model/gemma3.c $(SRC_DIR)/model/model.h $(SRC_DIR)/def.h
 tokenizer.o: $(SRC_DIR)/tokenizer.c $(SRC_DIR)/tokenizer.h $(SRC_DIR)/def.h $(SRC_DIR)/core.h
 	$(CC) $(CFLAGS) -I$(SRC_DIR) -c $(SRC_DIR)/tokenizer.c -o $@
 
-test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o falcon_h1.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o tokenizer.o tool.o $(GPU_LINK) $(METAL_LINK)
+test_qwen25: c/test_qwen25.c qwen25.o qwen35.o llama.o deepseek.o falcon.o falcon_h1.o gemma3.o core.o quants.o cpu.o cpu_op.o pthreads.o mm.o asctx.o slog.o utils.o graph.o kvcache.o rax.o tokenizer.o tool.o $(GPU_LINK) $(METAL_LINK)
 	$(CC) $(CFLAGS) -I$(SRC_DIR) $^ -o $@ $(LDFLAGS) -lm
 
 gpu.o: $(SRC_DIR)/backend/gpu/gpu.cu $(SRC_DIR)/backend/gpu/gpu.h $(SRC_DIR)/def.h

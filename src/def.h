@@ -504,6 +504,7 @@ typedef struct GraphPlan {
     size_t      arena_size[BACKEND_COUNT];
     size_t      weights_size[BACKEND_COUNT];
     KvCache     *cache;         /* KV cache descriptors (host)          */
+    void        *radix;         /* optional KvRadixCache prefix index   */
     void        *cache_arena[BACKEND_COUNT]; /* KV float storage      */
     size_t      kvcache_size[BACKEND_COUNT];
     bool        ready;          /* plan + arenas + KV + warmup done     */
@@ -523,6 +524,8 @@ typedef struct Graph {
      * handle graph_state() returns, which ops bake into params[].
      * Borrowed only — graph_free() never frees the targets. */
     void        **state;
+    size_t       *state_size;   /* bytes per registered state buffer */
+    BackendType  *state_backend;
     u32         n_state;
     u32         state_cap;
 } Graph;

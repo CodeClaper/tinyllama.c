@@ -453,8 +453,12 @@ static Graph *qwen35_graph_build(Session *s, u32 n_tokens) {
             }
 
             /* Borrow the per-layer conv ring + recurrent state. */
-            u32 conv_st = graph_state(g, ws->conv_state[l]);
-            u32 ssm_st  = graph_state(g, ws->ssm_state[l]);
+            BackendType sb = graph_layer_backend(s, l);
+            u64 conv_bytes = (u64)(ws->conv_kernel - 1) * ws->ssm_fused *
+                             sizeof(float);
+            u64 ssm_bytes  = (u64)n_v * hd_v * hd_v * sizeof(float);
+            u32 conv_st = graph_state(g, ws->conv_state[l], conv_bytes, sb);
+            u32 ssm_st  = graph_state(g, ws->ssm_state[l], ssm_bytes, sb);
             if (conv_st == GRAPH_STATE_NONE || ssm_st == GRAPH_STATE_NONE) goto fail;
 
             /* Fused QKV → conv → SiLU (reference: conv → silu → split). */

@@ -343,8 +343,13 @@ static Graph *falcon_h1_graph_build(Session *s, u32 n_tokens) {
         GraphNode *proj = graph_mul_mat(g, n, t_in, fh1_mm_trans(t_in, proj_dim, n_embd));
         if (proj == GRAPH_NODE_NONE) goto fail;
 
-        u32 conv_st = graph_state(g, ws->conv_state[l]);
-        u32 ssm_st  = graph_state(g, ws->ssm_state[l]);
+        BackendType sb = graph_layer_backend(s, l);
+        u64 conv_bytes = (u64)(ws->ssm_conv_kernel - 1) * ws->ssm_conv_dim *
+                         sizeof(float);
+        u64 ssm_bytes  = (u64)ws->ssm_n_head * ws->ssm_head_dim *
+                         ws->ssm_d_state * sizeof(float);
+        u32 conv_st = graph_state(g, ws->conv_state[l], conv_bytes, sb);
+        u32 ssm_st  = graph_state(g, ws->ssm_state[l], ssm_bytes, sb);
         if (conv_st == GRAPH_STATE_NONE || ssm_st == GRAPH_STATE_NONE) goto fail;
 
         GraphNode *cv = graph_mamba2_conv(g, proj, t_conv, t_cb, conv_st,
