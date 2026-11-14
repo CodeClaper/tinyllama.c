@@ -170,8 +170,11 @@ static double ref_dot(TensorInfo *ti, u64 rows, u64 cols,
 /* Whether the non-transposed matvec takes an int8 __dp4a path for this
  * type/column count (mirrors matmul_launch in gpu.cu). */
 static bool uses_dp4a(u32 type, u64 cols, u64 batch) {
-    if (type == GGUF_TYPE_Q8_0)
-        return batch == 1 ? cols % 32 == 0 : cols % 128 == 0;
+    if (type == GGUF_TYPE_Q8_0) {
+        if (batch == 1) return cols % 32 == 0;
+        if (batch >= 8) return cols % 32 == 0;
+        return cols % 128 == 0;
+    }
     if (type == GGUF_TYPE_Q4_K)
         return cols % 256 == 0;
     return false;
@@ -507,6 +510,34 @@ MU_TEST(test_bad_dims) {
     free(buf);
 }
 
+/* Q8_0 batched GEMM path: weight-tiled prefill with row/batch tails. */
+MU_TEST(test_q8_0_gemm) {
+    static const u64 gemm_shapes[][2] = {
+        {64, 256}, {300, 256}, {37, 512}, {130, 768}, {65, 160}
+    };
+    static const u64 gemm_batches[] = { 8, 37, 64, 70 };
+    const TypeGeom *g = geom_for(GGUF_TYPE_Q8_0);
+    mu_assert(g != NULL, "Q8_0 geometry missing");
+    int fails = 0;
+    for (u64 s = 0; s < sizeof(gemm_shapes) / sizeof(gemm_shapes[0]); s++) {
+        u64 rows = gemm_shapes[s][0], cols = gemm_shapes[s][1];
+        u8 *buf;
+        TensorInfo ti;
+        make_tensor(g->type, g->be, g->bb, rows, cols, &buf, &ti);
+        for (u64 b = 0; b < sizeof(gemm_batches) / sizeof(gemm_batches[0]); b++) {
+            u64 batch = gemm_batches[b];
+            int bad = check_matmul(&ti, rows, cols, false, batch);
+            if (bad)
+                printf("  [Q8_0 %llux%llu batch=%llu] gemm: %d mismatches\n",
+                       (unsigned long long)rows, (unsigned long long)cols,
+                       (unsigned long long)batch, bad);
+            fails += bad;
+        }
+        free(buf);
+    }
+    mu_assert_int_eq(0, fails);
+}
+
 static void all_tests(void) {
     if (!gpu_available()) {
         printf("test_gpu requires a CUDA device (build with GPU=1)\n");
@@ -529,6 +560,7 @@ static void all_tests(void) {
     MU_RUN_TEST(test_smem_perf);
     MU_RUN_TEST(test_cache_hit);
     MU_RUN_TEST(test_bad_dims);
+    MU_RUN_TEST(test_q8_0_gemm);
 }
 
 int main(void) {
