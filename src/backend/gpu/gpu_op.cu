@@ -408,6 +408,53 @@ __global__ void k_ssm_conv(const float *__restrict__ src, float *__restrict__ ds
     }
 }
 
+/* Batched causal conv1d.  One thread per (row, channel): every output
+ * reads its ck-1 history samples either from the chunk source (when
+ * the window has entered the current chunk) or from the pre-chunk
+ * state ring.  This replaces the single-block row loop used for
+ * decode. */
+__global__ void k_ssm_conv_batch(const float *__restrict__ src,
+                                 float *__restrict__ dst,
+                                 const float *__restrict__ cw,
+                                 const float *__restrict__ state,
+                                 u32 od, u32 ck, u32 r, u32 base) {
+    u64 idx = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    u64 total = (u64)r * od;
+    if (idx >= total) return;
+    u32 p = (u32)(idx / od);
+    u32 c = (u32)(idx - (u64)p * od);
+
+    float sum = 0.0f;
+    for (u32 k = 0; k < ck; k++) {
+        float x;
+        if (p + k >= ck - 1) {
+            u32 sp = p - (ck - 1) + k;
+            x = src[((u64)base + sp) * od + c];
+        } else {
+            x = state[(u64)(p + k) * od + c];
+        }
+        sum += x * cw[(u64)c * ck + k];
+    }
+    dst[(u64)p * od + c] = sum;
+}
+
+/* Advance the conv ring after a batch: keep the last ck-1 raw input
+ * rows, combining the old ring and the new chunk when r < ck-1. */
+__global__ void k_ssm_conv_state(const float *__restrict__ src,
+                                 float *__restrict__ state,
+                                 u32 od, u32 ck, u32 r, u32 base) {
+    u32 c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= od) return;
+    for (u32 s = 0; s + 1 < ck; s++) {
+        if (r + s >= ck - 1) {
+            u32 sp = r - (ck - 1) + s;
+            state[(u64)s * od + c] = src[((u64)base + sp) * od + c];
+        } else {
+            state[(u64)s * od + c] = state[(u64)(r + s) * od + c];
+        }
+    }
+}
+
 /* ---- OP_SSM_DELTA ----------------------------------------------
  * One block per value head, launched once per batch row (the state
  * advances sequentially).  Each block:
@@ -483,6 +530,96 @@ __global__ void k_ssm_delta(const float *__restrict__ fused_row,
     } else if (tid < (int)hd) {
         dst_row[(u64)grp * hd + tid] = out;
     }
+}
+
+/* Prefill variant of OP_SSM_DELTA: one launch per layer instead of one
+ * per token.  Each block owns one value head and keeps its [hd x hd]
+ * state in shared memory while looping over the chunk, so the state
+ * never round-trips through global memory per token.  Thread j owns
+ * column j, exactly like k_ssm_delta. */
+__global__ void k_ssm_delta_batch(const float *__restrict__ fused,
+                                  const float *__restrict__ alpha,
+                                  const float *__restrict__ beta,
+                                  const float *__restrict__ a_log,
+                                  const float *__restrict__ dt_bias,
+                                  const float *__restrict__ nw,
+                                  float *__restrict__ state,
+                                  float *__restrict__ dst,
+                                  u32 n_v, u32 n_k, u32 hd, u32 r,
+                                  u32 base, float eps) {
+    extern __shared__ float sm[];
+    float *S   = sm;
+    float *q   = S + (u64)hd * hd;
+    float *k   = q + hd;
+    float *red = k + hd;
+
+    const u32 grp = blockIdx.x;
+    const int tid = threadIdx.x;
+    const u32 kh  = grp % n_k;
+    const u64 d2  = (u64)hd * hd;
+    const u32 key_dim = n_k * hd;
+    const u64 val_dim = (u64)n_v * hd;
+    const u64 fstride = 2 * (u64)key_dim + val_dim;
+    float *Sg = state + (u64)grp * d2;
+
+    for (u64 i = tid; i < d2; i += blockDim.x) S[i] = Sg[i];
+    __syncthreads();
+
+    for (u32 p = 0; p < r; p++) {
+        const float *fr = fused + ((u64)base + p) * fstride;
+        const float *Qg = fr + (u64)kh * hd;
+        const float *Kg = fr + key_dim + (u64)kh * hd;
+        const float *Vg = fr + 2 * (u64)key_dim + (u64)grp * hd;
+        const float av = alpha[((u64)base + p) * n_v + grp];
+        const float bv = beta[((u64)base + p) * n_v + grp];
+
+        float g = expf(a_log[grp] * ((av + dt_bias[grp] > 20.0f)
+                                         ? (av + dt_bias[grp])
+                                         : log1pf(expf(av + dt_bias[grp]))));
+        float b = 1.0f / (1.0f + expf(-bv));
+
+        float vq = Qg[tid];
+        float vk = Kg[tid];
+        float vv = Vg[tid];
+
+        float ss = block_sum(vq * vq, red, tid, blockDim.x);
+        vq *= 1.0f / sqrtf(ss + eps);
+        ss = block_sum(vk * vk, red, tid, blockDim.x);
+        vk *= 1.0f / sqrtf(ss + eps);
+        vq *= 1.0f / sqrtf((float)hd);
+        q[tid] = vq;
+        k[tid] = vk;
+        __syncthreads();
+
+        float *col = S + tid;
+        float mem = 0.0f;
+        for (u32 i = 0; i < hd; i++, col += hd) {
+            float sv = *col * g;
+            *col = sv;
+            mem += sv * k[i];
+        }
+        float delta = (vv - mem) * b;
+
+        col = S + tid;
+        float out = 0.0f;
+        for (u32 i = 0; i < hd; i++, col += hd) {
+            float sv = *col + k[i] * delta;
+            *col = sv;
+            out += sv * q[i];
+        }
+
+        if (nw) {
+            float os = block_sum(out * out, red, tid, blockDim.x);
+            dst[(u64)p * val_dim + (u64)grp * hd + tid] =
+                out * (1.0f / sqrtf(os / (float)hd + eps)) * nw[tid];
+        } else {
+            dst[(u64)p * val_dim + (u64)grp * hd + tid] = out;
+        }
+        __syncthreads();
+    }
+
+    __syncthreads();
+    for (u64 i = tid; i < d2; i += blockDim.x) Sg[i] = S[i];
 }
 
 /* ---- OP_ATTN ---------------------------------------------------
@@ -711,12 +848,25 @@ static bool gpu_op_ssm_conv(OpCtx *c) {
     float *state = (float *)c->g->state[st];
     const float *cw = gpu_op_weight_f32(c->node->weights[0]);
     if (!state || !cw) return false;
-    /* Sequential over rows: one block owns the whole batch. */
+    if (c->r > 1) {
+        u64 total = (u64)c->r * c->od;
+        u32 blocks = (u32)((total + GPU_OP_THREADS - 1) / GPU_OP_THREADS);
+        k_ssm_conv_batch<<<blocks, GPU_OP_THREADS>>>(
+            op_src(c, 0), c->dst, cw, state, c->od, ck, c->r, c->base);
+        CHECK(cudaGetLastError());
+        u32 sblocks = (c->od + GPU_OP_THREADS - 1) / GPU_OP_THREADS;
+        k_ssm_conv_state<<<sblocks, GPU_OP_THREADS>>>(
+            op_src(c, 0), state, c->od, ck, c->r, c->base);
+        CHECK(cudaGetLastError());
+        return true;
+    }
     k_ssm_conv<<<1, GPU_OP_THREADS>>>(op_src(c, 0), c->dst, cw, state,
                                       c->od, ck, c->r, c->base);
     CHECK(cudaGetLastError());
     return true;
 }
+
+static size_t g_ssm_batch_shmem = 0;
 
 static bool gpu_op_ssm_delta(OpCtx *c) {
     u32 st = op_param(c, 0), n_v = op_param(c, 1);
@@ -739,6 +889,26 @@ static bool gpu_op_ssm_delta(OpCtx *c) {
     const float *fused = op_src(c, 0);
     const float *alpha = op_src(c, 1);
     const float *beta  = op_src(c, 2);
+
+    if (c->r > 1 && bd == hd && (hd % 32) == 0 && hd <= 128) {
+        size_t bsh = ((size_t)hd * hd + 2 * (size_t)hd + 32) * sizeof(float);
+        if (bsh > g_ssm_batch_shmem) {
+            if (cudaFuncSetAttribute(k_ssm_delta_batch,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    (int)bsh) == cudaSuccess)
+                g_ssm_batch_shmem = bsh;
+            else
+                (void)cudaGetLastError();
+        }
+        if (bsh <= g_ssm_batch_shmem) {
+            k_ssm_delta_batch<<<n_v, hd, bsh>>>(
+                fused, alpha, beta, a_log, dt_bi, nw, state, c->dst,
+                n_v, n_k, hd, c->r, c->base, DEFAULT_EPS);
+            CHECK(cudaGetLastError());
+            return true;
+        }
+    }
+
     for (u32 p = 0; p < c->r; p++) {
         k_ssm_delta<<<n_v, bd, shmem>>>(
             fused + ((u64)c->base + p) * fstride,
