@@ -12,10 +12,13 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <mma.h>
 #include <stdlib.h>
 
 #include "../../def.h"
 #include "gpu.h"
+
+namespace wmma = nvcuda::wmma;
 
 extern "C" {
 /* Scalar reference dequant, used only by the CPU fallback paths. */
@@ -1376,6 +1379,151 @@ static bool q8_0_gemm_launch(const u8 *w, const float *x, float *y,
     return true;
 }
 
+/* ---- Q8_0 INT8 tensor-core GEMM --------------------------------
+ * Each block computes a 64x64 output tile with 16 warps, one
+ * 16x16 WMMA tile each.  The batch dimension is grid.x so the batch
+ * tiles for one row tile run consecutively and share the same weight
+ * stream through L2.  Two m16n16k16 s8 MMAs cover one Q8_0 block
+ * (K = 32); the int32 result is rescaled by d_weight * d_activation
+ * per block before it joins the float accumulator. */
+#define GPU_Q8_TC_BM 64
+#define GPU_Q8_TC_BN 64
+#define GPU_Q8_TC_THREADS 512
+#define GPU_Q8_TC_MIN_BATCH 16
+
+__global__ void matmul_kernel_q8_0_tc(const u8 *__restrict__ w,
+                                      const i8 *__restrict__ xq,
+                                      const float *__restrict__ xd,
+                                      float *__restrict__ y,
+                                      u64 rows, u64 cols, u64 batch) {
+    __shared__ __align__(16) i8 sA[GPU_Q8_TC_BM][32];
+    __shared__ __align__(16) i8 sB[GPU_Q8_TC_BN][32];
+    __shared__ float sdw[GPU_Q8_TC_BM];
+    __shared__ float sdx[GPU_Q8_TC_BN];
+
+    const u32 tid  = threadIdx.x;
+    const u32 warp = tid >> 5;
+    const u32 lane = tid & 31;
+    const u32 wm   = warp & 3;
+    const u32 wn   = warp >> 2;
+    const u64 row0 = (u64)blockIdx.y * GPU_Q8_TC_BM;
+    const u64 bat0 = (u64)blockIdx.x * GPU_Q8_TC_BN;
+    const u64 nblk = cols / 32;
+
+    float acc[8];
+    #pragma unroll
+    for (int j = 0; j < 8; j++) acc[j] = 0.0f;
+
+    for (u64 kb = 0; kb < nblk; kb++) {
+        {
+            const u32 m = tid >> 3;
+            const u32 q = tid & 7;
+            const u64 r = row0 + m;
+            u32 v = 0;
+            if (r < rows) {
+                const u8 *blk = w + (r * nblk + kb) * 34;
+                v = ld_u32(blk + 2 + q * 4);
+            }
+            ((u32 *)sA[m])[q] = v;
+        }
+        {
+            const u32 n = tid >> 3;
+            const u32 q = tid & 7;
+            const u64 bn = bat0 + n;
+            u32 v = 0;
+            if (bn < batch)
+                v = *(const u32 *)(xq + bn * cols + kb * 32 + q * 4);
+            ((u32 *)sB[n])[q] = v;
+        }
+        if (tid < GPU_Q8_TC_BM) {
+            const u64 r = row0 + tid;
+            sdw[tid] = (r < rows)
+                     ? f16_to_f32(ld_u16(w + (r * nblk + kb) * 34))
+                     : 0.0f;
+        } else if (tid < GPU_Q8_TC_BM + GPU_Q8_TC_BN) {
+            const u32 n = tid - GPU_Q8_TC_BM;
+            const u64 bn = bat0 + n;
+            sdx[n] = (bn < batch) ? xd[bn * nblk + kb] : 0.0f;
+        }
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, signed char,
+                       wmma::row_major> a0, a1;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, signed char,
+                       wmma::col_major> b0, b1;
+        wmma::fragment<wmma::accumulator, 16, 16, 16, int> cf;
+
+        wmma::fill_fragment(cf, 0);
+        wmma::load_matrix_sync(a0, &sA[wm * 16][0], 32);
+        wmma::load_matrix_sync(a1, &sA[wm * 16][16], 32);
+        wmma::load_matrix_sync(b0, &sB[wn * 16][0], 32);
+        wmma::load_matrix_sync(b1, &sB[wn * 16][16], 32);
+        wmma::mma_sync(cf, a0, b0, cf, false);
+        wmma::mma_sync(cf, a1, b1, cf, false);
+
+        const int grp = (int)(lane >> 2);
+        const int tig = (int)(lane & 3);
+        #pragma unroll
+        for (int j = 0; j < 8; j++) {
+            const int rm = grp + ((j & 2) ? 8 : 0);
+            const int rn = tig * 2 + (j & 1) + ((j & 4) ? 8 : 0);
+            acc[j] += (float)cf.x[j] * sdw[wm * 16 + rm] * sdx[wn * 16 + rn];
+        }
+        __syncthreads();
+    }
+
+    const int grp = (int)(lane >> 2);
+    const int tig = (int)(lane & 3);
+    #pragma unroll
+    for (int j = 0; j < 8; j++) {
+        const int rm = grp + ((j & 2) ? 8 : 0);
+        const int rn = tig * 2 + (j & 1) + ((j & 4) ? 8 : 0);
+        const u64 gm = row0 + wm * 16 + (u64)rm;
+        const u64 gn = bat0 + wn * 16 + (u64)rn;
+        if (gm < rows && gn < batch)
+            y[gn * rows + gm] = acc[j];
+    }
+}
+
+static bool q8_0_tc_gemm_launch(const u8 *w, const float *x, float *y,
+                                u64 rows, u64 cols, u64 batch, bool trans) {
+    if (trans || batch < GPU_Q8_TC_MIN_BATCH || rows == 0 || cols == 0 ||
+        (cols % GPU_Q8_BLOCK_ELEMS) != 0)
+        return false;
+
+    static int tc_ok = -1;
+    if (tc_ok < 0) {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess)
+            tc_ok = (prop.major > 7 || (prop.major == 7 && prop.minor >= 5));
+        else {
+            (void)cudaGetLastError();
+            tc_ok = 0;
+        }
+    }
+    if (!tc_ok) return false;
+
+    const u64 nblk = cols / GPU_Q8_BLOCK_ELEMS;
+    const u64 nblk_total = batch * nblk;
+    if (nblk_total > 0xFFFFFFFFull)
+        return false;
+    if (!q8_0_scratch_reserve(batch * cols, nblk_total))
+        return false;
+
+    const unsigned qthreads = 256;
+    const unsigned qblocks  = (unsigned)((nblk_total + 7) / 8);
+    quantize_q8_0_kernel<<<qblocks, qthreads>>>(x, g_q8_x, g_q8_d,
+                                                (u32)nblk_total);
+    CHECK(cudaGetLastError());
+
+    dim3 grid((unsigned)((batch + GPU_Q8_TC_BN - 1) / GPU_Q8_TC_BN),
+              (unsigned)((rows + GPU_Q8_TC_BM - 1) / GPU_Q8_TC_BM));
+    matmul_kernel_q8_0_tc<<<grid, GPU_Q8_TC_THREADS>>>(
+        w, g_q8_x, g_q8_d, y, rows, cols, batch);
+    CHECK(cudaGetLastError());
+    return true;
+}
+
 /* ---- Generic tiled GEMM ----------------------------------------
  * Type-generic prefill path for every quant format except the
  * specialised Q8_0 int8 kernel above.  A block stages a dequantised
@@ -1699,6 +1847,9 @@ static void matmul_launch(const u8 *w, const float *x, float *y,
          * cooperate on each output row.  This is the hot path for the
          * Qwen3.5 / Qwen2.5 Q8_0 models. */
         if (q8_0_mmvq_launch(w, x, y, rows, cols, batch, trans))
+            return;
+
+        if (q8_0_tc_gemm_launch(w, x, y, rows, cols, batch, trans))
             return;
 
         if (q8_0_gemm_launch(w, x, y, rows, cols, batch, trans))
